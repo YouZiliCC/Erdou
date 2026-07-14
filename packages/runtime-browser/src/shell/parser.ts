@@ -6,11 +6,6 @@ import type { Command, List, ListItem, ListOp, Pipeline } from "./ast.js";
 export function parse(src: string): List {
   const tokens = tokenize(src);
   let background = false;
-  const last = tokens[tokens.length - 1];
-  if (last && last.type === "op" && last.value === "&") {
-    background = true;
-    tokens.pop();
-  }
 
   let pos = 0;
   const peek = (): Token | undefined => tokens[pos];
@@ -56,11 +51,18 @@ export function parse(src: string): List {
       const pipeline = parsePipeline();
       items.push({ pipeline, op });
       const t = peek();
-      if (t && t.type === "op" && (t.value === "&&" || t.value === "||" || t.value === ";")) {
-        op = t.value;
+      if (
+        t &&
+        t.type === "op" &&
+        (t.value === "&&" || t.value === "||" || t.value === ";" || t.value === "&")
+      ) {
+        // '&' backgrounds the list; in this round it sequences like ';'.
+        if (t.value === "&") background = true;
+        op = t.value === "&" ? ";" : t.value;
         pos++;
         if (pos >= tokens.length) {
-          if (t.value === ";") break; // a trailing ';' just terminates
+          // A trailing ';' or '&' just terminates the list.
+          if (t.value === ";" || t.value === "&") break;
           throw new ErrnoError("EINVAL", { syscall: "parse", path: "dangling operator" });
         }
       } else {

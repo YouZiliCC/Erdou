@@ -42,9 +42,10 @@ export class ErrnoError extends Error {
 
   constructor(code: Errno, opts: ErrnoOptions = {}) {
     const desc = DESCRIPTIONS[code];
+    const hasPath = opts.path !== undefined;
     const tail = opts.syscall
-      ? `, ${opts.syscall}${opts.path ? ` '${opts.path}'` : ""}`
-      : opts.path
+      ? `, ${opts.syscall}${hasPath ? ` '${opts.path}'` : ""}`
+      : hasPath
         ? ` '${opts.path}'`
         : "";
     super(`${code}: ${desc}${tail}`);

@@ -19,7 +19,8 @@ export const ls: Program = async (ctx) => {
     for (const entry of entries) {
       if (long) {
         const st = ctx.vfs.lstat(joinPath(target, entry.name));
-        ctx.stdout.write(`${entry.type[0]} ${st.mode.toString(8)} ${st.size} ${entry.name}\n`);
+        const t = entry.type === "directory" ? "d" : entry.type === "symlink" ? "l" : "-";
+        ctx.stdout.write(`${t} ${st.mode.toString(8)} ${st.size} ${entry.name}\n`);
       } else {
         ctx.stdout.write(entry.name + "\n");
       }

@@ -7,6 +7,16 @@ function joinPath(dir: string, name: string): string {
   return dir === "/" ? "/" + name : dir + "/" + name;
 }
 
+/** Relative path from `from` to `to` (both absolute, normalized). */
+function relativePath(from: string, to: string): string {
+  const f = split(from);
+  const t = split(to);
+  let i = 0;
+  while (i < f.length && i < t.length && f[i] === t[i]) i++;
+  const parts = [...f.slice(i).map(() => ".."), ...t.slice(i)];
+  return parts.length === 0 ? "." : parts.join("/");
+}
+
 /** Expand a glob pattern against the filesystem. Returns matching paths, in the
  *  same relativity as the pattern. If nothing matches, returns the literal
  *  pattern (POSIX default). */
@@ -22,7 +32,10 @@ function expandGlob(vfs: Vfs, cwd: string, pattern: string): string[] {
     for (const dir of candidates) {
       if (!vfs.exists(dir) || vfs.stat(dir).type !== "directory") continue;
       if (re) {
+        // A leading dot must be matched explicitly (POSIX): `*` doesn't match dotfiles.
+        const includeDot = seg.startsWith(".");
         for (const entry of vfs.readdir(dir)) {
+          if (!includeDot && entry.name.startsWith(".")) continue;
           if (re.test(entry.name)) next.push(joinPath(dir, entry.name));
         }
       } else {
@@ -36,8 +49,7 @@ function expandGlob(vfs: Vfs, cwd: string, pattern: string): string[] {
   if (candidates.length === 0) return [pattern];
   candidates.sort();
   if (absolute) return candidates;
-  const prefix = cwd === "/" ? 1 : cwd.length + 1;
-  return candidates.map((p) => p.slice(prefix));
+  return candidates.map((p) => relativePath(cwd, p));
 }
 
 /**

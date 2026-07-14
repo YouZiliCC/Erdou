@@ -31,8 +31,16 @@ export class IndexedDbSnapshotStore implements SnapshotStore {
       return await new Promise<T>((resolve, reject) => {
         const tx = db.transaction(STORE, mode);
         const request = run(tx.objectStore(STORE));
-        request.onsuccess = () => resolve(request.result);
+        let result: T;
+        request.onsuccess = () => {
+          result = request.result;
+        };
         request.onerror = () => reject(request.error);
+        // Resolve on transaction completion so a write is only reported as
+        // success after it has actually committed.
+        tx.oncomplete = () => resolve(result);
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error ?? new Error("IndexedDB transaction aborted"));
       });
     } finally {
       db.close();

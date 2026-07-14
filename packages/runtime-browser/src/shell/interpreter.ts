@@ -1,11 +1,12 @@
 import { ErrnoError } from "@erdou/runtime-contract";
+import type { Signal } from "@erdou/runtime-contract";
 import { parse } from "./parser.js";
 import { expandWord } from "./expand.js";
 import type { Command, Pipeline } from "./ast.js";
 import { PipeStream } from "../core/byte-stream.js";
 import { join, normalize } from "../vfs/path.js";
 import type { Vfs } from "../vfs/vfs.js";
-import type { ProcessTable, InternalSpawnOptions } from "../process/process-table.js";
+import type { ProcessTable, InternalSpawnOptions, ProcessRecord } from "../process/process-table.js";
 
 const resolveAbs = (cwd: string, p: string): string =>
   p.startsWith("/") ? normalize(p) : join(cwd, p);
@@ -24,6 +25,8 @@ export interface ShellResult {
   stdout: PipeStream;
   stderr: PipeStream;
   wait(): Promise<number>;
+  /** Kill every process this execution spawned. */
+  kill(signal?: Signal): void;
 }
 
 export interface ShellDeps {
@@ -55,9 +58,10 @@ export class Shell {
   execute(src: string): ShellResult {
     const stdout = new PipeStream();
     const stderr = new PipeStream();
+    const records: ProcessRecord[] = [];
     const wait = (async (): Promise<number> => {
       try {
-        return await this.process(src, stdout, stderr);
+        return await this.process(src, stdout, stderr, records);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (!stderr.isClosed) stderr.write(msg + "\n");
@@ -67,14 +71,26 @@ export class Shell {
         if (!stderr.isClosed) stderr.end();
       }
     })();
-    return { stdout, stderr, wait: () => wait };
+    return {
+      stdout,
+      stderr,
+      wait: () => wait,
+      kill: (signal?: Signal) => {
+        for (const r of records) if (r.state === "running") r.kill(signal);
+      },
+    };
   }
 
   run(src: string): Promise<number> {
     return this.execute(src).wait();
   }
 
-  private async process(src: string, stdout: PipeStream, stderr: PipeStream): Promise<number> {
+  private async process(
+    src: string,
+    stdout: PipeStream,
+    stderr: PipeStream,
+    records: ProcessRecord[],
+  ): Promise<number> {
     const list = parse(src);
     let code = 0;
     for (const item of list.items) {
@@ -85,17 +101,20 @@ export class Shell {
             ? code === 0
             : code !== 0; // "||"
       if (!shouldRun) continue;
-      if (list.background) {
-        void this.execPipeline(item.pipeline, stdout, stderr);
-        code = 0;
-      } else {
-        code = await this.execPipeline(item.pipeline, stdout, stderr);
-      }
+      // `&` is parsed but runs in the foreground this round — true background
+      // detachment is deferred. Running sequentially keeps output capture and
+      // &&/||/; sequencing correct instead of racing stream teardown.
+      code = await this.execPipeline(item.pipeline, stdout, stderr, records);
     }
     return code;
   }
 
-  private async execPipeline(pipeline: Pipeline, shellStdout: PipeStream, shellStderr: PipeStream): Promise<number> {
+  private async execPipeline(
+    pipeline: Pipeline,
+    shellStdout: PipeStream,
+    shellStderr: PipeStream,
+    records: ProcessRecord[],
+  ): Promise<number> {
     const specs = pipeline.commands.map((c) => this.expandCommand(c));
 
     if (specs.length === 1) {
@@ -116,6 +135,7 @@ export class Shell {
         ...(idx === 0 && firstStdin !== undefined ? { stdin: firstStdin } : {}),
       })),
     );
+    records.push(...stages);
 
     const drains: Promise<void>[] = [];
     for (let idx = 0; idx < stages.length; idx++) {

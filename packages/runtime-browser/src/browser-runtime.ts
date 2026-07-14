@@ -42,7 +42,6 @@ export class BrowserRuntime implements Runtime {
   private readonly vfs: Vfs;
   private readonly table: ProcessTable;
   private readonly ports: PortRegistry;
-  private readonly shell: Shell;
 
   constructor(options: BrowserRuntimeOptions = {}) {
     this.clock = options.clock ?? (() => Date.now());
@@ -59,7 +58,6 @@ export class BrowserRuntime implements Runtime {
       killProcess: (pid, signal) => this.table.kill(pid, signal),
     });
     this.ports = new PortRegistry(this.bus);
-    this.shell = new Shell({ table: this.table, vfs: this.vfs });
   }
 
   async boot(): Promise<void> {}
@@ -78,9 +76,14 @@ export class BrowserRuntime implements Runtime {
     commandLine: string,
     options?: Omit<SpawnOptions, "cmd" | "args">,
   ): Promise<ProcessHandle> {
-    if (options?.cwd !== undefined) this.shell.cwd = options.cwd;
-    if (options?.env !== undefined) Object.assign(this.shell.env, options.env);
-    const result = this.shell.execute(commandLine);
+    // A fresh, isolated shell per call: cwd/env never leak between exec calls.
+    const shell = new Shell({
+      table: this.table,
+      vfs: this.vfs,
+      cwd: options?.cwd ?? "/",
+      env: options?.env ? { ...options.env } : {},
+    });
+    const result = shell.execute(commandLine);
     const stdin = new PipeStream();
     stdin.end();
     return {
@@ -89,7 +92,7 @@ export class BrowserRuntime implements Runtime {
       stderr: result.stderr,
       stdin,
       wait: async (): Promise<ExitStatus> => ({ code: await result.wait(), signal: null }),
-      kill: async () => {},
+      kill: async (signal?: Signal) => result.kill(signal),
     };
   }
 

@@ -82,4 +82,29 @@ describe("ModelGateway", () => {
     for await (const delta of gw.chatStream(openaiConfig, [{ role: "user", content: "x" }])) out.push(delta);
     expect(out).toEqual(["He", "llo"]);
   });
+
+  it("streams over CRLF boundaries and skips empty keepalive events", async () => {
+    const gw = new ModelGateway({
+      fetch: sseFetch([
+        'data: {"choices":[{"delta":{"content":"A"}}]}\r\n\r\n',
+        "\r\n\r\n", // empty keepalive event — must not crash JSON.parse
+        'data: {"choices":[{"delta":{"content":"B"}}]}\r\n\r\n',
+        "data: [DONE]\r\n\r\n",
+      ]),
+    });
+    const out: string[] = [];
+    for await (const delta of gw.chatStream(openaiConfig, [{ role: "user", content: "x" }])) out.push(delta);
+    expect(out).toEqual(["A", "B"]);
+  });
+
+  it("concatenates multiple data: lines within a single event", async () => {
+    const gw = new ModelGateway({
+      fetch: sseFetch([
+        'data: {"type":"content_block_delta",\ndata: "delta":{"type":"text_delta","text":"hi"}}\n\n',
+      ]),
+    });
+    const out: string[] = [];
+    for await (const delta of gw.chatStream(anthropicConfig, [{ role: "user", content: "x" }])) out.push(delta);
+    expect(out).toEqual(["hi"]);
+  });
 });

@@ -20,6 +20,12 @@ describe("ErrnoError", () => {
     expect(new ErrnoError("EINVAL").message).toBe("EINVAL: invalid argument");
   });
 
+  it("includes an empty-string path in the message (consistent with the stored field)", () => {
+    const err = new ErrnoError("EINVAL", { syscall: "parse", path: "" });
+    expect(err.path).toBe("");
+    expect(err.message).toBe("EINVAL: invalid argument, parse ''");
+  });
+
   it("enoent factory produces a fully-formed ENOENT error", () => {
     const err = enoent("/x", "stat");
     expect(err.code).toBe("ENOENT");

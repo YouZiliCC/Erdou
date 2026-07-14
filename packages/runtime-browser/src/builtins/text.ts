@@ -52,7 +52,7 @@ export const grep: Program = async (ctx) => {
   const scan = (text: string, prefix: string): void => {
     const lines = text.split("\n");
     const trailing = text.endsWith("\n");
-    const count = trailing ? lines.length - 1 : lines.length;
+    const count = text === "" ? 0 : trailing ? lines.length - 1 : lines.length;
     for (let idx = 0; idx < count; idx++) {
       const line = lines[idx]!;
       const hay = ignoreCase ? line.toLowerCase() : line;
@@ -83,7 +83,8 @@ export const grep: Program = async (ctx) => {
 function takeLines(text: string, n: number, fromEnd: boolean): string {
   const all = text.split("\n");
   const lines = text.endsWith("\n") ? all.slice(0, -1) : all;
-  const picked = fromEnd ? lines.slice(-n) : lines.slice(0, n);
+  // slice(-0) === slice(0) returns everything, so guard n <= 0 for the tail case.
+  const picked = fromEnd ? (n <= 0 ? [] : lines.slice(-n)) : lines.slice(0, Math.max(0, n));
   return picked.map((l) => l + "\n").join("");
 }
 

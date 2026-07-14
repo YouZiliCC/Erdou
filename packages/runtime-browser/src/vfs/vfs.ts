@@ -15,7 +15,7 @@ import {
   type Inode,
 } from "./inode.js";
 import { resolvePath } from "./resolve.js";
-import { normalize, split } from "./path.js";
+import { normalize, split, join, dirname } from "./path.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -82,28 +82,58 @@ export class Vfs {
   }
 
   writeFile(path: string, data: Uint8Array | string, opts: WriteFileOptions = {}): void {
+    this.writeFileImpl(path, data, opts, 0);
+  }
+
+  private writeFileImpl(
+    path: string,
+    data: Uint8Array | string,
+    opts: WriteFileOptions,
+    depth: number,
+  ): void {
+    if (depth > 40) throw new ErrnoError("ELOOP", { path, syscall: "write" });
     const now = this.clock();
     const { parent, name, node } = resolvePath(this.root, path, { followSymlinks: true });
     const bytes = toBytes(data);
     if (node === undefined) {
+      const slot = parent.children.get(name);
+      if (slot?.type === "symlink") {
+        // Writing through a dangling symlink creates the link's target, not a
+        // file that clobbers the link.
+        this.writeFileImpl(this.symlinkTarget(path, slot.target), data, opts, depth + 1);
+        return;
+      }
       parent.children.set(name, newFile(bytes, now, opts.mode ?? 0o644));
       parent.mtimeMs = now;
       this.emit({ type: "file.changed", path: normalize(path), kind: "create" });
       return;
     }
-    if (node.type === "directory") throw new ErrnoError("EISDIR", { path, syscall: "write" });
-    if (node.type === "symlink") throw new ErrnoError("EINVAL", { path, syscall: "write" });
+    if (node.type !== "file") throw new ErrnoError("EISDIR", { path, syscall: "write" });
     node.data = bytes;
     node.mtimeMs = now;
     if (opts.mode !== undefined) node.mode = opts.mode;
     this.emit({ type: "file.changed", path: normalize(path), kind: "modify" });
   }
 
+  private symlinkTarget(linkPath: string, target: string): string {
+    return target.startsWith("/") ? normalize(target) : join(dirname(normalize(linkPath)), target);
+  }
+
   appendFile(path: string, data: Uint8Array | string): void {
+    this.appendFileImpl(path, data, 0);
+  }
+
+  private appendFileImpl(path: string, data: Uint8Array | string, depth: number): void {
+    if (depth > 40) throw new ErrnoError("ELOOP", { path, syscall: "write" });
     const now = this.clock();
     const { parent, name, node } = resolvePath(this.root, path, { followSymlinks: true });
     const extra = toBytes(data);
     if (node === undefined) {
+      const slot = parent.children.get(name);
+      if (slot?.type === "symlink") {
+        this.appendFileImpl(this.symlinkTarget(path, slot.target), data, depth + 1);
+        return;
+      }
       parent.children.set(name, newFile(extra, now));
       parent.mtimeMs = now;
       this.emit({ type: "file.changed", path: normalize(path), kind: "create" });
@@ -167,7 +197,16 @@ export class Vfs {
     const recursive = opts.recursive ?? false;
     const force = opts.force ?? false;
     const now = this.clock();
-    const { parent, name, node } = resolvePath(this.root, path, { followSymlinks: false });
+    let resolved;
+    try {
+      resolved = resolvePath(this.root, path, { followSymlinks: false });
+    } catch (err) {
+      // `rm -f` also swallows a missing ancestor directory, matching coreutils.
+      // ENOTDIR (a non-directory in the path) still surfaces.
+      if (force && err instanceof ErrnoError && err.code === "ENOENT") return;
+      throw err;
+    }
+    const { parent, name, node } = resolved;
     if (node === undefined) {
       if (force) return;
       throw new ErrnoError("ENOENT", { path, syscall: "unlink" });
@@ -184,6 +223,15 @@ export class Vfs {
     const now = this.clock();
     const src = resolvePath(this.root, from, { followSymlinks: false });
     if (src.node === undefined) throw new ErrnoError("ENOENT", { path: from, syscall: "rename" });
+    if (src.node.type === "directory") {
+      // A directory cannot be moved into itself or one of its descendants —
+      // that would detach it from the tree and create a cycle.
+      const nf = normalize(from);
+      const nt = normalize(to);
+      if (nt === nf || nt.startsWith(nf === "/" ? "/" : nf + "/")) {
+        throw new ErrnoError("EINVAL", { path: to, syscall: "rename" });
+      }
+    }
     const dst = resolvePath(this.root, to, { followSymlinks: false });
     src.parent.children.delete(src.name);
     src.parent.mtimeMs = now;
@@ -198,8 +246,8 @@ export class Vfs {
     const src = resolvePath(this.root, from, { followSymlinks: false });
     if (src.node === undefined) throw new ErrnoError("ENOENT", { path: from, syscall: "copy" });
     const dst = resolvePath(this.root, to, { followSymlinks: false });
-    if (dst.node !== undefined && dst.node.type === "directory" && src.node.type !== "directory") {
-      // copy file INTO an existing directory, keeping its name
+    if (dst.node !== undefined && dst.node.type === "directory") {
+      // copy INTO an existing directory, keeping the source name (files and dirs)
       dst.node.children.set(src.name, deepClone(src.node));
       dst.node.mtimeMs = now;
       this.emit({ type: "file.changed", path: normalize(to) + "/" + src.name, kind: "create" });

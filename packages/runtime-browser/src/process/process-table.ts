@@ -105,8 +105,10 @@ export class ProcessTable {
       record.signal = signal;
       if (!stdout.isClosed) stdout.end();
       if (!stderr.isClosed) stderr.end();
-      this.deps.bus.emit({ type: "process.exited", pid, code, signal });
+      // Resolve waiters before emitting so a throwing event listener can never
+      // leave wait() unresolved.
       resolveWait({ code, signal });
+      this.deps.bus.emit({ type: "process.exited", pid, code, signal });
     };
 
     const record: ProcessRecord = {
@@ -115,7 +117,9 @@ export class ProcessTable {
       cmd: opts.cmd,
       args: opts.args ?? [],
       cwd: opts.cwd ?? "/",
-      env: opts.env ?? {},
+      // Copy env so mutating a caller's env object (e.g. the shell's, via
+      // `export`) cannot retroactively change an already-running process.
+      env: opts.env ? { ...opts.env } : {},
       state: "running",
       exitCode: null,
       signal: null,
@@ -152,6 +156,8 @@ export class ProcessTable {
     };
 
     queueMicrotask(() => {
+      // If the process was killed before its body started, don't run it.
+      if (settled) return;
       program(ctx).then(
         (code) => finish("exited", code, null),
         (err: unknown) => {
