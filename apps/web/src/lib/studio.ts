@@ -2,7 +2,7 @@ import { BrowserRuntime, IndexedDbSnapshotStore } from "@erdou/runtime-browser";
 import { ModelGateway, type ModelConfig } from "@erdou/model-gateway";
 import { CodingAgent, type AgentEvent } from "@erdou/agent-core";
 import type { RuntimeEvent, ProcessInfo } from "@erdou/runtime-contract";
-import { registerLanguages, AGENT_LANGUAGES } from "./languages.js";
+import { registerLanguages, AGENT_LANGUAGES, AGENT_COMMANDS } from "./languages.js";
 
 const SNAPSHOT_ID = "erdou:default";
 
@@ -107,7 +107,11 @@ export class Studio {
       gateway: this.gateway,
       model,
       maxSteps: 25,
-      environment: { languages: AGENT_LANGUAGES },
+      environment: {
+        languages: AGENT_LANGUAGES,
+        commands: AGENT_COMMANDS,
+        notes: "You can build & preview web apps: write a React/TS project (e.g. /src/main.tsx), and the user can Build & Run it (bundled in-browser, npm deps from a CDN).",
+      },
       onEvent: (e) => this.onAgentEvent(e),
     });
     try {

@@ -18,6 +18,7 @@
     "@erdou/runtime-browser": "workspace:*",
     "@erdou/runtime-contract": "workspace:*",
     "@erdou/runtime-wasi": "workspace:*",
+    "@erdou/tool-git": "workspace:*",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

@@ -1,5 +1,6 @@
 import { createPythonRunner } from "@erdou/lang-python";
 import { createWasiRunner } from "@erdou/runtime-wasi";
+import { createGitRunner } from "@erdou/tool-git";
 import type { BrowserRuntime } from "@erdou/runtime-browser";
 
 const PYODIDE_VERSION = "0.26.4";
@@ -19,7 +20,10 @@ export function registerLanguages(runtime: BrowserRuntime): void {
   runtime.registerProgram("python", python);
   runtime.registerProgram("python3", python);
   runtime.registerProgram("wasi", createWasiRunner());
+  runtime.registerProgram("git", createGitRunner());
 }
 
 /** Runtimes the agent should be told it can actually execute. */
 export const AGENT_LANGUAGES = ["python", "wasi"];
+/** Extra commands (beyond built-ins) the agent should know about. */
+export const AGENT_COMMANDS = ["git (init/add/commit/log/status/branch)"];

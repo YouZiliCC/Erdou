@@ -16,14 +16,14 @@ module.exports = {
       comment: "runtime-contract is the frozen boundary; it depends on no other @erdou package.",
       severity: "error",
       from: { path: "^packages/runtime-contract/src" },
-      to: { path: "^packages/(runtime-browser|conformance|model-gateway|agent-tools|agent-core|lang-python|runtime-wasi|bundler)/src" },
+      to: { path: "^packages/(runtime-browser|conformance|model-gateway|agent-tools|agent-core|lang-python|runtime-wasi|bundler|tool-git)/src" },
     },
     {
       name: "adapters-are-lean",
       comment:
         "Language runtimes (lang-*) and runtime adapters (runtime-wasi) operate on the contract only, not a concrete Runtime. Tests may import one.",
       severity: "error",
-      from: { path: "^packages/(lang-[^/]+|runtime-wasi|bundler)/src", pathNot: "\\.test\\.ts$" },
+      from: { path: "^packages/(lang-[^/]+|runtime-wasi|bundler|tool-[^/]+)/src", pathNot: "\\.test\\.ts$" },
       to: { path: "^packages/(runtime-browser|model-gateway|agent-tools|agent-core)/src" },
     },
     {
