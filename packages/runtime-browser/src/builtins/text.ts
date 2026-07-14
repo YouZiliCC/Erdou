@@ -69,7 +69,7 @@ export const grep: Program = async (ctx) => {
   } else {
     for (const f of files) {
       try {
-        scan(decode(ctx.vfs.readFile(abs(ctx.cwd, f))), files.length > 1 ? f : "");
+        scan(decode(ctx.fs.readFile(abs(ctx.cwd, f))), files.length > 1 ? f : "");
       } catch (err) {
         ctx.stderr.write(describeError(err) + "\n");
         errored = true;
@@ -100,7 +100,7 @@ function makeHeadTail(fromEnd: boolean): Program {
       else files.push(a);
     }
     try {
-      const text = files.length > 0 ? decode(ctx.vfs.readFile(abs(ctx.cwd, files[0]!))) : await readAllText(ctx.stdin);
+      const text = files.length > 0 ? decode(ctx.fs.readFile(abs(ctx.cwd, files[0]!))) : await readAllText(ctx.stdin);
       ctx.stdout.write(takeLines(text, n, fromEnd));
       return 0;
     } catch (err) {

@@ -53,17 +53,14 @@ describe("pipelines", () => {
     expect(await last.stdout.text()).toBe("hi\n");
   });
 
-  it("gives a child spawned via ctx.spawn the parent's pid as ppid", async () => {
-    const table = make({
-      noop: async () => 0,
-      parent: async (ctx) => {
-        const child = ctx.spawn("noop", []);
-        ctx.stdout.write(String(child.ppid));
-        return 0;
-      },
+  it("registers a new program under a command name", async () => {
+    const table = make({});
+    table.register("hi", async (ctx) => {
+      ctx.stdout.write("hi from a registered program");
+      return 0;
     });
-    const rec = table.spawn({ cmd: "parent" });
+    const rec = table.spawn({ cmd: "hi" });
     await rec.wait();
-    expect(await rec.stdout.text()).toBe(String(rec.pid));
+    expect(await rec.stdout.text()).toBe("hi from a registered program");
   });
 });

@@ -144,15 +144,7 @@ export class ProcessTable {
       stdin,
       stdout,
       stderr,
-      vfs: this.deps.vfs,
-      spawn: (cmd, args, o) =>
-        this.spawn({
-          cmd,
-          args,
-          cwd: o?.cwd ?? record.cwd,
-          env: o?.env ?? record.env,
-          ppid: pid,
-        }),
+      fs: this.deps.vfs,
     };
 
     queueMicrotask(() => {
@@ -183,6 +175,11 @@ export class ProcessTable {
       records.push(record);
     }
     return records;
+  }
+
+  /** Register a program / language runtime under a command name. */
+  register(name: string, executor: Program): void {
+    this.deps.registry.set(name, executor);
   }
 
   get(pid: number): ProcessRecord | undefined {

@@ -1,26 +1,12 @@
-import type { ByteStream, WritableByteStream } from "@erdou/runtime-contract";
-import type { Vfs } from "../vfs/vfs.js";
-import type { ProcessRecord } from "./process-table.js";
+import type { ExecContext, Executor } from "@erdou/runtime-contract";
 
-/** The execution context handed to a program (an in-process "syscall" surface). */
-export interface ProcessContext {
-  pid: number;
-  /** [cmd, ...args] */
-  argv: string[];
-  env: Record<string, string>;
-  cwd: string;
-  stdin: ByteStream;
-  stdout: WritableByteStream;
-  stderr: WritableByteStream;
-  vfs: Vfs;
-  spawn(
-    cmd: string,
-    args: string[],
-    opts?: { cwd?: string; env?: Record<string, string> },
-  ): ProcessRecord;
-}
-
-/** A program is a function that runs in a process and resolves to an exit code. */
-export type Program = (ctx: ProcessContext) => Promise<number>;
+/**
+ * A process's execution context and program type come from the contract's
+ * executor extension point, so language runtimes (Python, WASI, …) can be
+ * written against the contract alone. `ProcessContext`/`Program` are kept as
+ * local aliases for readability inside runtime-browser.
+ */
+export type ProcessContext = ExecContext;
+export type Program = Executor;
 
 export type ProgramRegistry = Map<string, Program>;

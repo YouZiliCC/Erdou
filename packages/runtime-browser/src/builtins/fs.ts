@@ -9,16 +9,16 @@ export const ls: Program = async (ctx) => {
   const long = flags.has("l");
   const target = abs(ctx.cwd, positional[0] ?? ".");
   try {
-    if (ctx.vfs.stat(target).type !== "directory") {
+    if (ctx.fs.stat(target).type !== "directory") {
       ctx.stdout.write((positional[0] ?? target) + "\n");
       return 0;
     }
-    const entries = ctx.vfs
+    const entries = ctx.fs
       .readdir(target)
       .filter((e) => showAll || !e.name.startsWith("."));
     for (const entry of entries) {
       if (long) {
-        const st = ctx.vfs.lstat(joinPath(target, entry.name));
+        const st = ctx.fs.lstat(joinPath(target, entry.name));
         const t = entry.type === "directory" ? "d" : entry.type === "symlink" ? "l" : "-";
         ctx.stdout.write(`${t} ${st.mode.toString(8)} ${st.size} ${entry.name}\n`);
       } else {
@@ -41,7 +41,7 @@ export const cat: Program = async (ctx) => {
   let code = 0;
   for (const p of paths) {
     try {
-      ctx.stdout.write(ctx.vfs.readFile(abs(ctx.cwd, p)));
+      ctx.stdout.write(ctx.fs.readFile(abs(ctx.cwd, p)));
     } catch (err) {
       ctx.stderr.write(describeError(err) + "\n");
       code = 1;
@@ -56,7 +56,7 @@ export const mkdir: Program = async (ctx) => {
   let code = 0;
   for (const p of positional) {
     try {
-      ctx.vfs.mkdir(abs(ctx.cwd, p), { recursive });
+      ctx.fs.mkdir(abs(ctx.cwd, p), { recursive });
     } catch (err) {
       ctx.stderr.write(describeError(err) + "\n");
       code = 1;
@@ -72,7 +72,7 @@ export const rm: Program = async (ctx) => {
   let code = 0;
   for (const p of positional) {
     try {
-      ctx.vfs.rm(abs(ctx.cwd, p), { recursive, force });
+      ctx.fs.rm(abs(ctx.cwd, p), { recursive, force });
     } catch (err) {
       ctx.stderr.write(describeError(err) + "\n");
       code = 1;
@@ -91,11 +91,11 @@ export const cp: Program = async (ctx) => {
   }
   const from = abs(ctx.cwd, src);
   try {
-    if (ctx.vfs.stat(from).type === "directory" && !recursive) {
+    if (ctx.fs.stat(from).type === "directory" && !recursive) {
       ctx.stderr.write(`cp: -r not specified; omitting directory '${src}'\n`);
       return 1;
     }
-    ctx.vfs.copy(from, abs(ctx.cwd, dst));
+    ctx.fs.copy(from, abs(ctx.cwd, dst));
     return 0;
   } catch (err) {
     ctx.stderr.write(describeError(err) + "\n");
@@ -110,7 +110,7 @@ export const mv: Program = async (ctx) => {
     return 1;
   }
   try {
-    ctx.vfs.rename(abs(ctx.cwd, src), abs(ctx.cwd, dst));
+    ctx.fs.rename(abs(ctx.cwd, src), abs(ctx.cwd, dst));
     return 0;
   } catch (err) {
     ctx.stderr.write(describeError(err) + "\n");
@@ -123,7 +123,7 @@ export const touch: Program = async (ctx) => {
   for (const p of ctx.argv.slice(1)) {
     const path = abs(ctx.cwd, p);
     try {
-      if (!ctx.vfs.exists(path)) ctx.vfs.writeFile(path, new Uint8Array(0));
+      if (!ctx.fs.exists(path)) ctx.fs.writeFile(path, new Uint8Array(0));
     } catch (err) {
       ctx.stderr.write(describeError(err) + "\n");
       code = 1;
@@ -145,7 +145,7 @@ export const find: Program = async (ctx) => {
   }
   const base = abs(ctx.cwd, dir);
   try {
-    ctx.vfs.stat(base);
+    ctx.fs.stat(base);
   } catch (err) {
     ctx.stderr.write(describeError(err) + "\n");
     return 1;
@@ -153,12 +153,12 @@ export const find: Program = async (ctx) => {
   const re = namePattern !== null ? globToRegExp(namePattern) : null;
   const results: string[] = [];
   const walk = (path: string): void => {
-    const st = ctx.vfs.lstat(path);
+    const st = ctx.fs.lstat(path);
     const typeOk = !typeFilter || (typeFilter === "d" ? st.type === "directory" : st.type === "file");
     const nameOk = !re || re.test(basename(path));
     if (typeOk && nameOk) results.push(path);
     if (st.type === "directory") {
-      for (const entry of ctx.vfs.readdir(path)) walk(joinPath(path, entry.name));
+      for (const entry of ctx.fs.readdir(path)) walk(joinPath(path, entry.name));
     }
   };
   walk(base);

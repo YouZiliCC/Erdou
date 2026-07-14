@@ -6,6 +6,7 @@ import type {
   MkdirOptions,
   RmOptions,
   RuntimeEvent,
+  FileSystemApi,
 } from "@erdou/runtime-contract";
 import {
   newDir,
@@ -54,7 +55,7 @@ export interface VfsOptions {
  * ErrnoError carrying the offending path — no operation silently creates
  * parents or swallows a missing file. The async Runtime surface wraps these.
  */
-export class Vfs {
+export class Vfs implements FileSystemApi {
   private root: DirInode;
   private readonly clock: () => number;
   private readonly onEvent: ((event: RuntimeEvent) => void) | undefined;

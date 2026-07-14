@@ -15,6 +15,7 @@ import type {
   Unsubscribe,
   Snapshot,
   VirtualPort,
+  Executor,
 } from "@erdou/runtime-contract";
 import { EventBus } from "./core/event-bus.js";
 import { PipeStream } from "./core/byte-stream.js";
@@ -106,6 +107,15 @@ export class BrowserRuntime implements Runtime {
 
   async getProcesses(): Promise<ProcessInfo[]> {
     return this.table.list();
+  }
+
+  /**
+   * Register a program / language runtime under a command name (e.g. "python",
+   * "ruby", "wasi"). Once registered, the shell, `exec` and the agent can run
+   * it like any built-in — the extension point for new languages.
+   */
+  registerProgram(name: string, executor: Executor): void {
+    this.table.register(name, executor);
   }
 
   async readFile(path: string): Promise<Uint8Array> {
