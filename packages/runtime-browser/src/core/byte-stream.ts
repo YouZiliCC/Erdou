@@ -17,6 +17,10 @@ export class PipeStream implements ByteStream, WritableByteStream {
   private closed = false;
   private readonly waiters: Waiter[] = [];
 
+  get isClosed(): boolean {
+    return this.closed;
+  }
+
   write(chunk: Uint8Array | string): void {
     if (this.closed) throw new ErrnoError("EBADF", { syscall: "write" });
     const bytes = typeof chunk === "string" ? encoder.encode(chunk) : chunk;
