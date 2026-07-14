@@ -37,6 +37,21 @@ export function App() {
     void studio.runTask(t, model);
   }
 
+  async function openFolder() {
+    const picker = (window as unknown as { showDirectoryPicker?: (o?: unknown) => Promise<unknown> })
+      .showDirectoryPicker;
+    if (!picker) {
+      window.alert("Folder mounting needs the File System Access API — use Chrome or Edge.");
+      return;
+    }
+    try {
+      const handle = await picker({ mode: "readwrite" });
+      await studio.mountFolder(handle as never);
+    } catch {
+      /* user cancelled the picker */
+    }
+  }
+
   return (
     <div className="app">
       <header className="topbar">
@@ -57,6 +72,19 @@ export function App() {
           <span className={"dot " + (studio.running ? "busy" : configured ? "on" : "warn")} />
           {studio.running ? "working" : configured ? model.model : "no model key"}
         </span>
+        {studio.mount ? (
+          <span className="status-chip" title="Local folder mounted — changes sync to disk.">
+            📁 {studio.mountName}
+          </span>
+        ) : studio.pendingMount ? (
+          <button className="btn ghost" onClick={() => void studio.reconnectMount()}>
+            Reconnect 📁 {studio.mountName}
+          </button>
+        ) : (
+          <button className="btn ghost" onClick={() => void openFolder()}>
+            Open folder
+          </button>
+        )}
         <button className="btn ghost" onClick={() => setSettingsOpen(true)}>
           Model
         </button>

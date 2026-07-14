@@ -3,6 +3,14 @@ import { ModelGateway, type ModelConfig } from "@erdou/model-gateway";
 import { CodingAgent, type AgentEvent } from "@erdou/agent-core";
 import type { RuntimeEvent, ProcessInfo } from "@erdou/runtime-contract";
 import { registerLanguages, AGENT_LANGUAGES, AGENT_COMMANDS } from "./languages.js";
+import {
+  loadFolderIntoVfs,
+  saveVfsToFolder,
+  persistHandle,
+  loadPersistedHandle,
+  clearPersistedHandle,
+  type DirHandleLike,
+} from "./local-mount.js";
 
 const SNAPSHOT_ID = "erdou:default";
 
@@ -42,6 +50,13 @@ export class Studio {
   /** Bumped on every change so React's useSyncExternalStore re-renders. */
   version = 0;
 
+  /** A mounted local folder (File System Access API), if any. */
+  mount: DirHandleLike | null = null;
+  mountName: string | null = null;
+  /** A persisted handle awaiting a user gesture to re-grant permission. */
+  pendingMount: DirHandleLike | null = null;
+  private folderSaveTimer: ReturnType<typeof setTimeout> | undefined;
+
   private readonly listeners = new Set<() => void>();
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
@@ -72,12 +87,70 @@ export class Studio {
       if (e.type === "file.changed") {
         this.fsVersion++;
         this.scheduleSave();
+        if (this.mount) this.scheduleFolderSave();
         this.notify();
       } else if (e.type === "port.opened") {
         this.log("system", `Port ${e.port} exposed`, e.url);
       }
     });
+
+    // Restore a previously-mounted local folder if permission is still granted.
+    try {
+      const handle = await loadPersistedHandle();
+      if (handle) {
+        const perm = (await handle.queryPermission?.({ mode: "readwrite" })) ?? "prompt";
+        if (perm === "granted") await this.mountFolder(handle);
+        else {
+          this.pendingMount = handle;
+          this.mountName = handle.name;
+        }
+      }
+    } catch {
+      /* no persisted mount */
+    }
     this.notify();
+  }
+
+  async mountFolder(handle: DirHandleLike): Promise<void> {
+    const count = await loadFolderIntoVfs(handle, this.runtime.fs, "/");
+    this.mount = handle;
+    this.mountName = handle.name;
+    this.pendingMount = null;
+    await persistHandle(handle);
+    this.fsVersion++;
+    this.log("system", `Mounted local folder "${handle.name}" (${count} files). Changes now sync back to disk.`);
+    this.notify();
+  }
+
+  /** Re-grant permission to a persisted mount (needs a user gesture). */
+  async reconnectMount(): Promise<boolean> {
+    const handle = this.pendingMount;
+    if (!handle) return false;
+    const perm = (await handle.requestPermission?.({ mode: "readwrite" })) ?? "denied";
+    if (perm !== "granted") return false;
+    await this.mountFolder(handle);
+    return true;
+  }
+
+  async unmount(): Promise<void> {
+    this.mount = null;
+    this.mountName = null;
+    this.pendingMount = null;
+    await clearPersistedHandle();
+    this.notify();
+  }
+
+  private scheduleFolderSave(): void {
+    if (this.folderSaveTimer) clearTimeout(this.folderSaveTimer);
+    this.folderSaveTimer = setTimeout(() => void this.saveToFolder(), 600);
+  }
+  async saveToFolder(): Promise<void> {
+    if (!this.mount) return;
+    try {
+      await saveVfsToFolder(this.runtime.fs, this.mount, "/");
+    } catch (err) {
+      this.log("error", "Failed to sync to local folder", err instanceof Error ? err.message : String(err));
+    }
   }
 
   private scheduleSave(): void {
