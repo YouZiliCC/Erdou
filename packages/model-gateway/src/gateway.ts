@@ -1,4 +1,4 @@
-import type { ChatMessage, ChatResult, ModelConfig } from "./types.js";
+import type { ChatMessage, ChatResult, ChatOptions, ModelConfig } from "./types.js";
 import { openaiChat, openaiStream } from "./openai.js";
 import { anthropicChat, anthropicStream } from "./anthropic.js";
 
@@ -19,10 +19,10 @@ export class ModelGateway {
     this.fetchFn = deps.fetch ?? fetch;
   }
 
-  chat(config: ModelConfig, messages: ChatMessage[]): Promise<ChatResult> {
+  chat(config: ModelConfig, messages: ChatMessage[], options?: ChatOptions): Promise<ChatResult> {
     return config.provider === "anthropic"
       ? anthropicChat(config, messages, this.fetchFn)
-      : openaiChat(config, messages, this.fetchFn);
+      : openaiChat(config, messages, this.fetchFn, options);
   }
 
   chatStream(config: ModelConfig, messages: ChatMessage[]): AsyncGenerator<string> {

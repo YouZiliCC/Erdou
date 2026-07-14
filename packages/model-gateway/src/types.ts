@@ -6,11 +6,35 @@ export interface ModelConfig {
   model: string;
 }
 
+/** A tool the model may call (OpenAI-compatible function-calling shape). */
+export interface ToolSpec {
+  name: string;
+  description: string;
+  /** JSON Schema for the tool's arguments. */
+  parameters: object;
+}
+
+/** A tool call the model requested. `arguments` is a JSON string. */
+export interface ToolCall {
+  id: string;
+  name: string;
+  arguments: string;
+}
+
 export interface ChatMessage {
-  role: "system" | "user" | "assistant";
+  role: "system" | "user" | "assistant" | "tool";
   content: string;
+  /** Present on assistant messages that requested tool calls. */
+  toolCalls?: ToolCall[];
+  /** Present on role:"tool" messages — which call this result answers. */
+  toolCallId?: string;
 }
 
 export interface ChatResult {
   content: string;
+  toolCalls: ToolCall[];
+}
+
+export interface ChatOptions {
+  tools?: ToolSpec[];
 }

@@ -27,6 +27,32 @@ importers:
         specifier: ^2.1.0
         version: 2.1.0(@types/node@22.20.1)
 
+  packages/agent-core:
+    dependencies:
+      '@erdou/agent-tools':
+        specifier: workspace:*
+        version: link:../agent-tools
+      '@erdou/model-gateway':
+        specifier: workspace:*
+        version: link:../model-gateway
+      '@erdou/runtime-contract':
+        specifier: workspace:*
+        version: link:../runtime-contract
+    devDependencies:
+      '@erdou/runtime-browser':
+        specifier: workspace:*
+        version: link:../runtime-browser
+
+  packages/agent-tools:
+    dependencies:
+      '@erdou/runtime-contract':
+        specifier: workspace:*
+        version: link:../runtime-contract
+    devDependencies:
+      '@erdou/runtime-browser':
+        specifier: workspace:*
+        version: link:../runtime-browser
+
   packages/conformance:
     dependencies:
       '@erdou/runtime-contract':

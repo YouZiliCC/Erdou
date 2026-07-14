@@ -16,7 +16,21 @@ module.exports = {
       comment: "runtime-contract is the frozen boundary; it depends on no other @erdou package.",
       severity: "error",
       from: { path: "^packages/runtime-contract/src" },
-      to: { path: "^packages/(runtime-browser|conformance|model-gateway)/src" },
+      to: { path: "^packages/(runtime-browser|conformance|model-gateway|agent-tools|agent-core)/src" },
+    },
+    {
+      name: "agent-tools-is-lean",
+      comment: "agent-tools operates on the Runtime contract only (not a concrete Runtime, model, or agent-core). Tests may import a concrete runtime.",
+      severity: "error",
+      from: { path: "^packages/agent-tools/src", pathNot: "\\.test\\.ts$" },
+      to: { path: "^packages/(runtime-browser|model-gateway|agent-core)/src" },
+    },
+    {
+      name: "agent-core-binds-to-contract",
+      comment: "agent-core binds to the Runtime contract, not a concrete Runtime. Tests may import a concrete runtime.",
+      severity: "error",
+      from: { path: "^packages/agent-core/src", pathNot: "\\.test\\.ts$" },
+      to: { path: "^packages/runtime-browser/src" },
     },
     {
       name: "runtime-browser-only-contract",

@@ -70,6 +70,37 @@ describe("ModelGateway", () => {
     await expect(gw.chat(openaiConfig, [{ role: "user", content: "x" }])).rejects.toThrow(/401.*bad key/);
   });
 
+  it("sends tool specs and parses tool_calls from the response", async () => {
+    const { fetch, captured } = jsonFetch(200, {
+      choices: [
+        {
+          message: {
+            content: null,
+            tool_calls: [
+              { id: "call_1", type: "function", function: { name: "run_shell", arguments: '{"command":"ls"}' } },
+            ],
+          },
+        },
+      ],
+    });
+    const gw = new ModelGateway({ fetch });
+    const result = await gw.chat(openaiConfig, [{ role: "user", content: "list files" }], {
+      tools: [
+        {
+          name: "run_shell",
+          description: "run a shell command",
+          parameters: { type: "object", properties: { command: { type: "string" } } },
+        },
+      ],
+    });
+    expect(result.content).toBe("");
+    expect(result.toolCalls).toEqual([{ id: "call_1", name: "run_shell", arguments: '{"command":"ls"}' }]);
+    const body = JSON.parse(String(captured[0]!.init.body)) as {
+      tools: { function: { name: string } }[];
+    };
+    expect(body.tools[0]!.function.name).toBe("run_shell");
+  });
+
   it("streams OpenAI deltas", async () => {
     const gw = new ModelGateway({
       fetch: sseFetch([

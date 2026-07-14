@@ -48,7 +48,8 @@ export async function anthropicChat(
   if (typeof content !== "string") {
     throw new Error(`anthropic chat: unexpected response shape: ${JSON.stringify(json)}`);
   }
-  return { content };
+  // Anthropic tool calling is deferred; openai-compatible is the tool path.
+  return { content, toolCalls: [] };
 }
 
 export async function* anthropicStream(
