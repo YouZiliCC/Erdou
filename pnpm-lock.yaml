@@ -130,6 +130,16 @@ importers:
 
   packages/runtime-contract: {}
 
+  packages/runtime-wasi:
+    dependencies:
+      '@erdou/runtime-contract':
+        specifier: workspace:*
+        version: link:../runtime-contract
+    devDependencies:
+      '@erdou/runtime-browser':
+        specifier: workspace:*
+        version: link:../runtime-browser
+
 packages:
 
   '@babel/code-frame@7.29.7':
