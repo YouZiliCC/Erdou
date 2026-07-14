@@ -2,6 +2,7 @@ import { BrowserRuntime, IndexedDbSnapshotStore } from "@erdou/runtime-browser";
 import { ModelGateway, type ModelConfig } from "@erdou/model-gateway";
 import { CodingAgent, type AgentEvent } from "@erdou/agent-core";
 import type { RuntimeEvent, ProcessInfo } from "@erdou/runtime-contract";
+import { registerLanguages } from "./languages.js";
 
 const SNAPSHOT_ID = "erdou:default";
 
@@ -55,6 +56,7 @@ export class Studio {
     if (this.booted) return;
     this.booted = true;
     await this.runtime.boot();
+    registerLanguages(this.runtime);
     try {
       const snap = await this.store.load(SNAPSHOT_ID);
       if (snap) {

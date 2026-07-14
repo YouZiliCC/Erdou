@@ -12,6 +12,7 @@
   "dependencies": {
     "@erdou/agent-core": "workspace:*",
     "@erdou/agent-tools": "workspace:*",
+    "@erdou/lang-python": "workspace:*",
     "@erdou/model-gateway": "workspace:*",
     "@erdou/runtime-browser": "workspace:*",
     "@erdou/runtime-contract": "workspace:*",

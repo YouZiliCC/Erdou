@@ -39,7 +39,8 @@ export function TerminalPanel({ studio }: { studio: Studio }) {
         {blocks.length === 0 && (
           <div className="hint">
             Interactive shell into the runtime. Try: ls / &nbsp;·&nbsp; echo hi &gt; /a.txt &nbsp;·&nbsp; cat /a.txt
-            &nbsp;·&nbsp; echo hi | grep h
+            &nbsp;·&nbsp; echo hi | grep h &nbsp;·&nbsp; python -c "print(6*7)"&nbsp;
+            <span style={{ opacity: 0.7 }}>(first Python run downloads the runtime, ~10s)</span>
           </div>
         )}
         {blocks.map((b, i) => (

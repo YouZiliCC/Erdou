@@ -37,7 +37,19 @@ This is **enforced in CI**, not merely documented — `pnpm lint:deps` fails the
 | [`@erdou/model-gateway`](./packages/model-gateway) | A thin BYO-key connector to OpenAI-compatible and Anthropic chat APIs, incl. tool calling. Independent of the runtime. |
 | [`@erdou/agent-tools`](./packages/agent-tools) | The Coding Agent's toolset (read/write/list/shell…) defined over the Runtime **contract**. |
 | [`@erdou/agent-core`](./packages/agent-core) | The reference **Coding Agent** — drives a Runtime with a model in a plan→act→observe loop. |
+| [`@erdou/lang-python`](./packages/lang-python) | A `python`/`python3` runtime via Pyodide (CPython/WASM) — a language pack over the executor contract. |
 | [`apps/web`](./apps/web) | The web app: task composer, live agent trace, file browser, terminal, persistence. |
+
+## Languages
+
+Languages are a first-class extension point. The contract defines an `Executor` (`ExecContext → exit code`); a language runtime is just an `Executor` you register under a command name:
+
+```ts
+runtime.registerProgram("python", createPythonRunner({ load: loadPyodide }));
+// now the shell, exec, and the agent can all run: python app.py
+```
+
+**JavaScript/TypeScript** (built-in) and **Python** (Pyodide, verified running real CPython in-browser) ship today. The same pattern adds **Ruby** (ruby.wasm), **Lua**, **SQLite**, or — via a WASI host — any `wasm32-wasi` binary from **Rust/C/C++/Zig/TinyGo**. Language packs depend only on the contract, never on a concrete Runtime.
 
 ## Development
 
