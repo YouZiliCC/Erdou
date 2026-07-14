@@ -35,6 +35,9 @@ importers:
       '@erdou/agent-tools':
         specifier: workspace:*
         version: link:../../packages/agent-tools
+      '@erdou/bundler':
+        specifier: workspace:*
+        version: link:../../packages/bundler
       '@erdou/lang-python':
         specifier: workspace:*
         version: link:../../packages/lang-python
@@ -66,6 +69,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^4.3.1
         version: 4.3.1(vite@5.4.0(@types/node@22.20.1))
+      esbuild-wasm:
+        specifier: ^0.23.0
+        version: 0.23.0
       vite:
         specifier: ^5.4.0
         version: 5.4.0(@types/node@22.20.1)
@@ -95,6 +101,19 @@ importers:
       '@erdou/runtime-browser':
         specifier: workspace:*
         version: link:../runtime-browser
+
+  packages/bundler:
+    dependencies:
+      '@erdou/runtime-contract':
+        specifier: workspace:*
+        version: link:../runtime-contract
+    devDependencies:
+      '@erdou/runtime-browser':
+        specifier: workspace:*
+        version: link:../runtime-browser
+      esbuild-wasm:
+        specifier: ^0.23.0
+        version: 0.23.0
 
   packages/conformance:
     dependencies:
@@ -1066,6 +1085,11 @@ packages:
 
   es-module-lexer@2.3.1:
     resolution: {integrity: sha512-shc1dbU90Yl/xq1QrC7QRtfcwURZuVRfPhZbDoldJ1cn1gzDvBaBWlv0eFolj5+0znnPJz5TXLxsN77X/12KTA==}
+
+  esbuild-wasm@0.23.0:
+    resolution: {integrity: sha512-6jP8UmWy6R6TUUV8bMuC3ZyZ6lZKI56x0tkxyCIqWwRRJ/DgeQKneh/Oid5EoGoPFLrGNkz47ZEtWAYuiY/u9g==}
+    engines: {node: '>=18'}
+    hasBin: true
 
   esbuild@0.19.3:
     resolution: {integrity: sha512-UlJ1qUUA2jL2nNib1JTSkifQTcYTroFqRjwCFW4QYEKEsixXD5Tik9xML7zh2gTxkYTBKGHNH9y7txMwVyPbjw==}
@@ -2354,6 +2378,8 @@ snapshots:
   es-errors@1.3.0: {}
 
   es-module-lexer@2.3.1: {}
+
+  esbuild-wasm@0.23.0: {}
 
   esbuild@0.19.3:
     optionalDependencies:

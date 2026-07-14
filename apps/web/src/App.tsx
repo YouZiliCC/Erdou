@@ -6,9 +6,10 @@ import { TraceTape } from "./components/TraceTape.js";
 import { FilePanel } from "./components/FilePanel.js";
 import { TerminalPanel } from "./components/TerminalPanel.js";
 import { ProcessPanel } from "./components/ProcessPanel.js";
+import { PreviewPanel } from "./components/PreviewPanel.js";
 import { SettingsDialog } from "./components/SettingsDialog.js";
 
-type Tab = "files" | "terminal" | "processes";
+type Tab = "files" | "terminal" | "processes" | "preview";
 
 export function App() {
   const studio = useStudio();
@@ -96,10 +97,14 @@ export function App() {
             <button className={"tab " + (tab === "processes" ? "active" : "")} onClick={() => setTab("processes")}>
               processes
             </button>
+            <button className={"tab " + (tab === "preview" ? "active" : "")} onClick={() => setTab("preview")}>
+              preview
+            </button>
           </div>
           {tab === "files" && <FilePanel studio={studio} />}
           {tab === "terminal" && <TerminalPanel studio={studio} />}
           {tab === "processes" && <ProcessPanel studio={studio} />}
+          {tab === "preview" && <PreviewPanel studio={studio} />}
         </section>
       </div>
 

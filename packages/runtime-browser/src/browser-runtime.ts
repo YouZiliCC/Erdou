@@ -16,6 +16,7 @@ import type {
   Snapshot,
   VirtualPort,
   Executor,
+  FileSystemApi,
 } from "@erdou/runtime-contract";
 import { EventBus } from "./core/event-bus.js";
 import { PipeStream } from "./core/byte-stream.js";
@@ -116,6 +117,11 @@ export class BrowserRuntime implements Runtime {
    */
   registerProgram(name: string, executor: Executor): void {
     this.table.register(name, executor);
+  }
+
+  /** The runtime's synchronous filesystem — for in-process tools like the bundler. */
+  get fs(): FileSystemApi {
+    return this.vfs;
   }
 
   async readFile(path: string): Promise<Uint8Array> {

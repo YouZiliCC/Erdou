@@ -7,6 +7,9 @@ function getStudio(): Studio {
   if (!singleton) {
     singleton = new Studio();
     void singleton.boot();
+    if (import.meta.env.DEV) {
+      (globalThis as unknown as { __erdouStudio?: Studio }).__erdouStudio = singleton;
+    }
   }
   return singleton;
 }
