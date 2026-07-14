@@ -103,6 +103,16 @@ importers:
         specifier: workspace:*
         version: link:../runtime-browser
 
+  packages/lang-python:
+    dependencies:
+      '@erdou/runtime-contract':
+        specifier: workspace:*
+        version: link:../runtime-contract
+    devDependencies:
+      '@erdou/runtime-browser':
+        specifier: workspace:*
+        version: link:../runtime-browser
+
   packages/model-gateway: {}
 
   packages/runtime-browser:
