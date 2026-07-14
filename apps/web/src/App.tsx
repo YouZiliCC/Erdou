@@ -49,8 +49,8 @@ export function App() {
         <span className="status-chip">
           <span className="dot on" /> runtime live
         </span>
-        <span className="status-chip" title="Languages the runtime can execute. Python loads on first use.">
-          js · python
+        <span className="status-chip" title="What the runtime can execute. Python loads on first use; wasi runs wasm32-wasi binaries.">
+          js · python · wasi
         </span>
         <span className="status-chip">
           <span className={"dot " + (studio.running ? "busy" : configured ? "on" : "warn")} />

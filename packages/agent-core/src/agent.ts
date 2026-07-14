@@ -1,15 +1,7 @@
 import type { ChatMessage, ToolSpec } from "@erdou/model-gateway";
 import { createTools, type ToolDef } from "@erdou/agent-tools";
 import type { AgentOptions, AgentRunResult, AgentEvent } from "./types.js";
-
-const DEFAULT_SYSTEM_PROMPT = `You are Erdou, an autonomous coding agent operating a browser-based virtual filesystem and shell.
-
-Accomplish the user's task by calling the provided tools. Rules:
-- Paths are absolute and start with "/". The filesystem starts empty at "/".
-- Create parent directories with make_dir before writing files into them.
-- After making changes, verify them (list_dir, read_file, or run_shell).
-- Do not ask the user questions — make reasonable decisions and proceed.
-- When the task is fully complete, reply with a short plain-text summary and DO NOT call any tool.`;
+import { buildSystemPrompt } from "./prompt.js";
 
 /**
  * The reference Coding Agent. It drives a Runtime through agent-tools using a
@@ -22,7 +14,6 @@ export class CodingAgent {
   private readonly toolByName: Map<string, ToolDef>;
   private readonly toolSpecs: ToolSpec[];
   private readonly maxSteps: number;
-  private readonly systemPrompt: string;
 
   constructor(private readonly opts: AgentOptions) {
     this.tools = opts.tools ?? createTools();
@@ -33,7 +24,6 @@ export class CodingAgent {
       parameters: t.parameters,
     }));
     this.maxSteps = opts.maxSteps ?? 20;
-    this.systemPrompt = opts.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
   }
 
   private emit(event: AgentEvent): void {
@@ -41,8 +31,11 @@ export class CodingAgent {
   }
 
   async run(task: string): Promise<AgentRunResult> {
+    const systemPrompt =
+      this.opts.systemPrompt ??
+      buildSystemPrompt(this.opts.environment ?? {}, await this.opts.runtime.getCapabilities());
     const messages: ChatMessage[] = [
-      { role: "system", content: this.systemPrompt },
+      { role: "system", content: systemPrompt },
       { role: "user", content: task },
     ];
 

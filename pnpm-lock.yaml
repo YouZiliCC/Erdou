@@ -47,6 +47,9 @@ importers:
       '@erdou/runtime-contract':
         specifier: workspace:*
         version: link:../../packages/runtime-contract
+      '@erdou/runtime-wasi':
+        specifier: workspace:*
+        version: link:../../packages/runtime-wasi
       react:
         specifier: ^18.3.1
         version: 18.3.1

@@ -2,7 +2,7 @@ import { BrowserRuntime, IndexedDbSnapshotStore } from "@erdou/runtime-browser";
 import { ModelGateway, type ModelConfig } from "@erdou/model-gateway";
 import { CodingAgent, type AgentEvent } from "@erdou/agent-core";
 import type { RuntimeEvent, ProcessInfo } from "@erdou/runtime-contract";
-import { registerLanguages } from "./languages.js";
+import { registerLanguages, AGENT_LANGUAGES } from "./languages.js";
 
 const SNAPSHOT_ID = "erdou:default";
 
@@ -107,6 +107,7 @@ export class Studio {
       gateway: this.gateway,
       model,
       maxSteps: 25,
+      environment: { languages: AGENT_LANGUAGES },
       onEvent: (e) => this.onAgentEvent(e),
     });
     try {

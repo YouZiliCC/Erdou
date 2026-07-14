@@ -1,13 +1,13 @@
 import { createPythonRunner } from "@erdou/lang-python";
+import { createWasiRunner } from "@erdou/runtime-wasi";
 import type { BrowserRuntime } from "@erdou/runtime-browser";
 
 const PYODIDE_VERSION = "0.26.4";
 const PYODIDE_URL = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
 
 /**
- * Register optional language runtimes on the runtime. Python (Pyodide, ~10MB)
- * is lazily loaded from a CDN the first time a `python` command actually runs —
- * registering it here is free.
+ * Register optional runtimes. Python (Pyodide, ~10MB) lazily loads from a CDN on
+ * first use; the WASI runner runs any wasm32-wasi binary in the filesystem.
  */
 export function registerLanguages(runtime: BrowserRuntime): void {
   const python = createPythonRunner({
@@ -18,6 +18,8 @@ export function registerLanguages(runtime: BrowserRuntime): void {
   });
   runtime.registerProgram("python", python);
   runtime.registerProgram("python3", python);
+  runtime.registerProgram("wasi", createWasiRunner());
 }
 
-export const LANGUAGES = ["js", "python"];
+/** Runtimes the agent should be told it can actually execute. */
+export const AGENT_LANGUAGES = ["python", "wasi"];

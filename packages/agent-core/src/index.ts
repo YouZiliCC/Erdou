@@ -1,2 +1,3 @@
 export { CodingAgent } from "./agent.js";
-export type { AgentOptions, AgentRunResult, AgentEvent } from "./types.js";
+export { buildSystemPrompt } from "./prompt.js";
+export type { AgentOptions, AgentRunResult, AgentEvent, EnvironmentInfo } from "./types.js";
