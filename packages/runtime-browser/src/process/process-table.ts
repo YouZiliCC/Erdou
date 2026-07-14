@@ -10,6 +10,7 @@ import { PipeStream } from "../core/byte-stream.js";
 import type { EventBus } from "../core/event-bus.js";
 import type { Vfs } from "../vfs/vfs.js";
 import type { Program, ProgramRegistry, ProcessContext } from "./program.js";
+import { pipeProcesses } from "./pipe.js";
 
 const SIGNAL_NUMBERS: Record<Signal, number> = {
   SIGHUP: 1,
@@ -162,6 +163,20 @@ export class ProcessTable {
     });
 
     return record;
+  }
+
+  /** Spawn a pipeline: each stage's stdout feeds the next stage's stdin. The
+   *  last record's stdout is the pipeline's output. */
+  spawnPiped(stages: InternalSpawnOptions[]): ProcessRecord[] {
+    const records: ProcessRecord[] = [];
+    for (let i = 0; i < stages.length; i++) {
+      const stage = stages[i]!;
+      const isFirst = i === 0;
+      const record = this.spawn({ ...stage, pipeStdin: !isFirst });
+      if (!isFirst) pipeProcesses(records[i - 1]!, record);
+      records.push(record);
+    }
+    return records;
   }
 
   get(pid: number): ProcessRecord | undefined {
