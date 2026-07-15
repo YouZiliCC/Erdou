@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { fetchToHttpRequest, httpResponseToResponse, installPreviewBridge } from "./preview-bridge.js";
+import { fetchToHttpRequest, httpResponseToResponse, installPreviewBridge, resolvePort } from "./preview-bridge.js";
 
 describe("preview-bridge marshalling", () => {
   it("marshals a fetch Request to HttpRequest and back", async () => {
@@ -60,6 +60,30 @@ describe("preview-bridge marshalling", () => {
     const res = httpResponseToResponse({ status: 204, headers: {}, body: new Uint8Array() });
     expect(res.status).toBe(204);
     expect(await res.text()).toBe("");
+  });
+});
+
+describe("resolvePort", () => {
+  it("routes a relative fetch (no /__port__/ segment) to the primary port", () => {
+    expect(resolvePort("/__preview__/8080/api", 8080)).toEqual({ port: 8080, rest: "/api" });
+  });
+
+  it("an explicit /__port__/<n>/ segment right after the scope wins over the primary", () => {
+    expect(resolvePort("/__preview__/8080/__port__/8000/api", 8080)).toEqual({ port: 8000, rest: "/api" });
+  });
+
+  it("preserves a nested rest past the /__port__/<n> override", () => {
+    expect(resolvePort("/__preview__/8080/__port__/8000/a/b/c", 8080)).toEqual({ port: 8000, rest: "/a/b/c" });
+  });
+
+  it("normalizes an empty or trailing-slash-only rest to '/' for the primary", () => {
+    expect(resolvePort("/__preview__/8080", 8080)).toEqual({ port: 8080, rest: "/" });
+    expect(resolvePort("/__preview__/8080/", 8080)).toEqual({ port: 8080, rest: "/" });
+  });
+
+  it("normalizes an empty or trailing-slash-only rest to '/' for a sibling override", () => {
+    expect(resolvePort("/__preview__/8080/__port__/8000", 8080)).toEqual({ port: 8000, rest: "/" });
+    expect(resolvePort("/__preview__/8080/__port__/8000/", 8080)).toEqual({ port: 8000, rest: "/" });
   });
 });
 

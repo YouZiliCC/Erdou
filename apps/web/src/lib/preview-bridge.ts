@@ -25,6 +25,40 @@ const BODYLESS_METHODS = new Set(["GET", "HEAD"]);
 // empty Uint8Array) makes the `Response` constructor throw.
 const NULL_BODY_STATUS = new Set([101, 204, 205, 304]);
 
+// The nested segment that lets a previewed app reach a SIBLING port instead of
+// its own (the "primary" port it is viewed at).
+const PORT_OVERRIDE = /^\/__port__\/(\d+)(\/.*)?$/;
+
+/**
+ * Resolve which port an intercepted preview request routes to, and the
+ * (query-less) path to forward.
+ *
+ * Scheme: an app is viewed at `/__preview__/<primary>/…`; `primary` is parsed
+ * from that scope by the caller (the SW) and passed in here. A request under
+ * the scope routes to `primary` by default — e.g. a relative `fetch('api')`
+ * from the app resolves to `/__preview__/8080/api`, routing to 8080. To reach
+ * a SIBLING server, the app prefixes its request path with `/__port__/<n>/…`
+ * right after the scope: `fetch('__port__/8000/api')` resolves (relative to
+ * the app's own scope directory) to `/__preview__/8080/__port__/8000/api`;
+ * that segment is stripped and overrides the target port. `pathname` is
+ * `url.pathname` (no query string — the caller appends `url.search` to
+ * `rest` itself); `rest` always starts with `/` (an empty remainder
+ * normalizes to `/`).
+ *
+ * PURE. The SW (`public/preview-sw.js`) duplicates this verbatim — it cannot
+ * import TS. Keep the two in sync.
+ */
+export function resolvePort(pathname: string, primary: number): { port: number; rest: string } {
+  const afterScope = pathname.slice(PREVIEW_SCOPE.length + String(primary).length);
+  const rest = afterScope === "" ? "/" : afterScope;
+  const override = PORT_OVERRIDE.exec(rest);
+  if (override) {
+    const overridePort = override[1];
+    if (overridePort !== undefined) return { port: Number(overridePort), rest: override[2] || "/" };
+  }
+  return { port: primary, rest };
+}
+
 /** Marshal an intercepted `Request` into a runtime `HttpRequest`.
  *  `urlRest` is the path+query already stripped of the `/__preview__/<port>`
  *  scope (e.g. `/api?q=1`). GET/HEAD carry no body. */

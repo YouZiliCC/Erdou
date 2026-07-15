@@ -18,6 +18,24 @@ const DISPATCH_TIMEOUT_MS = 15000;
 const NULL_BODY_STATUS = new Set([101, 204, 205, 304]);
 const BODYLESS_METHODS = new Set(["GET", "HEAD"]);
 
+// The nested segment that lets a previewed app reach a SIBLING port instead of
+// its own (the "primary" port it is viewed at).
+const PORT_OVERRIDE = /^\/__port__\/(\d+)(\/.*)?$/;
+
+// Kept in EXACT sync with `resolvePort` in `src/lib/preview-bridge.ts` — see
+// that copy's doc comment for the full scheme. This file is served as static
+// JS and cannot import TS, hence the duplication.
+function resolvePort(pathname, primary) {
+  const afterScope = pathname.slice(SCOPE.length + String(primary).length);
+  const rest = afterScope === "" ? "/" : afterScope;
+  const override = PORT_OVERRIDE.exec(rest);
+  if (override) {
+    const overridePort = override[1];
+    if (overridePort !== undefined) return { port: Number(overridePort), rest: override[2] || "/" };
+  }
+  return { port: primary, rest };
+}
+
 // Monotonic request id — correlates each forwarded request with its reply.
 let nextId = 1;
 
@@ -33,13 +51,17 @@ self.addEventListener("fetch", (event) => {
 
 async function proxy(event) {
   const url = new URL(event.request.url);
-  // /__preview__/<port>/<rest...>
+  // /__preview__/<primary>/<rest...> — <primary> is the port the iframe was
+  // opened at. resolvePort() then decides the actual target: <primary>,
+  // unless <rest> carries an explicit /__port__/<n>/ override (a sibling
+  // request), in which case it routes to <n> instead.
   const match = url.pathname.match(/^\/__preview__\/([^/]+)(\/.*)?$/);
   if (!match) return textResponse(404, "Erdou preview: malformed preview URL " + url.pathname);
-  const port = Number(match[1]);
-  if (!Number.isInteger(port)) return textResponse(404, "Erdou preview: invalid port '" + match[1] + "'");
-  // Path+query already stripped of the /__preview__/<port> scope.
-  const rest = (match[2] || "/") + url.search;
+  const primary = Number(match[1]);
+  if (!Number.isInteger(primary)) return textResponse(404, "Erdou preview: invalid port '" + match[1] + "'");
+  const { port, rest: restPath } = resolvePort(url.pathname, primary);
+  // Query string was stripped by url.pathname; reattach it here.
+  const rest = restPath + url.search;
 
   const client = await appClient();
   if (!client) {

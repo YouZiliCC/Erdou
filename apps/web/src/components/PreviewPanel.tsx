@@ -4,8 +4,10 @@ import { detectRunCommand } from "../lib/run-detect.js";
 
 /** Preview: type/detect a run command, execute it in the persistent shell, then
  *  view whichever virtual port it opened via the `/__preview__/<port>/`
- *  reverse proxy (Task 5). Multi-port cross-routing is Task 8 — this only
- *  ever shows one primary (selected) port at a time. */
+ *  reverse proxy (Task 5). This panel only ever shows one primary (selected)
+ *  port at a time, but the app running in that iframe can still reach a
+ *  SIBLING open port by requesting `/__port__/<n>/…` (Task 8's SW routing) —
+ *  the ports bar hints at that when more than one port is open. */
 export function PreviewPanel({ studio }: { studio: Studio }) {
   const [cmd, setCmd] = useState(() => detectRunCommand(studio.runtime.fs) ?? "");
   const [running, setRunning] = useState(false);
@@ -100,6 +102,11 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
               </button>
             </span>
           ))
+        )}
+        {openPorts.length > 1 && (
+          <span className="sibling-hint" title="From the viewed app, fetch this path prefix to reach a sibling port">
+            reach a sibling via <code>/__port__/&lt;n&gt;/…</code>
+          </span>
         )}
       </div>
 
