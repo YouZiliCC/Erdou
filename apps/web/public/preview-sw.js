@@ -1,57 +1,127 @@
-// Erdou preview service worker: an in-browser dev server. The app posts a
-// "site" (a map of path -> { body, type }); this SW serves it under
-// /__preview__/<id>/ with SPA fallback, so multi-file apps, static assets,
-// fetch(), and client-side routing all work in the preview iframe.
+// Erdou preview service worker: a reverse proxy for the in-browser runtime.
+//
+// It intercepts an iframe's requests under `/__preview__/<port>/…`, marshals
+// each into a plain `{method,url,headers,body}`, and forwards it to the
+// controlling Studio page over a per-request MessageChannel. The page dispatches
+// it into the runtime (`runtime.dispatch(port, req)`) and posts the
+// `HttpResponse` back down the channel; we turn that into a real `Response` for
+// the iframe. Request → response only: no caching, no streaming.
+//
+// This marshalling mirrors `src/lib/preview-bridge.ts` (which cannot be imported
+// here — this file is served as static JS). Keep the two in sync.
 
-const sites = new Map();
+const SCOPE = "/__preview__/";
+// Bound the wait for the page to answer. A hung/absent dispatch becomes a 504
+// instead of leaving the iframe request pending forever.
+const DISPATCH_TIMEOUT_MS = 15000;
+// Statuses whose Response must have a null body (else the constructor throws).
+const NULL_BODY_STATUS = new Set([101, 204, 205, 304]);
+const BODYLESS_METHODS = new Set(["GET", "HEAD"]);
+
+// The nested segment that lets a previewed app reach a SIBLING port instead of
+// its own (the "primary" port it is viewed at).
+const PORT_OVERRIDE = /^\/__port__\/(\d+)(\/.*)?$/;
+
+// Kept in EXACT sync with `resolvePort` in `src/lib/preview-bridge.ts` — see
+// that copy's doc comment for the full scheme. This file is served as static
+// JS and cannot import TS, hence the duplication.
+function resolvePort(pathname, primary) {
+  const afterScope = pathname.slice(SCOPE.length + String(primary).length);
+  const rest = afterScope === "" ? "/" : afterScope;
+  const override = PORT_OVERRIDE.exec(rest);
+  if (override) {
+    const overridePort = override[1];
+    if (overridePort !== undefined) return { port: Number(overridePort), rest: override[2] || "/" };
+  }
+  return { port: primary, rest };
+}
+
+// Monotonic request id — correlates each forwarded request with its reply.
+let nextId = 1;
 
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
 
-self.addEventListener("message", (event) => {
-  const msg = event.data;
-  if (msg && msg.type === "erdou:site" && msg.id) {
-    sites.set(msg.id, msg.files || {});
-  }
-});
-
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
-
-  let siteId;
-  let path;
-  const direct = url.pathname.match(/^\/__preview__\/([^/]+)(\/.*)?$/);
-  if (direct) {
-    siteId = direct[1];
-    path = direct[2] || "/";
-  } else {
-    // Absolute path (e.g. fetch('/data.json')) from a preview document — map it
-    // into that document's site via the referrer.
-    const ref = event.request.referrer;
-    const viaRef = ref && new URL(ref).pathname.match(/^\/__preview__\/([^/]+)\//);
-    if (viaRef) {
-      siteId = viaRef[1];
-      path = url.pathname;
-    }
-  }
-  if (!siteId) return;
-
-  const site = sites.get(siteId);
-  if (!site) return;
-  event.respondWith(serve(site, path, event.request));
+  if (!url.pathname.startsWith(SCOPE)) return;
+  event.respondWith(proxy(event));
 });
 
-function serve(site, path, request) {
-  if (path === "/" || path === "") path = "/index.html";
-  let file = site[path];
-  if (!file && request.mode === "navigate") file = site["/index.html"]; // SPA fallback
-  if (!file) return new Response("Erdou preview: not found " + path, { status: 404 });
-  return new Response(file.body, {
-    headers: {
-      "content-type": file.type,
-      "access-control-allow-origin": "*",
-      "cache-control": "no-store",
-    },
+async function proxy(event) {
+  const url = new URL(event.request.url);
+  // /__preview__/<primary>/<rest...> — <primary> is the port the iframe was
+  // opened at. resolvePort() then decides the actual target: <primary>,
+  // unless <rest> carries an explicit /__port__/<n>/ override (a sibling
+  // request), in which case it routes to <n> instead.
+  const match = url.pathname.match(/^\/__preview__\/([^/]+)(\/.*)?$/);
+  if (!match) return textResponse(404, "Erdou preview: malformed preview URL " + url.pathname);
+  const primary = Number(match[1]);
+  if (!Number.isInteger(primary)) return textResponse(404, "Erdou preview: invalid port '" + match[1] + "'");
+  const { port, rest: restPath } = resolvePort(url.pathname, primary);
+  // Query string was stripped by url.pathname; reattach it here.
+  const rest = restPath + url.search;
+
+  const client = await appClient();
+  if (!client) {
+    return textResponse(503, "Erdou preview: no controlling Studio page — open the Erdou tab and retry.");
+  }
+
+  const req = await toRequest(event.request, rest);
+  const id = nextId++;
+  let reply;
+  try {
+    reply = await exchange(client, { type: "erdou:req", id, port, req });
+  } catch {
+    return textResponse(504, "Erdou preview: the app did not respond in time (port " + port + ").");
+  }
+  if (reply.error !== undefined) {
+    return textResponse(502, "Erdou preview: dispatch failed on port " + port + ": " + reply.error);
+  }
+  const res = reply.res;
+  const body = NULL_BODY_STATUS.has(res.status) ? null : res.body;
+  return new Response(body, { status: res.status, headers: res.headers });
+}
+
+// Marshal an intercepted Request into the plain shape the runtime expects.
+async function toRequest(request, urlRest) {
+  const headers = {};
+  for (const [key, value] of request.headers) headers[key] = value;
+  const body = BODYLESS_METHODS.has(request.method.toUpperCase())
+    ? new Uint8Array()
+    : new Uint8Array(await request.arrayBuffer());
+  return { method: request.method, url: urlRest, headers, body };
+}
+
+// The Studio page that runs the bridge is any same-origin window client whose
+// URL is NOT under the preview scope (the iframe itself is under it). Use
+// includeUncontrolled: the app page lives outside our scope, so we never
+// "control" it — we only message it.
+async function appClient() {
+  const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  return clients.find((c) => !new URL(c.url).pathname.startsWith(SCOPE)) || null;
+}
+
+// Post `message` to the page over a fresh MessageChannel and await its reply.
+// The dedicated channel isolates this request's response; `id` is echoed for
+// correlation/debugging. Rejects on timeout.
+function exchange(client, message) {
+  return new Promise((resolve, reject) => {
+    const channel = new MessageChannel();
+    const timer = setTimeout(() => {
+      channel.port1.close();
+      reject(new Error("timeout"));
+    }, DISPATCH_TIMEOUT_MS);
+    channel.port1.onmessage = (event) => {
+      clearTimeout(timer);
+      channel.port1.close();
+      resolve(event.data || {});
+    };
+    client.postMessage(message, [channel.port2]);
   });
+}
+
+function textResponse(status, text) {
+  return new Response(text, { status, headers: { "content-type": "text/plain", "cache-control": "no-store" } });
 }

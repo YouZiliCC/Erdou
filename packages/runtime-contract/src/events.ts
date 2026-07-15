@@ -10,6 +10,7 @@ export type RuntimeEvent =
   | { type: "process.exited"; pid: number; code: number; signal: string | null }
   | { type: "file.changed"; path: string; kind: "create" | "modify" | "delete" }
   | { type: "port.opened"; port: number; url: string }
+  | { type: "port.closed"; port: number }
   | { type: "resource.warning"; resource: string; detail: string };
 
 export type RuntimeEventListener = (event: RuntimeEvent) => void;

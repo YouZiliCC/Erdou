@@ -1,11 +1,14 @@
 import { BrowserRuntime, IndexedDbSnapshotStore, type ShellSession } from "@erdou/runtime-browser";
-import { ModelGateway, type ModelConfig } from "@erdou/model-gateway";
+import { ModelGateway, type ModelConfig, type ChatMessage } from "@erdou/model-gateway";
 import { CodingAgent, type AgentEvent, type ApprovalRequest } from "@erdou/agent-core";
-import type { ApprovalMode } from "./model-config.js";
+import { loadApprovalMode, saveApprovalMode, loadModel, saveModel, type ApprovalMode } from "./model-config.js";
+import { getTheme, applyTheme } from "./theme.js";
 import type { RuntimeEvent, ProcessInfo, Snapshot } from "@erdou/runtime-contract";
 import { registerLanguages, AGENT_LANGUAGES, AGENT_COMMANDS } from "./languages.js";
 import { loadRuns, saveRuns, clearRuns } from "./runs-store.js";
 import { SnapshotReader, buildFileChanges } from "./snapshot-read.js";
+import { startPreviewProxy } from "./preview-bridge.js";
+import { writeFolderState, readFolderState, type FolderState } from "./folder-state.js";
 import {
   loadFolderIntoVfs,
   saveVfsToFolder,
@@ -49,6 +52,10 @@ export interface Run {
   status: RunStatus;
   trace: TraceLine[];
   changes: FileChange[];
+  /** The model transcript so far (system + user/assistant/tool turns), seeded
+   *  from `AgentRunResult.transcript` after each turn. Replies pass this back
+   *  in as `priorMessages` so the agent continues the same conversation. */
+  messages: ChatMessage[];
   createdAt: number;
 }
 
@@ -86,8 +93,18 @@ export class Studio {
   systemLog: TraceLine[] = [];
   running = false;
   fsVersion = 0;
+  /** Ports currently served by the runtime (Preview panel's open-ports list),
+   *  tracked from `port.opened`/`port.closed` — not persisted; a fresh session
+   *  starts with nothing served until something runs. */
+  openPorts: { port: number }[] = [];
   /** Bumped on every change so React's useSyncExternalStore re-renders. */
   version = 0;
+  /** Bumped ONLY when `mountFolder` hydrates a persisted config from a mounted
+   *  folder's `.erdou/config.json` (theme/approval-mode/model, incl. the api
+   *  key) — never on every `notify()`. Consumers that seed local state from
+   *  `localStorage` once (e.g. App.tsx's `model`/`mode`) watch this to re-read
+   *  it after a folder mount, instead of requiring a full page reload. */
+  configVersion = 0;
 
   /**
    * A gated command awaiting the user's decision (Confirm mode). While set, the
@@ -107,6 +124,10 @@ export class Studio {
   /** A persisted handle awaiting a user gesture to re-grant permission. */
   pendingMount: DirHandleLike | null = null;
   private folderSaveTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Debounce timer for `.erdou/` session-state (runs + config) writes — a
+   *  dedicated timer, separate from the project file-sync above and from
+   *  `mountMtimes`. */
+  private folderStateTimer: ReturnType<typeof setTimeout> | undefined;
   /** vfsPath -> disk lastModified, so load/save/rescan can tell our own write-backs from external edits. */
   private mountMtimes: MountMtimes = new Map();
   /** Polls the mounted folder for external disk edits and pulls them into the VFS. */
@@ -138,6 +159,10 @@ export class Studio {
     this.booted = true;
     await this.runtime.boot();
     registerLanguages(this.runtime);
+    // Preview reverse-proxy: SW intercepts /__preview__/<port>/ iframe requests
+    // and forwards them here to `runtime.dispatch`. Fire-and-forget: SW
+    // registration must not block boot, and it self-guards for no-SW envs.
+    void startPreviewProxy(this.runtime);
     this.runs = await loadRuns();
     try {
       const snap = await this.store.load(SNAPSHOT_ID);
@@ -158,6 +183,11 @@ export class Studio {
         this.notify();
       } else if (e.type === "port.opened") {
         this.logSystem("system", `Port ${e.port} exposed`, e.url);
+        if (!this.openPorts.some((p) => p.port === e.port)) this.openPorts = [...this.openPorts, { port: e.port }];
+        this.notify();
+      } else if (e.type === "port.closed") {
+        this.openPorts = this.openPorts.filter((p) => p.port !== e.port);
+        this.notify();
       }
     });
 
@@ -186,8 +216,61 @@ export class Studio {
     await persistHandle(handle);
     this.fsVersion++;
     this.logSystem("system", `Mounted local folder "${handle.name}" (${count} files). Changes now sync back to disk.`);
+
+    // The folder is the source of truth for session state: if it already has
+    // an `.erdou/`, hydrate from it (chat history + theme/approval/model incl.
+    // the api key); otherwise seed it from what we have now.
+    try {
+      const st = await readFolderState(handle);
+      if (st) {
+        this.runs = st.runs;
+        if (st.config) {
+          applyTheme(st.config.theme);
+          saveApprovalMode(st.config.approvalMode);
+          saveModel(st.config.model);
+          this.configVersion++;
+        }
+        this.logSystem("system", "Loaded session state from .erdou/ — the folder is now the source of truth.");
+      } else {
+        await writeFolderState(handle, this.currentState());
+      }
+    } catch (err) {
+      this.logSystem("error", "Could not load/seed .erdou/ session state", asMessage(err));
+    }
+
     this.startMountWatcher();
     this.notify();
+  }
+
+  /** Snapshot of what would be written to `.erdou/` right now. */
+  private currentState(): FolderState {
+    return {
+      runs: this.runs,
+      config: { theme: getTheme(), approvalMode: loadApprovalMode(), model: loadModel() },
+    };
+  }
+
+  /** Debounce-write session state (runs + config) to `.erdou/`. No-op if
+   *  nothing is mounted. Call after a run change (start/finish) or a
+   *  theme/approval-mode/model-config change. */
+  private scheduleFolderStateSave(): void {
+    if (!this.mount) return;
+    if (this.folderStateTimer) clearTimeout(this.folderStateTimer);
+    this.folderStateTimer = setTimeout(() => void this.saveStateToFolder(), 600);
+  }
+  private async saveStateToFolder(): Promise<void> {
+    if (!this.mount) return;
+    try {
+      await writeFolderState(this.mount, this.currentState());
+    } catch (err) {
+      this.logSystem("error", "Failed to sync session state to local folder", asMessage(err));
+    }
+  }
+
+  /** Call after a theme/approval-mode/model-config change so a mounted
+   *  folder's `.erdou/` stays current. No-op if nothing is mounted. */
+  saveConfigToFolder(): void {
+    this.scheduleFolderStateSave();
   }
 
   /** Re-grant permission to a persisted mount (needs a user gesture). */
@@ -202,10 +285,15 @@ export class Studio {
 
   async unmount(): Promise<void> {
     this.stopMountWatcher();
+    if (this.folderStateTimer) {
+      clearTimeout(this.folderStateTimer);
+      this.folderStateTimer = undefined;
+    }
     this.mount = null;
     this.mountName = null;
     this.pendingMount = null;
     await clearPersistedHandle();
+    // this.runs is left as-is; future changes go back to IndexedDB via saveRuns.
     this.notify();
   }
 
@@ -316,8 +404,6 @@ export class Studio {
   /** Start a new agent run: create the thread, drive the agent, persist. */
   async startRun(task: string, model: ModelConfig, approvalMode: ApprovalMode): Promise<void> {
     if (this.running) return;
-    this.running = true;
-    this.autoAllow = new Set();
     const run: Run = {
       id: crypto.randomUUID(),
       title: runTitle(task),
@@ -325,14 +411,49 @@ export class Studio {
       status: "running",
       trace: [],
       changes: [],
+      messages: [],
       createdAt: Date.now(),
     };
     this.runs = [run, ...this.runs];
     this.activeRunId = run.id;
     this.notify();
+    await this.runAgentTurn(run, task, model, approvalMode);
+  }
 
-    // Capture the VFS at run start, then collect every path the agent touches
-    // via a run-scoped subscription (separate from the boot-time save handler).
+  /**
+   * Continue an existing thread: append the reply as a "you" bubble, then
+   * drive another agent turn seeded with the thread's transcript so far
+   * (`run.messages`), so the model sees the whole conversation. No-op if
+   * something is already running or the run doesn't exist.
+   */
+  async replyToRun(runId: string, task: string, model: ModelConfig, approvalMode: ApprovalMode): Promise<void> {
+    if (this.running) return;
+    const run = this.runs.find((r) => r.id === runId);
+    if (!run || run.status === "running") return;
+    run.status = "running";
+    this.appendLine(run, "user", task);
+    await this.runAgentTurn(run, task, model, approvalMode);
+  }
+
+  /**
+   * Drive one agent turn — a fresh run's first turn, or a reply — against
+   * `run`: builds the agent (seeded with `run.messages`, empty on a fresh
+   * run), streams events into `run`'s trace, captures the file diff for just
+   * this turn, and updates `run.status`/`run.messages`/`run.changes`.
+   * Shared by `startRun` and `replyToRun` so the two can't diverge.
+   */
+  private async runAgentTurn(
+    run: Run,
+    task: string,
+    model: ModelConfig,
+    approvalMode: ApprovalMode,
+  ): Promise<void> {
+    this.running = true;
+    this.autoAllow = new Set();
+
+    // Capture the VFS at turn start, then collect every path the agent
+    // touches via a run-scoped subscription (separate from the boot-time
+    // save handler).
     const startSnap = await this.runtime.createSnapshot();
     const changed = new Set<string>();
     const unsub = this.runtime.subscribe((e) => {
@@ -348,17 +469,22 @@ export class Studio {
         languages: AGENT_LANGUAGES,
         commands: AGENT_COMMANDS,
         notes:
-          "You can build & preview web apps: write a React/TS project (e.g. /src/main.tsx), and the user can Build & Run it (bundled in-browser, npm deps from a CDN).",
+          "You can build & preview web apps: write a React/TS project (e.g. /src/main.tsx) and the user can Bundle & Run it (bundled in-browser, npm deps from a CDN), `erdou serve <dir>` a static site, or `erdou.serve(app, port)` a Python WSGI app — any of these serves it on a port to preview.",
       },
       onEvent: (e) => this.onAgentEvent(run, e),
       approve: this.makeApprove(approvalMode),
     });
     try {
-      await agent.run(task);
+      // Empty `run.messages` (a fresh run) makes the agent build its system
+      // prompt from scratch; a non-empty transcript (a reply) makes it
+      // continue the existing conversation instead — see CodingAgent.run.
+      const result = await agent.run(task, run.messages);
       // Compute the diff BEFORE deciding status, so "review" actually triggers
       // when the run changed files (the guard was a no-op while changes was []).
-      run.changes = await this.computeRunChanges(startSnap, changed);
+      const turnChanges = await this.computeRunChanges(startSnap, changed);
+      run.changes = this.mergeChanges(run.changes, turnChanges);
       run.status = run.changes.length > 0 ? "review" : "done";
+      run.messages = result.transcript;
     } catch (err) {
       this.appendLine(run, "error", "Agent stopped", asMessage(err));
       run.status = "error";
@@ -370,17 +496,44 @@ export class Studio {
       this.pendingApproval = null;
       await this.save();
       await saveRuns(this.runs);
+      this.scheduleFolderStateSave();
       this.notify();
     }
   }
 
-  /** Diff the paths touched during a run against the run-start snapshot. */
+  /** Diff the paths touched during a turn against the snapshot taken at its start. */
   private async computeRunChanges(startSnap: Snapshot, changed: Set<string>): Promise<FileChange[]> {
     if (changed.size === 0) return [];
     const before = await SnapshotReader.open(startSnap);
     const after = (path: string): string | null =>
       this.runtime.fs.exists(path) ? new TextDecoder().decode(this.runtime.fs.readFile(path)) : null;
     return buildFileChanges(changed, (p) => before.read(p), after);
+  }
+
+  /**
+   * Fold a turn's file changes into the run's cumulative list, keyed by path.
+   * A reply often touches a file a prior turn already changed; appending a
+   * second entry for the same path would collide with `DiffPanel`'s
+   * `key={path}` and confuse `revertChange`'s by-path lookup, so instead each
+   * path keeps ONE entry spanning every turn: `before` stays the earliest
+   * known content (first time this run touched the path) and `after` becomes
+   * the latest. `kind` is re-derived from that span (net create/delete/modify),
+   * and a path that nets out unchanged since the run started is dropped.
+   */
+  private mergeChanges(existing: FileChange[], turnChanges: FileChange[]): FileChange[] {
+    const byPath = new Map(existing.map((c) => [c.path, c]));
+    for (const c of turnChanges) {
+      const prior = byPath.get(c.path);
+      const before = prior ? prior.before : c.before;
+      if (before === c.after) {
+        byPath.delete(c.path); // net no-op since the run started
+        continue;
+      }
+      const kind: FileChange["kind"] =
+        c.after === "" ? "delete" : prior?.kind === "create" ? "create" : prior ? "modify" : c.kind;
+      byPath.set(c.path, { path: c.path, kind, before, after: c.after });
+    }
+    return [...byPath.values()].sort((x, y) => (x.path < y.path ? -1 : 1));
   }
 
   /** Undo a single file change from a run: creates are removed, others restored. */
@@ -404,6 +557,7 @@ export class Studio {
     if (!run || run.status !== "review") return;
     run.status = "done";
     void saveRuns(this.runs);
+    this.scheduleFolderStateSave();
     this.notify();
   }
 
@@ -452,6 +606,13 @@ export class Studio {
     return this.runtime.getProcesses();
   }
 
+  /** Stop serving a port (the Preview panel's × button). The runtime emits
+   *  `port.closed` synchronously, which the boot-time subscription turns into
+   *  an `openPorts` update + notify — nothing further needed here. */
+  closePort(port: number): void {
+    this.runtime.closePort(port);
+  }
+
   async resetProject(): Promise<void> {
     await this.store.delete(SNAPSHOT_ID);
     await clearRuns();
@@ -461,6 +622,14 @@ export class Studio {
 
 const asMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 const firstLine = (s: string): string => s.split("\n")[0] ?? "";
+
+/** Collapse whitespace/newlines to a single line and cut to `max` chars, for a
+ *  one-line summary of a (possibly multi-line) args/result string. */
+export function truncate(s: string, max: number): string {
+  const oneLine = s.replace(/\s+/g, " ").trim();
+  return oneLine.length > max ? oneLine.slice(0, max) + "…" : oneLine;
+}
+
 function formatArgs(args: Record<string, unknown>): string {
   return Object.entries(args)
     .map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`)

@@ -83,7 +83,11 @@ function makeCtx(argv: string[], fs: Vfs): { ctx: ExecContext; stdout: PipeStrea
   stdin.end();
   const stdout = new PipeStream();
   const stderr = new PipeStream();
-  return { ctx: { pid: 1, argv, env: {}, cwd: "/", stdin, stdout, stderr, fs }, stdout, stderr };
+  return {
+    ctx: { pid: 1, argv, env: {}, cwd: "/", stdin, stdout, stderr, fs, serve: () => {} },
+    stdout,
+    stderr,
+  };
 }
 
 describe("python runner (plumbing, mock Pyodide)", () => {

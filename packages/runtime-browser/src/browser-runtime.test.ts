@@ -63,4 +63,29 @@ describe("BrowserRuntime", () => {
     expect(await rt.wait(handle.pid)).toEqual({ code: 0, signal: null });
     expect(await handle.stdout.text()).toBe("direct\n");
   });
+
+  it("wires ctx.serve so a spawned program can register an HTTP handler, dispatched via Runtime.dispatch", async () => {
+    const rt = new BrowserRuntime({ clock: () => 0 });
+    await rt.boot();
+    rt.registerProgram("httpd", async (ctx) => {
+      ctx.serve(8080, (req) => ({
+        status: 200,
+        headers: { "content-type": "text/plain" },
+        body: new TextEncoder().encode("served " + req.url),
+      }));
+      return 0;
+    });
+    const handle = await rt.spawn({ cmd: "httpd" });
+    await rt.wait(handle.pid);
+    const res = await rt.dispatch(8080, { method: "GET", url: "/hi", headers: {}, body: new Uint8Array() });
+    expect(res.status).toBe(200);
+    expect(new TextDecoder().decode(res.body)).toBe("served /hi");
+  });
+
+  it("dispatch on an unbound port returns a 502", async () => {
+    const rt = new BrowserRuntime({ clock: () => 0 });
+    await rt.boot();
+    const res = await rt.dispatch(9999, { method: "GET", url: "/", headers: {}, body: new Uint8Array() });
+    expect(res.status).toBe(502);
+  });
 });

@@ -10,7 +10,7 @@ export function makeShell(): { shell: Shell; vfs: Vfs } {
   const vfs = new Vfs({ clock: () => 0 });
   const bus = new EventBus();
   const registry: ProgramRegistry = new Map();
-  const table = new ProcessTable({ vfs, bus, registry, clock: () => 0 });
+  const table = new ProcessTable({ vfs, bus, registry, clock: () => 0, serve: () => {} });
   createBuiltins({
     registry,
     listProcesses: () => table.list(),

@@ -3,7 +3,7 @@ import { ProcessTable } from "./process-table.js";
 import type { Program, ProgramRegistry } from "./program.js";
 import { Vfs } from "../vfs/vfs.js";
 import { EventBus } from "../core/event-bus.js";
-import type { RuntimeEvent } from "@erdou/runtime-contract";
+import type { HttpHandler, RuntimeEvent } from "@erdou/runtime-contract";
 
 function make(programs: Record<string, Program>) {
   const registry: ProgramRegistry = new Map(Object.entries(programs));
@@ -12,8 +12,15 @@ function make(programs: Record<string, Program>) {
   const events: RuntimeEvent[] = [];
   bus.subscribe((e) => events.push(e));
   let t = 1000;
-  const table = new ProcessTable({ vfs, bus, registry, clock: () => t++ });
-  return { table, events };
+  const served = new Map<number, HttpHandler>();
+  const table = new ProcessTable({
+    vfs,
+    bus,
+    registry,
+    clock: () => t++,
+    serve: (port, handler) => served.set(port, handler),
+  });
+  return { table, events, served };
 }
 
 describe("ProcessTable", () => {

@@ -1,5 +1,6 @@
 import type { Executor, FileSystemApi } from "@erdou/runtime-contract";
 import type { Pyodide, PyodideLoader, EmscriptenFS } from "./pyodide.js";
+import { ERDOU_SETUP, createServeBinding } from "./erdou-module.js";
 
 const decoder = new TextDecoder();
 
@@ -81,10 +82,15 @@ export function createPythonRunner(opts: PythonRuntimeOptions): Executor {
     py.globals.set("__erdou_file", scriptArgv[0]);
     py.globals.set("__erdou_argv", scriptArgv);
     py.globals.set("__erdou_cwd", ctx.cwd);
+    // Bind `__erdou_serve` fresh each run so `erdou.serve(app, port)` registers
+    // on THIS execution's `ctx.serve`. The setup Python (installing the `erdou`
+    // module + WSGI helper) is prepended to the runner so it executes before the
+    // user's `import erdou`, in Pyodide's persistent globals namespace.
+    py.globals.set("__erdou_serve", createServeBinding(py, ctx));
 
     let exitCode = 0;
     try {
-      await py.runPythonAsync(RUNNER);
+      await py.runPythonAsync(ERDOU_SETUP + "\n" + RUNNER);
       exitCode = Number(py.globals.get("__erdou_exit")) || 0;
     } catch (err) {
       ctx.stderr.write(message(err) + "\n");

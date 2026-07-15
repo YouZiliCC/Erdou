@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import * as contract from "./index.js";
 import { ErrnoError } from "./index.js";
-import type { Runtime, RuntimeEvent } from "./index.js";
+import type { Runtime, RuntimeEvent, HttpRequest, HttpResponse } from "./index.js";
 
 describe("contract surface", () => {
   it("exports ErrnoError as a working constructor", () => {
@@ -32,5 +32,14 @@ describe("contract surface", () => {
       }),
     };
     expect(typeof partial.getCapabilities).toBe("function");
+  });
+
+  it("carries HTTP request/response + port.closed shapes", () => {
+    const req: HttpRequest = { method: "GET", url: "/", headers: {}, body: new Uint8Array() };
+    const res: HttpResponse = { status: 200, headers: { "content-type": "text/plain" }, body: new Uint8Array() };
+    const ev: RuntimeEvent = { type: "port.closed", port: 8000 };
+    expect(req.method).toBe("GET");
+    expect(res.status).toBe(200);
+    expect(ev.type).toBe("port.closed");
   });
 });

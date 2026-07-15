@@ -38,7 +38,7 @@ function make(programs: Record<string, Program>) {
   const registry: ProgramRegistry = new Map(Object.entries(programs));
   const vfs = new Vfs({ clock: () => 0 });
   const bus = new EventBus();
-  return new ProcessTable({ vfs, bus, registry, clock: () => 0 });
+  return new ProcessTable({ vfs, bus, registry, clock: () => 0, serve: () => {} });
 }
 
 describe("pipelines", () => {

@@ -16,6 +16,7 @@ import type { RuntimeEventListener, Unsubscribe } from "./events.js";
 import type { RuntimeCapabilities } from "./capabilities.js";
 import type { Snapshot } from "./snapshot.js";
 import type { VirtualPort } from "./port.js";
+import type { HttpRequest, HttpResponse } from "./http.js";
 
 /**
  * The frozen boundary every Runtime implementation must satisfy. Upper layers
@@ -52,6 +53,8 @@ export interface Runtime {
 
   listen(port: number): Promise<VirtualPort>;
   exposePort(port: number): Promise<string>;
+  /** Dispatch an HTTP request to whatever handler is serving `port`. */
+  dispatch(port: number, req: HttpRequest): Promise<HttpResponse>;
 
   getCapabilities(): Promise<RuntimeCapabilities>;
   subscribe(listener: RuntimeEventListener): Unsubscribe;

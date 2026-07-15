@@ -2,8 +2,15 @@ import { useState } from "react";
 import { toggleTheme } from "../lib/theme.js";
 
 export function TitleBar({
-  workspace, model, running, onSettings, onReset,
-}: { workspace: string; model: string; running: boolean; onSettings: () => void; onReset: () => void }) {
+  workspace, model, running, onSettings, onReset, onThemeChange,
+}: {
+  workspace: string;
+  model: string;
+  running: boolean;
+  onSettings: () => void;
+  onReset: () => void;
+  onThemeChange?: () => void;
+}) {
   const [, force] = useState(0);
   return (
     <header className="titlebar">
@@ -12,7 +19,16 @@ export function TitleBar({
       <span className="sp" />
       <span className="chip"><span className={"dot " + (running ? "busy" : "on")} /> runtime · js·py·wasi</span>
       <span className="chip">{model}</span>
-      <button className="btn ghost" onClick={() => { toggleTheme(); force((n) => n + 1); }}>◐</button>
+      <button
+        className="btn ghost"
+        onClick={() => {
+          toggleTheme();
+          force((n) => n + 1);
+          onThemeChange?.();
+        }}
+      >
+        ◐
+      </button>
       <button
         className="btn ghost"
         onClick={() => {

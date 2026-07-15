@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { BrowserRuntime } from "@erdou/runtime-browser";
-import { ModelGateway, type ModelConfig } from "@erdou/model-gateway";
+import { ModelGateway, type ModelConfig, type ChatMessage } from "@erdou/model-gateway";
 import { CodingAgent } from "./agent.js";
 import type { AgentEvent } from "./types.js";
 
@@ -121,6 +121,74 @@ function fakeGateway(): ModelGateway {
     .mockResolvedValueOnce({ content: "done", toolCalls: [] });
   return { chat } as unknown as ModelGateway;
 }
+
+describe("multi-turn continuation", () => {
+  it("carries prior transcript into the next turn without a duplicate system prompt", async () => {
+    const runtime = await freshRuntime();
+    // `messages` is mutated in place by the agent during a run, so snapshot (shallow-copy) it
+    // at call time rather than relying on the reference captured in `chat.mock.calls`.
+    const seenMessages: ChatMessage[][] = [];
+    const chat = vi
+      .fn()
+      .mockImplementationOnce(async (_model: unknown, messages: ChatMessage[]) => {
+        seenMessages.push([...messages]);
+        return {
+          content: "",
+          toolCalls: [{ id: "1", name: "list_dir", arguments: JSON.stringify({ path: "/" }) }],
+        };
+      })
+      .mockImplementationOnce(async (_model: unknown, messages: ChatMessage[]) => {
+        seenMessages.push([...messages]);
+        return { content: "turn 1 done", toolCalls: [] };
+      })
+      .mockImplementationOnce(async (_model: unknown, messages: ChatMessage[]) => {
+        seenMessages.push([...messages]);
+        return { content: "turn 2 done", toolCalls: [] };
+      });
+    const gateway = { chat } as unknown as ModelGateway;
+    const agent = new CodingAgent({ runtime, gateway, model });
+
+    const r1 = await agent.run("t1");
+    expect(r1.stoppedReason).toBe("done");
+
+    const r2 = await agent.run("t2", r1.transcript);
+    expect(r2.stoppedReason).toBe("done");
+
+    expect(chat).toHaveBeenCalledTimes(3);
+    const turn2FirstMessages = seenMessages[2];
+    if (!turn2FirstMessages) throw new Error("expected a 3rd chat call");
+
+    // Exactly one system message, and it's the one already present in r1.transcript.
+    const systemMessages = turn2FirstMessages.filter((m) => m.role === "system");
+    expect(systemMessages).toHaveLength(1);
+    expect(systemMessages[0]).toBe(r1.transcript[0]);
+
+    // Turn-1 context (user task, assistant tool call, tool result, assistant done) is carried.
+    expect(turn2FirstMessages.some((m) => m.role === "user" && m.content === "t1")).toBe(true);
+    expect(
+      turn2FirstMessages.some(
+        (m) => m.role === "assistant" && m.toolCalls?.some((tc) => tc.name === "list_dir"),
+      ),
+    ).toBe(true);
+    expect(turn2FirstMessages.some((m) => m.role === "tool" && m.toolCallId === "1")).toBe(true);
+    expect(turn2FirstMessages.some((m) => m.role === "assistant" && m.content === "turn 1 done")).toBe(true);
+
+    // The new turn's user message is appended at the end (the state at call time, before any
+    // further mutation of the shared array by the rest of the run).
+    expect(turn2FirstMessages[turn2FirstMessages.length - 1]).toEqual({ role: "user", content: "t2" });
+  });
+
+  it("still starts fresh with [system, user, ...] when priorMessages is omitted", async () => {
+    const runtime = await freshRuntime();
+    const gateway = scriptedGateway([final("ok")]);
+    const agent = new CodingAgent({ runtime, gateway, model });
+    const result = await agent.run("fresh task");
+
+    expect(result.transcript[0]?.role).toBe("system");
+    expect(result.transcript[1]).toEqual({ role: "user", content: "fresh task" });
+    expect(result.transcript.filter((m) => m.role === "system")).toHaveLength(1);
+  });
+});
 
 describe("approval gate", () => {
   it("does not run a gated command when denied", async () => {

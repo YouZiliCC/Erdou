@@ -21,6 +21,7 @@ export function App() {
   function changeMode(next: ApprovalMode) {
     setMode(next);
     saveApprovalMode(next);
+    studio.saveConfigToFolder();
   }
 
   useEffect(() => {
@@ -29,12 +30,32 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The folder is the source of truth for config: when `mountFolder` hydrates
+  // a DIFFERENT theme/approval-mode/model from a mounted folder's `.erdou/`,
+  // Studio bumps `configVersion` (never on unrelated notifies). Re-sync from
+  // localStorage so the agent (via `runTask` below) and the composer/settings
+  // UI pick it up immediately — no reload required. Re-reading on the initial
+  // render too is a harmless no-op (same values just loaded by useState above).
+  useEffect(() => {
+    setModel(loadModel());
+    setMode(loadApprovalMode());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [studio.configVersion]);
+
+  // Reply into the selected thread if one is active and idle; otherwise start
+  // a fresh thread. "+ New task" clears the selection via newDraft(), so the
+  // next send always falls into the startRun branch.
   function runTask(task: string) {
     if (!configured) {
       setSettingsOpen(true);
       return;
     }
-    void studio.startRun(task, model, mode);
+    const active = studio.activeRun;
+    if (active && !studio.running && active.status !== "running") {
+      void studio.replyToRun(active.id, task, model, mode);
+    } else {
+      void studio.startRun(task, model, mode);
+    }
   }
 
   async function openFolder() {
@@ -64,6 +85,7 @@ export function App() {
         running={studio.running}
         onSettings={() => setSettingsOpen(true)}
         onReset={() => void studio.resetProject()}
+        onThemeChange={() => studio.saveConfigToFolder()}
       />
       <div className="shell">
         <TaskSidebar studio={studio} onNew={() => studio.newDraft()} onOpenFolder={() => void openFolder()} />
@@ -73,7 +95,13 @@ export function App() {
             {studio.activeRun && <span className={"chip " + studio.activeRun.status}>{studio.activeRun.status}</span>}
           </div>
           <Conversation studio={studio} />
-          <Composer running={studio.running} mode={mode} onModeChange={changeMode} onRun={runTask} />
+          <Composer
+            running={studio.running || studio.activeRun?.status === "running"}
+            replying={studio.activeRun !== undefined}
+            mode={mode}
+            onModeChange={changeMode}
+            onRun={runTask}
+          />
         </section>
         <section className="review">
           <ReviewPane studio={studio} />
@@ -88,6 +116,7 @@ export function App() {
           onSave={(cfg) => {
             saveModel(cfg);
             setModel(cfg);
+            studio.saveConfigToFolder();
             setSettingsOpen(false);
           }}
           onClose={() => setSettingsOpen(false)}
