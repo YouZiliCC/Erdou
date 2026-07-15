@@ -4,6 +4,7 @@ import { useStudio } from "./lib/use-studio.js";
 import { loadModel, saveModel } from "./lib/model-config.js";
 import { SettingsDialog } from "./components/SettingsDialog.js";
 import { TitleBar } from "./components/TitleBar.js";
+import { TaskSidebar } from "./components/TaskSidebar.js";
 
 export function App() {
   const studio = useStudio();
@@ -44,24 +45,7 @@ export function App() {
         onSettings={() => setSettingsOpen(true)}
       />
       <div className="shell">
-        <aside className="sidebar">
-          <div className="stub">task sidebar — Task 7</div>
-          <div className="sidebar-footer">
-            {studio.mount ? (
-              <span className="chip" title="Local folder mounted — changes sync to disk.">
-                📁 {studio.mountName}
-              </span>
-            ) : studio.pendingMount ? (
-              <button className="btn ghost" onClick={() => void studio.reconnectMount()}>
-                Reconnect 📁 {studio.mountName}
-              </button>
-            ) : (
-              <button className="btn ghost" onClick={() => void openFolder()}>
-                Open folder
-              </button>
-            )}
-          </div>
-        </aside>
+        <TaskSidebar studio={studio} onNew={() => studio.newDraft()} onOpenFolder={() => void openFolder()} />
         <section className="center">
           <div className="stub">conversation — Task 8</div>
         </section>

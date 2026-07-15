@@ -30,7 +30,7 @@ input, textarea { font-family: var(--mono); }
 
 /* generic chips / buttons used across panels */
 .chip { font-size:10px; padding:1.5px 8px; border-radius:20px; border:1px solid var(--border); color:var(--muted); display:inline-flex; align-items:center; gap:5px; }
-.chip.run{color:var(--accent);border-color:rgba(88,166,255,.35);}
+.chip.run,.chip.running{color:var(--accent);border-color:rgba(88,166,255,.35);}
 .chip.review{color:var(--purple);border-color:rgba(198,149,198,.35);}
 .chip.done{color:var(--green);border-color:rgba(63,185,80,.3);}
 .chip.error{color:var(--red);border-color:rgba(248,81,73,.3);}
@@ -56,6 +56,20 @@ input, textarea { font-family: var(--mono); }
 /* ---- placeholder stub regions (Tasks 7/8/10 replace this) ---- */
 .stub { margin: auto; color: var(--faint); font-size: 12px; font-family: var(--mono); text-align: center; padding: 24px; }
 .sidebar-footer { margin-top: auto; padding: 10px 12px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
+
+/* ---- task sidebar (Task 7) ---- */
+.newtask { display: block; width: calc(100% - 20px); margin: 10px 10px 6px; text-align: left; }
+.sbh { padding: 6px 12px 4px; color: var(--faint); font-size: 10.5px; letter-spacing: 1px; text-transform: uppercase; }
+.threads { flex: 1; min-height: 0; overflow-y: auto; padding: 0 6px 6px; display: flex; flex-direction: column; gap: 2px; }
+.threads .hint.sm { padding: 14px 10px; font-size: 12px; }
+.thread { padding: 8px 9px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+.thread:hover { background: var(--elev); }
+.thread.sel { background: var(--elev); border-color: var(--border); }
+.thread .row { display: flex; align-items: center; gap: 8px; }
+.thread .ttl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--ink); }
+.thread .prev { margin-top: 3px; color: var(--faint); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sbf { margin-top: auto; padding: 10px 12px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 11.5px; }
+.sbf .rt { display: flex; align-items: center; gap: 6px; }
 
 /* files */
 .tree { padding: 4px 6px; }

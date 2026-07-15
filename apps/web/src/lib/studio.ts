@@ -3,6 +3,7 @@ import { ModelGateway, type ModelConfig } from "@erdou/model-gateway";
 import { CodingAgent, type AgentEvent } from "@erdou/agent-core";
 import type { RuntimeEvent, ProcessInfo } from "@erdou/runtime-contract";
 import { registerLanguages, AGENT_LANGUAGES, AGENT_COMMANDS } from "./languages.js";
+import { loadRuns, saveRuns } from "./runs-store.js";
 import {
   loadFolderIntoVfs,
   saveVfsToFolder,
@@ -25,11 +26,38 @@ export interface TraceLine {
   ts: number;
 }
 
+export type RunStatus = "running" | "review" | "done" | "error";
+
+export interface FileChange {
+  path: string;
+  kind: "create" | "modify" | "delete";
+  before: string;
+  after: string;
+}
+
+/** One agent run — a "task thread" in the sidebar. Plain JSON (persisted). */
+export interface Run {
+  id: string;
+  title: string;
+  task: string;
+  status: RunStatus;
+  trace: TraceLine[];
+  changes: FileChange[];
+  createdAt: number;
+}
+
 export interface FileNode {
   name: string;
   path: string;
   type: "file" | "directory" | "symlink";
   children?: FileNode[];
+}
+
+/** First non-empty line of the task, trimmed to ~48 chars. Pure. */
+export function runTitle(task: string): string {
+  const firstLine = (task.split("\n")[0] ?? "").trim();
+  const base = firstLine.length > 0 ? firstLine : task.trim();
+  return base.length > 48 ? base.slice(0, 47).trimEnd() + "…" : base;
 }
 
 /**
@@ -44,7 +72,11 @@ export class Studio {
   private nextId = 1;
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
 
-  trace: TraceLine[] = [];
+  /** Agent run history, most-recent first (persisted in IndexedDB). */
+  runs: Run[] = [];
+  activeRunId: string | null = null;
+  /** Terminal/mount/system messages not tied to any run. */
+  systemLog: TraceLine[] = [];
   running = false;
   fsVersion = 0;
   /** Bumped on every change so React's useSyncExternalStore re-renders. */
@@ -56,6 +88,10 @@ export class Studio {
   /** A persisted handle awaiting a user gesture to re-grant permission. */
   pendingMount: DirHandleLike | null = null;
   private folderSaveTimer: ReturnType<typeof setTimeout> | undefined;
+
+  get activeRun(): Run | undefined {
+    return this.runs.find((r) => r.id === this.activeRunId);
+  }
 
   private readonly listeners = new Set<() => void>();
   subscribe(listener: () => void): () => void {
@@ -72,16 +108,17 @@ export class Studio {
     this.booted = true;
     await this.runtime.boot();
     registerLanguages(this.runtime);
+    this.runs = await loadRuns();
     try {
       const snap = await this.store.load(SNAPSHOT_ID);
       if (snap) {
         await this.runtime.restoreSnapshot(snap);
-        this.log("system", "Restored your project from this browser.");
+        this.logSystem("system", "Restored your project from this browser.");
       } else {
-        this.log("system", "Runtime booted. Describe what you want to build.");
+        this.logSystem("system", "Runtime booted. Describe what you want to build.");
       }
     } catch (err) {
-      this.log("error", "Could not restore project.", asMessage(err));
+      this.logSystem("error", "Could not restore project.", asMessage(err));
     }
     this.runtime.subscribe((e: RuntimeEvent) => {
       if (e.type === "file.changed") {
@@ -90,7 +127,7 @@ export class Studio {
         if (this.mount) this.scheduleFolderSave();
         this.notify();
       } else if (e.type === "port.opened") {
-        this.log("system", `Port ${e.port} exposed`, e.url);
+        this.logSystem("system", `Port ${e.port} exposed`, e.url);
       }
     });
 
@@ -118,7 +155,7 @@ export class Studio {
     this.pendingMount = null;
     await persistHandle(handle);
     this.fsVersion++;
-    this.log("system", `Mounted local folder "${handle.name}" (${count} files). Changes now sync back to disk.`);
+    this.logSystem("system", `Mounted local folder "${handle.name}" (${count} files). Changes now sync back to disk.`);
     this.notify();
   }
 
@@ -149,7 +186,7 @@ export class Studio {
     try {
       await saveVfsToFolder(this.runtime.fs, this.mount, "/");
     } catch (err) {
-      this.log("error", "Failed to sync to local folder", err instanceof Error ? err.message : String(err));
+      this.logSystem("error", "Failed to sync to local folder", asMessage(err));
     }
   }
 
@@ -161,20 +198,38 @@ export class Studio {
     await this.store.save(SNAPSHOT_ID, await this.runtime.createSnapshot());
   }
 
-  private log(kind: TraceKind, text: string, detail?: string, ok?: boolean): void {
-    this.trace = [...this.trace, { id: this.nextId++, kind, text, detail, ok, ts: Date.now() }];
-    this.notify();
+  private line(kind: TraceKind, text: string, detail?: string, ok?: boolean): TraceLine {
+    return { id: this.nextId++, kind, text, detail, ok, ts: Date.now() };
   }
-  clearTrace(): void {
-    this.trace = [];
+
+  /** Append a system/terminal/mount message (not tied to any run). */
+  logSystem(kind: TraceKind, text: string, detail?: string): void {
+    this.systemLog = [...this.systemLog, this.line(kind, text, detail)];
     this.notify();
   }
 
-  async runTask(task: string, model: ModelConfig): Promise<void> {
+  private appendLine(run: Run, kind: TraceKind, text: string, detail?: string, ok?: boolean): void {
+    run.trace = [...run.trace, this.line(kind, text, detail, ok)];
+    this.notify();
+  }
+
+  /** Start a new agent run: create the thread, drive the agent, persist. */
+  async startRun(task: string, model: ModelConfig): Promise<void> {
     if (this.running) return;
     this.running = true;
-    this.log("user", task);
+    const run: Run = {
+      id: crypto.randomUUID(),
+      title: runTitle(task),
+      task,
+      status: "running",
+      trace: [],
+      changes: [],
+      createdAt: Date.now(),
+    };
+    this.runs = [run, ...this.runs];
+    this.activeRunId = run.id;
     this.notify();
+
     const agent = new CodingAgent({
       runtime: this.runtime,
       gateway: this.gateway,
@@ -183,34 +238,59 @@ export class Studio {
       environment: {
         languages: AGENT_LANGUAGES,
         commands: AGENT_COMMANDS,
-        notes: "You can build & preview web apps: write a React/TS project (e.g. /src/main.tsx), and the user can Build & Run it (bundled in-browser, npm deps from a CDN).",
+        notes:
+          "You can build & preview web apps: write a React/TS project (e.g. /src/main.tsx), and the user can Build & Run it (bundled in-browser, npm deps from a CDN).",
       },
-      onEvent: (e) => this.onAgentEvent(e),
+      onEvent: (e) => this.onAgentEvent(run, e),
     });
     try {
       await agent.run(task);
+      // Task 9 populates run.changes; the "review" branch is guarded on it.
+      run.status = run.changes.length > 0 ? "review" : "done";
     } catch (err) {
-      this.log("error", "Agent stopped", asMessage(err));
+      this.appendLine(run, "error", "Agent stopped", asMessage(err));
+      run.status = "error";
     } finally {
       this.running = false;
       await this.save();
+      await saveRuns(this.runs);
       this.notify();
     }
   }
 
-  private onAgentEvent(e: AgentEvent): void {
+  selectRun(id: string): void {
+    this.activeRunId = id;
+    this.notify();
+  }
+
+  /** Accept a run's changes: "review" -> "done". */
+  markReviewed(id: string): void {
+    const run = this.runs.find((r) => r.id === id);
+    if (!run || run.status !== "review") return;
+    run.status = "done";
+    void saveRuns(this.runs);
+    this.notify();
+  }
+
+  /** Deselect the active run so the composer starts a fresh task. */
+  newDraft(): void {
+    this.activeRunId = null;
+    this.notify();
+  }
+
+  private onAgentEvent(run: Run, e: AgentEvent): void {
     switch (e.type) {
       case "assistant":
-        if (e.content.trim().length > 0) this.log("thought", e.content);
+        if (e.content.trim().length > 0) this.appendLine(run, "thought", e.content);
         break;
       case "tool_call":
-        this.log("tool", e.name, formatArgs(e.args));
+        this.appendLine(run, "tool", e.name, formatArgs(e.args));
         break;
       case "tool_result":
-        this.log("result", firstLine(e.output), e.output, e.ok);
+        this.appendLine(run, "result", firstLine(e.output), e.output, e.ok);
         break;
       case "done":
-        this.log("done", e.summary || (e.reason === "max_steps" ? "Stopped at the step limit." : "Done."));
+        this.appendLine(run, "done", e.summary || (e.reason === "max_steps" ? "Stopped at the step limit." : "Done."));
         break;
     }
   }
