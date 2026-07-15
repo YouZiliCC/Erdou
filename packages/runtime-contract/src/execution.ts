@@ -1,5 +1,6 @@
 import type { ByteStream, WritableByteStream } from "./process.js";
 import type { Stat, FileEntry, WriteFileOptions, MkdirOptions, RmOptions } from "./fs.js";
+import type { HttpHandler } from "./http.js";
 
 /**
  * The synchronous filesystem surface an executor (a built-in, a language
@@ -39,6 +40,8 @@ export interface ExecContext {
   stdout: WritableByteStream;
   stderr: WritableByteStream;
   fs: FileSystemApi;
+  /** Register an HTTP handler for this process on a virtual port. */
+  serve(port: number, handler: HttpHandler): void;
 }
 
 /** A program: runs in a process, resolves to an exit code. */
