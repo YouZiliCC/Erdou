@@ -35,6 +35,9 @@ importers:
       '@erdou/agent-tools':
         specifier: workspace:*
         version: link:../../packages/agent-tools
+      '@erdou/bundler':
+        specifier: workspace:*
+        version: link:../../packages/bundler
       '@erdou/lang-python':
         specifier: workspace:*
         version: link:../../packages/lang-python
@@ -53,6 +56,9 @@ importers:
       '@erdou/tool-git':
         specifier: workspace:*
         version: link:../../packages/tool-git
+      esbuild-wasm:
+        specifier: ^0.23.0
+        version: 0.23.0
       react:
         specifier: ^18.3.1
         version: 18.3.1

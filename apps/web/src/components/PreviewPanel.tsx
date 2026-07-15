@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Studio } from "../lib/studio.js";
 import { detectRunCommand } from "../lib/run-detect.js";
+import { bundleProject, hasBundleEntry } from "../lib/bundle-project.js";
 
 /** Preview: type/detect a run command, execute it in the persistent shell, then
  *  view whichever virtual port it opened via the `/__preview__/<port>/`
@@ -11,6 +12,7 @@ import { detectRunCommand } from "../lib/run-detect.js";
 export function PreviewPanel({ studio }: { studio: Studio }) {
   const [cmd, setCmd] = useState(() => detectRunCommand(studio.runtime.fs) ?? "");
   const [running, setRunning] = useState(false);
+  const [building, setBuilding] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
   const [output, setOutput] = useState<string | null>(null);
   const [selectedPort, setSelectedPort] = useState<number | null>(null);
@@ -22,9 +24,12 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
   // falls back to nothing selected instead of needing an effect to reconcile.
   const openPorts = studio.openPorts;
   const viewedPort = selectedPort !== null && openPorts.some((p) => p.port === selectedPort) ? selectedPort : null;
+  // Recomputed every render (cheap VFS walk) so it tracks live agent edits,
+  // unlike `cmd`'s one-time initializer.
+  const bundleEntry = hasBundleEntry(studio.runtime.fs);
+  const showBundlePrompt = bundleEntry && !cmd.trim();
 
-  async function run(): Promise<void> {
-    const commandLine = cmd.trim();
+  async function run(commandLine = cmd.trim()): Promise<void> {
     if (!commandLine || running) return;
     setRunning(true);
     const before = new Set(openPorts.map((p) => p.port));
@@ -46,6 +51,29 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
       setOutput(null);
     } finally {
       setRunning(false);
+    }
+  }
+
+  /** Bundle the project (esbuild-wasm, in-browser) to /dist, then serve it —
+   *  the TS/React path, since a raw .tsx source tree can't be served as-is. */
+  async function bundleAndRun(): Promise<void> {
+    if (building || running) return;
+    setBuilding(true);
+    setErrors([]);
+    setOutput(null);
+    try {
+      const result = await bundleProject(studio.runtime.fs);
+      if (!result.ok) {
+        setErrors(result.errors);
+        return;
+      }
+      const commandLine = "erdou serve dist --spa";
+      setCmd(commandLine);
+      await run(commandLine);
+    } catch (err) {
+      setErrors([err instanceof Error ? err.message : String(err)]);
+    } finally {
+      setBuilding(false);
     }
   }
 
@@ -76,8 +104,16 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
           placeholder="run command, e.g. erdou serve . --spa"
           spellCheck={false}
         />
-        <button className="btn primary" onClick={() => void run()} disabled={running || !cmd.trim()}>
+        <button className="btn primary" onClick={() => void run()} disabled={running || building || !cmd.trim()}>
           {running ? "Running…" : "Run"}
+        </button>
+        <button
+          className={"btn" + (showBundlePrompt ? " primary" : " ghost")}
+          onClick={() => void bundleAndRun()}
+          disabled={building || running || !bundleEntry}
+          title="Bundle the project with esbuild (in-browser) to /dist, then serve it"
+        >
+          {building ? "Bundling…" : "Bundle & Run"}
         </button>
         <label className="live-toggle">
           <input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} /> live
@@ -132,9 +168,19 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
         ) : (
           errors.length === 0 && (
             <div className="hint">
-              Type (or accept the detected) run command and hit Run — it executes in the persistent shell. A command
-              that serves a virtual port (e.g. <code>erdou serve . --spa</code> or a Flask <code>python app.py</code>)
-              shows up in the ports list above; pick it to view it here.
+              {showBundlePrompt ? (
+                <>
+                  Looks like a React/TS project — click <strong>Bundle & Run</strong> to bundle it in-browser
+                  (esbuild, npm deps from a CDN) to <code>/dist</code> and serve it.
+                </>
+              ) : (
+                <>
+                  Type (or accept the detected) run command and hit Run — it executes in the persistent shell. A
+                  command that serves a virtual port (e.g. <code>erdou serve . --spa</code> or a Flask{" "}
+                  <code>python app.py</code>) shows up in the ports list above; pick it to view it here. A React/TS
+                  source project needs <strong>Bundle & Run</strong> instead — it isn't servable as-is.
+                </>
+              )}
             </div>
           )
         )}
