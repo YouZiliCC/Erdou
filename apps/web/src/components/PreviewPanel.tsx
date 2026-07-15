@@ -9,7 +9,15 @@ import { Toggle } from "./ui/Toggle.js";
  *  reverse proxy (Task 5). This panel only ever shows one primary (selected)
  *  port at a time, but the app running in that iframe can still reach a
  *  SIBLING open port by requesting `/__port__/<n>/…` (Task 8's SW routing) —
- *  the ports bar hints at that when more than one port is open. */
+ *  the ports bar always hints at that.
+ *
+ *  Every run (Run, Bundle & Run, or a `live` re-run) goes through `doRun`,
+ *  which first closes whatever port(s) THIS panel opened last time —
+ *  `PortRegistry.serve` throws EADDRINUSE on an already-bound port, so
+ *  re-serving the same port without freeing it first would error on every
+ *  re-run. `doRun` also bumps `nonce`, folded into the iframe's `key`, so the
+ *  preview actually remounts (and reloads) after each (re-)run instead of
+ *  sitting on a stale `src`. */
 export function PreviewPanel({ studio }: { studio: Studio }) {
   const [cmd, setCmd] = useState(() => detectRunCommand(studio.runtime.fs) ?? "");
   const [running, setRunning] = useState(false);
@@ -18,8 +26,19 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
   const [output, setOutput] = useState<string | null>(null);
   const [selectedPort, setSelectedPort] = useState<number | null>(null);
   const [live, setLive] = useState(false);
+  const [nonce, setNonce] = useState(0);
   const ranOnce = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  /** Ports THIS panel opened on its last run, so the next run can close them
+   *  first (see the module doc above) instead of leaking them until reload. */
+  const openedPorts = useRef<number[]>([]);
+  /** The last action Run or Bundle & Run invoked, so `live` re-invokes the
+   *  SAME action (re-serve a static dir, or re-bundle + re-serve) instead of
+   *  a fixed raw command string. */
+  const lastAction = useRef<null | (() => Promise<void>)>(null);
+  /** True while a `doRun` is in flight, so the live effect's debounce can't
+   *  stack a second run on top of one still running. */
+  const busy = useRef(false);
 
   // Derived, not stored: a stale selection (its port already stopped) just
   // falls back to nothing selected instead of needing an effect to reconcile.
@@ -30,10 +49,10 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
   const bundleEntry = hasBundleEntry(studio.runtime.fs);
   const showBundlePrompt = bundleEntry && !cmd.trim();
 
-  async function run(commandLine = cmd.trim()): Promise<void> {
+  async function runCommand(commandLine: string): Promise<void> {
     if (!commandLine || running) return;
     setRunning(true);
-    const before = new Set(openPorts.map((p) => p.port));
+    const before = new Set(studio.openPorts.map((p) => p.port));
     try {
       const result = await studio.shell.exec(commandLine);
       if (result.code !== 0) {
@@ -70,7 +89,7 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
       }
       const commandLine = "erdou serve dist --spa";
       setCmd(commandLine);
-      await run(commandLine);
+      await runCommand(commandLine);
     } catch (err) {
       setErrors([err instanceof Error ? err.message : String(err)]);
     } finally {
@@ -78,12 +97,49 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
     }
   }
 
-  // Live mode: re-run the command shortly after the filesystem changes, once a
-  // run has happened at least once.
+  /** Close-then-serve: free the port(s) this panel opened last time (so
+   *  re-serving the same one can't EADDRINUSE), run `action`, record whatever
+   *  NEW ports it opened, and bump `nonce` so the iframe remounts + reloads. */
+  async function doRun(action: () => Promise<void>): Promise<void> {
+    busy.current = true;
+    try {
+      for (const p of openedPorts.current) studio.closePort(p);
+      openedPorts.current = [];
+      const before = new Set(studio.openPorts.map((p) => p.port));
+      await action();
+      // Read AFTER the action resolves: `port.opened` fires synchronously
+      // during `shell.exec`, so by now any newly-served port is present.
+      openedPorts.current = studio.openPorts.map((p) => p.port).filter((p) => !before.has(p));
+      setNonce((n) => n + 1);
+    } finally {
+      busy.current = false;
+    }
+  }
+
+  function handleRun(): void {
+    const commandLine = cmd.trim();
+    if (!commandLine || running || building) return;
+    lastAction.current = () => runCommand(commandLine);
+    void doRun(lastAction.current);
+  }
+
+  function handleBundleAndRun(): void {
+    if (building || running) return;
+    lastAction.current = () => bundleAndRun();
+    void doRun(lastAction.current);
+  }
+
+  // Live mode: re-invoke the last action shortly after the filesystem
+  // changes, once a run has happened at least once. Re-running the ACTION
+  // (not a raw command string) means a static serve gets closed-then-re-served
+  // (picking up VFS edits) and Bundle & Run gets re-bundled before re-serving.
   useEffect(() => {
     if (!live || !ranOnce.current) return;
     if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(() => void run(), 1200);
+    timer.current = setTimeout(() => {
+      if (busy.current || !lastAction.current) return;
+      void doRun(lastAction.current);
+    }, 1200);
     return () => {
       if (timer.current) clearTimeout(timer.current);
     };
@@ -105,12 +161,12 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
           placeholder="run command, e.g. erdou serve . --spa"
           spellCheck={false}
         />
-        <button className="btn primary" onClick={() => void run()} disabled={running || building || !cmd.trim()}>
+        <button className="btn primary" onClick={handleRun} disabled={running || building || !cmd.trim()}>
           {running ? "Running…" : "Run"}
         </button>
         <button
           className={"btn" + (showBundlePrompt ? " primary" : " ghost")}
-          onClick={() => void bundleAndRun()}
+          onClick={handleBundleAndRun}
           disabled={building || running || !bundleEntry}
           title="Bundle the project with esbuild (in-browser) to /dist, then serve it"
         >
@@ -138,11 +194,9 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
             </span>
           ))
         )}
-        {openPorts.length > 1 && (
-          <span className="sibling-hint" title="From the viewed app, fetch this path prefix to reach a sibling port">
-            reach a sibling via <code>/__port__/&lt;n&gt;/…</code>
-          </span>
-        )}
+        <span className="sibling-hint" title="An absolute path like /api isn't proxied — only requests under the preview scope are">
+          Previewed apps must use relative URLs (or <code>/__port__/&lt;n&gt;/</code> to reach a sibling port).
+        </span>
       </div>
 
       <div className="preview-content">
@@ -157,8 +211,10 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
         {viewedPort !== null ? (
           // The service worker only controls same-origin clients, so the SW-served
           // preview needs allow-same-origin. In production, serve it from a separate
-          // origin to fully isolate it from the app.
+          // origin to fully isolate it from the app. Keyed on port+nonce so a
+          // (re-)run remounts the iframe and the preview actually reloads.
           <iframe
+            key={`${viewedPort}:${nonce}`}
             className="preview-frame"
             title="preview"
             sandbox="allow-scripts allow-same-origin"
