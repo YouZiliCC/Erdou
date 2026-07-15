@@ -1,2 +1,3 @@
 export { createPythonRunner, type PythonRuntimeOptions } from "./python.js";
-export type { Pyodide, PyodideLoader, EmscriptenFS, PyGlobals } from "./pyodide.js";
+export type { Pyodide, PyodideLoader, EmscriptenFS, PyGlobals, PyProxy, PyCallable } from "./pyodide.js";
+export { buildEnviron, collectResponse } from "./wsgi.js";

@@ -19,6 +19,22 @@ export interface PyGlobals {
   get(name: string): unknown;
 }
 
+/**
+ * A handle to a Python object living in the Pyodide heap. Only the members the
+ * WSGI bridge needs are typed. `copy()` returns an independently-owned handle
+ * that outlives the current JS call (Pyodide auto-destroys the argument proxies
+ * of a JS function when it returns — a copy survives, which is how the served
+ * `app` stays alive for the life of the server). `toJs()` converts to plain JS.
+ */
+export interface PyProxy {
+  copy(): PyProxy;
+  toJs(options?: { depth?: number }): unknown;
+  destroy(): void;
+}
+
+/** A callable Python object handle (e.g. the WSGI `app` or a helper function). */
+export type PyCallable = PyProxy & ((...args: unknown[]) => unknown);
+
 export interface Pyodide {
   runPythonAsync(code: string): Promise<unknown>;
   setStdout(options: { batched: (text: string) => void }): void;
