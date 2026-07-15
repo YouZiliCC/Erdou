@@ -1,6 +1,23 @@
 import type { ModelConfig } from "@erdou/model-gateway";
 
 const KEY = "erdou:model";
+const APPROVAL_KEY = "erdou:approval-mode";
+
+/**
+ * How gated tools (run_shell/remove_path) are handled:
+ * - "auto": run freely (today's autonomous behavior).
+ * - "confirm": pause and ask the user to Allow/Deny before each one.
+ * Persisted separately from ModelConfig — it must never reach the gateway.
+ */
+export type ApprovalMode = "auto" | "confirm";
+
+export function loadApprovalMode(): ApprovalMode {
+  return localStorage.getItem(APPROVAL_KEY) === "confirm" ? "confirm" : "auto";
+}
+
+export function saveApprovalMode(mode: ApprovalMode): void {
+  localStorage.setItem(APPROVAL_KEY, mode);
+}
 
 export const DEFAULT_MODEL: ModelConfig = {
   provider: "openai-compatible",

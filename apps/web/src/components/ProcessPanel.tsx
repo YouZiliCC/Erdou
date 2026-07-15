@@ -45,7 +45,9 @@ export function ProcessPanel({ studio }: { studio: Studio }) {
               <td>{p.pid}</td>
               <td>{p.ppid}</td>
               <td>{p.cmd}</td>
-              <td className={"st-" + p.state}>{p.state}</td>
+              <td>
+                <span className={"chip " + p.state}>{p.state}</span>
+              </td>
               <td>{p.exitCode ?? "–"}</td>
             </tr>
           ))}

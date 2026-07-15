@@ -1,12 +1,17 @@
 import { useState } from "react";
 import type { ModelConfig } from "@erdou/model-gateway";
+import type { ApprovalMode } from "../lib/model-config.js";
 
 export function SettingsDialog({
   initial,
+  approvalMode,
+  onApprovalModeChange,
   onSave,
   onClose,
 }: {
   initial: ModelConfig;
+  approvalMode: ApprovalMode;
+  onApprovalModeChange: (mode: ApprovalMode) => void;
   onSave: (cfg: ModelConfig) => void;
   onClose: () => void;
 }) {
@@ -42,6 +47,14 @@ export function SettingsDialog({
             onChange={(e) => patch({ apiKey: e.target.value })}
             placeholder="sk-…"
           />
+        </div>
+
+        <div className="field">
+          <label>Command approvals</label>
+          <select value={approvalMode} onChange={(e) => onApprovalModeChange(e.target.value as ApprovalMode)}>
+            <option value="auto">Auto — run shell &amp; delete commands without asking</option>
+            <option value="confirm">Confirm — ask before each shell or delete command</option>
+          </select>
         </div>
 
         <div className="actions">

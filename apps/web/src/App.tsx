@@ -1,24 +1,27 @@
 import { useState, useEffect } from "react";
 import type { ModelConfig } from "@erdou/model-gateway";
 import { useStudio } from "./lib/use-studio.js";
-import { loadModel, saveModel } from "./lib/model-config.js";
-import { TraceTape } from "./components/TraceTape.js";
-import { FilePanel } from "./components/FilePanel.js";
-import { TerminalPanel } from "./components/TerminalPanel.js";
-import { ProcessPanel } from "./components/ProcessPanel.js";
-import { PreviewPanel } from "./components/PreviewPanel.js";
+import { loadModel, saveModel, loadApprovalMode, saveApprovalMode, type ApprovalMode } from "./lib/model-config.js";
 import { SettingsDialog } from "./components/SettingsDialog.js";
-
-type Tab = "files" | "terminal" | "processes" | "preview";
+import { TitleBar } from "./components/TitleBar.js";
+import { TaskSidebar } from "./components/TaskSidebar.js";
+import { Conversation } from "./components/Conversation.js";
+import { Composer } from "./components/Composer.js";
+import { ReviewPane } from "./components/ReviewPane.js";
 
 export function App() {
   const studio = useStudio();
   const [model, setModel] = useState<ModelConfig>(() => loadModel());
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [task, setTask] = useState("");
-  const [tab, setTab] = useState<Tab>("files");
+  const [mode, setMode] = useState<ApprovalMode>(() => loadApprovalMode());
 
   const configured = model.apiKey.trim().length > 0;
+
+  // Composer selector and Settings share this one persisted value.
+  function changeMode(next: ApprovalMode) {
+    setMode(next);
+    saveApprovalMode(next);
+  }
 
   useEffect(() => {
     if (!configured) setSettingsOpen(true);
@@ -26,15 +29,12 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function submit() {
-    const t = task.trim();
-    if (!t || studio.running) return;
+  function runTask(task: string) {
     if (!configured) {
       setSettingsOpen(true);
       return;
     }
-    setTask("");
-    void studio.runTask(t, model);
+    void studio.startRun(task, model, mode);
   }
 
   async function openFolder() {
@@ -47,98 +47,44 @@ export function App() {
     try {
       const handle = await picker({ mode: "readwrite" });
       await studio.mountFolder(handle as never);
-    } catch {
-      /* user cancelled the picker */
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return; // real user-cancel
+      studio.logSystem("error", "Failed to mount folder", err instanceof Error ? err.message : String(err));
+      throw err;
     }
   }
 
+  const workspace = studio.mountName ?? "workspace";
+
   return (
     <div className="app">
-      <header className="topbar">
-        <div className="brand">
-          <span className="mark">
-            Er<b>dou</b>
-          </span>
-          <span className="tag">browser agent OS</span>
-        </div>
-        <div className="spacer" />
-        <span className="status-chip">
-          <span className="dot on" /> runtime live
-        </span>
-        <span className="status-chip" title="What the runtime can execute. Python loads on first use; wasi runs wasm32-wasi binaries.">
-          js · python · wasi
-        </span>
-        <span className="status-chip">
-          <span className={"dot " + (studio.running ? "busy" : configured ? "on" : "warn")} />
-          {studio.running ? "working" : configured ? model.model : "no model key"}
-        </span>
-        {studio.mount ? (
-          <span className="status-chip" title="Local folder mounted — changes sync to disk.">
-            📁 {studio.mountName}
-          </span>
-        ) : studio.pendingMount ? (
-          <button className="btn ghost" onClick={() => void studio.reconnectMount()}>
-            Reconnect 📁 {studio.mountName}
-          </button>
-        ) : (
-          <button className="btn ghost" onClick={() => void openFolder()}>
-            Open folder
-          </button>
-        )}
-        <button className="btn ghost" onClick={() => setSettingsOpen(true)}>
-          Model
-        </button>
-        <button className="btn ghost" onClick={() => void studio.resetProject()}>
-          Reset
-        </button>
-      </header>
-
-      <div className="main">
-        <section className="workspace">
-          <div className="composer">
-            <div className="eyebrow">Describe a task — the agent operates the OS</div>
-            <div className="row">
-              <textarea
-                value={task}
-                onChange={(e) => setTask(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit();
-                }}
-                placeholder="e.g. Create a /site folder with an index.html that says Hello, then list it."
-              />
-              <button className="btn primary" disabled={studio.running || task.trim().length === 0} onClick={submit}>
-                {studio.running ? "Working…" : "Run  ⌘⏎"}
-              </button>
-            </div>
+      <TitleBar
+        workspace={workspace}
+        model={configured ? model.model : "no model key"}
+        running={studio.running}
+        onSettings={() => setSettingsOpen(true)}
+        onReset={() => void studio.resetProject()}
+      />
+      <div className="shell">
+        <TaskSidebar studio={studio} onNew={() => studio.newDraft()} onOpenFolder={() => void openFolder()} />
+        <section className="center">
+          <div className="thread-head">
+            <span className="t">{studio.activeRun?.title ?? "New task"}</span>
+            {studio.activeRun && <span className={"chip " + studio.activeRun.status}>{studio.activeRun.status}</span>}
           </div>
-          <TraceTape trace={studio.trace} running={studio.running} />
+          <Conversation studio={studio} />
+          <Composer running={studio.running} mode={mode} onModeChange={changeMode} onRun={runTask} />
         </section>
-
-        <section className="inspector">
-          <div className="tabs">
-            <button className={"tab " + (tab === "files" ? "active" : "")} onClick={() => setTab("files")}>
-              files
-            </button>
-            <button className={"tab " + (tab === "terminal" ? "active" : "")} onClick={() => setTab("terminal")}>
-              terminal
-            </button>
-            <button className={"tab " + (tab === "processes" ? "active" : "")} onClick={() => setTab("processes")}>
-              processes
-            </button>
-            <button className={"tab " + (tab === "preview" ? "active" : "")} onClick={() => setTab("preview")}>
-              preview
-            </button>
-          </div>
-          {tab === "files" && <FilePanel studio={studio} />}
-          {tab === "terminal" && <TerminalPanel studio={studio} />}
-          {tab === "processes" && <ProcessPanel studio={studio} />}
-          {tab === "preview" && <PreviewPanel studio={studio} />}
+        <section className="review">
+          <ReviewPane studio={studio} />
         </section>
       </div>
 
       {settingsOpen && (
         <SettingsDialog
           initial={model}
+          approvalMode={mode}
+          onApprovalModeChange={changeMode}
           onSave={(cfg) => {
             saveModel(cfg);
             setModel(cfg);

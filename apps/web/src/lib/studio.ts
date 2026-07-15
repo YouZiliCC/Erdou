@@ -1,18 +1,25 @@
-import { BrowserRuntime, IndexedDbSnapshotStore } from "@erdou/runtime-browser";
+import { BrowserRuntime, IndexedDbSnapshotStore, type ShellSession } from "@erdou/runtime-browser";
 import { ModelGateway, type ModelConfig } from "@erdou/model-gateway";
-import { CodingAgent, type AgentEvent } from "@erdou/agent-core";
-import type { RuntimeEvent, ProcessInfo } from "@erdou/runtime-contract";
+import { CodingAgent, type AgentEvent, type ApprovalRequest } from "@erdou/agent-core";
+import type { ApprovalMode } from "./model-config.js";
+import type { RuntimeEvent, ProcessInfo, Snapshot } from "@erdou/runtime-contract";
 import { registerLanguages, AGENT_LANGUAGES, AGENT_COMMANDS } from "./languages.js";
+import { loadRuns, saveRuns, clearRuns } from "./runs-store.js";
+import { SnapshotReader, buildFileChanges } from "./snapshot-read.js";
 import {
   loadFolderIntoVfs,
   saveVfsToFolder,
+  rescanFolder,
   persistHandle,
   loadPersistedHandle,
   clearPersistedHandle,
   type DirHandleLike,
+  type MountMtimes,
 } from "./local-mount.js";
 
 const SNAPSHOT_ID = "erdou:default";
+/** Cap on `Studio.systemLog` entries so a noisy source (e.g. failing rescans) can't grow it unbounded. */
+const SYSTEM_LOG_LIMIT = 200;
 
 export type TraceKind = "system" | "user" | "thought" | "tool" | "result" | "done" | "error";
 
@@ -25,11 +32,38 @@ export interface TraceLine {
   ts: number;
 }
 
+export type RunStatus = "running" | "review" | "done" | "error";
+
+export interface FileChange {
+  path: string;
+  kind: "create" | "modify" | "delete";
+  before: string;
+  after: string;
+}
+
+/** One agent run — a "task thread" in the sidebar. Plain JSON (persisted). */
+export interface Run {
+  id: string;
+  title: string;
+  task: string;
+  status: RunStatus;
+  trace: TraceLine[];
+  changes: FileChange[];
+  createdAt: number;
+}
+
 export interface FileNode {
   name: string;
   path: string;
   type: "file" | "directory" | "symlink";
   children?: FileNode[];
+}
+
+/** First non-empty line of the task, trimmed to ~48 chars. Pure. */
+export function runTitle(task: string): string {
+  const firstLine = (task.split("\n")[0] ?? "").trim();
+  const base = firstLine.length > 0 ? firstLine : task.trim();
+  return base.length > 48 ? base.slice(0, 47).trimEnd() + "…" : base;
 }
 
 /**
@@ -43,12 +77,29 @@ export class Studio {
   private booted = false;
   private nextId = 1;
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
+  private _shell?: ShellSession;
 
-  trace: TraceLine[] = [];
+  /** Agent run history, most-recent first (persisted in IndexedDB). */
+  runs: Run[] = [];
+  activeRunId: string | null = null;
+  /** Terminal/mount/system messages not tied to any run. */
+  systemLog: TraceLine[] = [];
   running = false;
   fsVersion = 0;
   /** Bumped on every change so React's useSyncExternalStore re-renders. */
   version = 0;
+
+  /**
+   * A gated command awaiting the user's decision (Confirm mode). While set, the
+   * agent is blocked inside its `approve` callback; the UI resolves it on click.
+   */
+  pendingApproval: {
+    req: ApprovalRequest;
+    resolve: (d: "allow" | "deny") => void;
+    allowAlways: () => void;
+  } | null = null;
+  /** Tools the user chose to "always allow" for the duration of the current run. */
+  private autoAllow = new Set<string>();
 
   /** A mounted local folder (File System Access API), if any. */
   mount: DirHandleLike | null = null;
@@ -56,6 +107,21 @@ export class Studio {
   /** A persisted handle awaiting a user gesture to re-grant permission. */
   pendingMount: DirHandleLike | null = null;
   private folderSaveTimer: ReturnType<typeof setTimeout> | undefined;
+  /** vfsPath -> disk lastModified, so load/save/rescan can tell our own write-backs from external edits. */
+  private mountMtimes: MountMtimes = new Map();
+  /** Polls the mounted folder for external disk edits and pulls them into the VFS. */
+  private mountWatch?: { interval: ReturnType<typeof setInterval>; onFocus: () => void };
+  /** Set once a rescan fails, so we log it only once instead of every 5s until a rescan succeeds again. */
+  private mountRescanFailed = false;
+
+  get activeRun(): Run | undefined {
+    return this.runs.find((r) => r.id === this.activeRunId);
+  }
+
+  /** A persistent shell session (cwd/env survive across commands), for the terminal. */
+  get shell(): ShellSession {
+    return (this._shell ??= this.runtime.openShell());
+  }
 
   private readonly listeners = new Set<() => void>();
   subscribe(listener: () => void): () => void {
@@ -72,16 +138,17 @@ export class Studio {
     this.booted = true;
     await this.runtime.boot();
     registerLanguages(this.runtime);
+    this.runs = await loadRuns();
     try {
       const snap = await this.store.load(SNAPSHOT_ID);
       if (snap) {
         await this.runtime.restoreSnapshot(snap);
-        this.log("system", "Restored your project from this browser.");
+        this.logSystem("system", "Restored your project from this browser.");
       } else {
-        this.log("system", "Runtime booted. Describe what you want to build.");
+        this.logSystem("system", "Runtime booted. Describe what you want to build.");
       }
     } catch (err) {
-      this.log("error", "Could not restore project.", asMessage(err));
+      this.logSystem("error", "Could not restore project.", asMessage(err));
     }
     this.runtime.subscribe((e: RuntimeEvent) => {
       if (e.type === "file.changed") {
@@ -90,7 +157,7 @@ export class Studio {
         if (this.mount) this.scheduleFolderSave();
         this.notify();
       } else if (e.type === "port.opened") {
-        this.log("system", `Port ${e.port} exposed`, e.url);
+        this.logSystem("system", `Port ${e.port} exposed`, e.url);
       }
     });
 
@@ -105,20 +172,21 @@ export class Studio {
           this.mountName = handle.name;
         }
       }
-    } catch {
-      /* no persisted mount */
+    } catch (err) {
+      this.logSystem("error", "Could not restore mounted folder", asMessage(err));
     }
     this.notify();
   }
 
   async mountFolder(handle: DirHandleLike): Promise<void> {
-    const count = await loadFolderIntoVfs(handle, this.runtime.fs, "/");
+    const count = await loadFolderIntoVfs(handle, this.runtime.fs, "/", this.mountMtimes);
     this.mount = handle;
     this.mountName = handle.name;
     this.pendingMount = null;
     await persistHandle(handle);
     this.fsVersion++;
-    this.log("system", `Mounted local folder "${handle.name}" (${count} files). Changes now sync back to disk.`);
+    this.logSystem("system", `Mounted local folder "${handle.name}" (${count} files). Changes now sync back to disk.`);
+    this.startMountWatcher();
     this.notify();
   }
 
@@ -133,11 +201,45 @@ export class Studio {
   }
 
   async unmount(): Promise<void> {
+    this.stopMountWatcher();
     this.mount = null;
     this.mountName = null;
     this.pendingMount = null;
     await clearPersistedHandle();
     this.notify();
+  }
+
+  /** Poll the mounted folder for external disk edits (focus + every 5s) and pull them into the VFS. */
+  private startMountWatcher(): void {
+    this.stopMountWatcher();
+    const tick = async () => {
+      if (!this.mount || document.hidden) return;
+      try {
+        const pulled = await rescanFolder(this.mount, this.runtime.fs, this.mountMtimes, "/");
+        this.mountRescanFailed = false;
+        if (pulled.length) {
+          this.fsVersion++;
+          this.notify(); // belt-and-suspenders: file.changed already fired per pulled file
+        }
+      } catch (err) {
+        // Guard against logging (and notifying) every 5s while the rescan keeps
+        // failing the same way — only surface it once until a rescan succeeds.
+        if (!this.mountRescanFailed) {
+          this.mountRescanFailed = true;
+          this.logSystem("error", "Mount rescan failed", asMessage(err));
+        }
+      }
+    };
+    const onFocus = () => void tick();
+    window.addEventListener("focus", onFocus);
+    const interval = setInterval(() => void tick(), 5000);
+    this.mountWatch = { interval, onFocus };
+  }
+  private stopMountWatcher(): void {
+    if (!this.mountWatch) return;
+    clearInterval(this.mountWatch.interval);
+    window.removeEventListener("focus", this.mountWatch.onFocus);
+    this.mountWatch = undefined;
   }
 
   private scheduleFolderSave(): void {
@@ -147,9 +249,9 @@ export class Studio {
   async saveToFolder(): Promise<void> {
     if (!this.mount) return;
     try {
-      await saveVfsToFolder(this.runtime.fs, this.mount, "/");
+      await saveVfsToFolder(this.runtime.fs, this.mount, "/", this.mountMtimes);
     } catch (err) {
-      this.log("error", "Failed to sync to local folder", err instanceof Error ? err.message : String(err));
+      this.logSystem("error", "Failed to sync to local folder", asMessage(err));
     }
   }
 
@@ -161,20 +263,82 @@ export class Studio {
     await this.store.save(SNAPSHOT_ID, await this.runtime.createSnapshot());
   }
 
-  private log(kind: TraceKind, text: string, detail?: string, ok?: boolean): void {
-    this.trace = [...this.trace, { id: this.nextId++, kind, text, detail, ok, ts: Date.now() }];
-    this.notify();
+  private line(kind: TraceKind, text: string, detail?: string, ok?: boolean): TraceLine {
+    return { id: this.nextId++, kind, text, detail, ok, ts: Date.now() };
   }
-  clearTrace(): void {
-    this.trace = [];
+
+  /** Append a system/terminal/mount message (not tied to any run). */
+  logSystem(kind: TraceKind, text: string, detail?: string): void {
+    this.systemLog = [...this.systemLog, this.line(kind, text, detail)].slice(-SYSTEM_LOG_LIMIT);
     this.notify();
   }
 
-  async runTask(task: string, model: ModelConfig): Promise<void> {
+  private appendLine(run: Run, kind: TraceKind, text: string, detail?: string, ok?: boolean): void {
+    run.trace = [...run.trace, this.line(kind, text, detail, ok)];
+    this.notify();
+  }
+
+  /**
+   * The agent's `approve` callback for the current run, or `undefined` in Auto
+   * mode (Auto passes no callback, so gated tools run freely as before).
+   *
+   * In Confirm mode the returned callback parks a `pendingApproval` for the UI
+   * and returns a Promise the agent awaits. Every settling path — immediate
+   * auto-allow, Allow, Always allow, Deny — resolves that Promise exactly once
+   * AND clears `pendingApproval` + notifies, so the agent can never hang.
+   */
+  private makeApprove(mode: ApprovalMode): ((req: ApprovalRequest) => Promise<"allow" | "deny">) | undefined {
+    if (mode !== "confirm") return undefined;
+    return (req) =>
+      new Promise<"allow" | "deny">((resolve) => {
+        if (this.autoAllow.has(req.tool)) {
+          resolve("allow"); // already always-allowed this run
+          return;
+        }
+        this.pendingApproval = {
+          req,
+          resolve: (d) => {
+            this.pendingApproval = null;
+            this.notify();
+            resolve(d);
+          },
+          allowAlways: () => {
+            this.autoAllow.add(req.tool);
+            this.pendingApproval = null;
+            this.notify();
+            resolve("allow");
+          },
+        };
+        this.notify();
+      });
+  }
+
+  /** Start a new agent run: create the thread, drive the agent, persist. */
+  async startRun(task: string, model: ModelConfig, approvalMode: ApprovalMode): Promise<void> {
     if (this.running) return;
     this.running = true;
-    this.log("user", task);
+    this.autoAllow = new Set();
+    const run: Run = {
+      id: crypto.randomUUID(),
+      title: runTitle(task),
+      task,
+      status: "running",
+      trace: [],
+      changes: [],
+      createdAt: Date.now(),
+    };
+    this.runs = [run, ...this.runs];
+    this.activeRunId = run.id;
     this.notify();
+
+    // Capture the VFS at run start, then collect every path the agent touches
+    // via a run-scoped subscription (separate from the boot-time save handler).
+    const startSnap = await this.runtime.createSnapshot();
+    const changed = new Set<string>();
+    const unsub = this.runtime.subscribe((e) => {
+      if (e.type === "file.changed") changed.add(e.path);
+    });
+
     const agent = new CodingAgent({
       runtime: this.runtime,
       gateway: this.gateway,
@@ -183,45 +347,87 @@ export class Studio {
       environment: {
         languages: AGENT_LANGUAGES,
         commands: AGENT_COMMANDS,
-        notes: "You can build & preview web apps: write a React/TS project (e.g. /src/main.tsx), and the user can Build & Run it (bundled in-browser, npm deps from a CDN).",
+        notes:
+          "You can build & preview web apps: write a React/TS project (e.g. /src/main.tsx), and the user can Build & Run it (bundled in-browser, npm deps from a CDN).",
       },
-      onEvent: (e) => this.onAgentEvent(e),
+      onEvent: (e) => this.onAgentEvent(run, e),
+      approve: this.makeApprove(approvalMode),
     });
     try {
       await agent.run(task);
+      // Compute the diff BEFORE deciding status, so "review" actually triggers
+      // when the run changed files (the guard was a no-op while changes was []).
+      run.changes = await this.computeRunChanges(startSnap, changed);
+      run.status = run.changes.length > 0 ? "review" : "done";
     } catch (err) {
-      this.log("error", "Agent stopped", asMessage(err));
+      this.appendLine(run, "error", "Agent stopped", asMessage(err));
+      run.status = "error";
     } finally {
+      unsub();
       this.running = false;
+      // Defensive: if the run threw while a prompt was open, drop it so the UI
+      // doesn't show a stale approval for a run that is no longer executing.
+      this.pendingApproval = null;
       await this.save();
+      await saveRuns(this.runs);
       this.notify();
     }
   }
 
-  private onAgentEvent(e: AgentEvent): void {
-    switch (e.type) {
-      case "assistant":
-        if (e.content.trim().length > 0) this.log("thought", e.content);
-        break;
-      case "tool_call":
-        this.log("tool", e.name, formatArgs(e.args));
-        break;
-      case "tool_result":
-        this.log("result", firstLine(e.output), e.output, e.ok);
-        break;
-      case "done":
-        this.log("done", e.summary || (e.reason === "max_steps" ? "Stopped at the step limit." : "Done."));
-        break;
-    }
+  /** Diff the paths touched during a run against the run-start snapshot. */
+  private async computeRunChanges(startSnap: Snapshot, changed: Set<string>): Promise<FileChange[]> {
+    if (changed.size === 0) return [];
+    const before = await SnapshotReader.open(startSnap);
+    const after = (path: string): string | null =>
+      this.runtime.fs.exists(path) ? new TextDecoder().decode(this.runtime.fs.readFile(path)) : null;
+    return buildFileChanges(changed, (p) => before.read(p), after);
   }
 
-  async exec(command: string): Promise<{ stdout: string; stderr: string; code: number }> {
-    const p = await this.runtime.exec(command);
-    const [status, stdout, stderr] = await Promise.all([p.wait(), p.stdout.text(), p.stderr.text()]);
-    this.fsVersion++;
-    this.scheduleSave();
+  /** Undo a single file change from a run: creates are removed, others restored. */
+  async revertChange(runId: string, path: string): Promise<void> {
+    const run = this.runs.find((r) => r.id === runId);
+    const change = run?.changes.find((c) => c.path === path);
+    if (!change) return;
+    if (change.kind === "create") await this.runtime.rm(path, { force: true });
+    else await this.runtime.writeFile(path, change.before);
     this.notify();
-    return { stdout, stderr, code: status.code };
+  }
+
+  selectRun(id: string): void {
+    this.activeRunId = id;
+    this.notify();
+  }
+
+  /** Accept a run's changes: "review" -> "done". */
+  markReviewed(id: string): void {
+    const run = this.runs.find((r) => r.id === id);
+    if (!run || run.status !== "review") return;
+    run.status = "done";
+    void saveRuns(this.runs);
+    this.notify();
+  }
+
+  /** Deselect the active run so the composer starts a fresh task. */
+  newDraft(): void {
+    this.activeRunId = null;
+    this.notify();
+  }
+
+  private onAgentEvent(run: Run, e: AgentEvent): void {
+    switch (e.type) {
+      case "assistant":
+        if (e.content.trim().length > 0) this.appendLine(run, "thought", e.content);
+        break;
+      case "tool_call":
+        this.appendLine(run, "tool", e.name, formatArgs(e.args));
+        break;
+      case "tool_result":
+        this.appendLine(run, "result", firstLine(e.output), e.output, e.ok);
+        break;
+      case "done":
+        this.appendLine(run, "done", e.summary || (e.reason === "max_steps" ? "Stopped at the step limit." : "Done."));
+        break;
+    }
   }
 
   async readTree(path = "/"): Promise<FileNode[]> {
@@ -248,6 +454,7 @@ export class Studio {
 
   async resetProject(): Promise<void> {
     await this.store.delete(SNAPSHOT_ID);
+    await clearRuns();
     location.reload();
   }
 }

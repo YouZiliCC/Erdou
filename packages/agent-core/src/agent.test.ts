@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { BrowserRuntime } from "@erdou/runtime-browser";
 import { ModelGateway, type ModelConfig } from "@erdou/model-gateway";
 import { CodingAgent } from "./agent.js";
@@ -108,5 +108,46 @@ describe("CodingAgent", () => {
 
     expect(result.stoppedReason).toBe("done");
     expect(result.finalMessage).toBe("Recovered.");
+  });
+});
+
+function fakeGateway(): ModelGateway {
+  const chat = vi
+    .fn()
+    .mockResolvedValueOnce({
+      content: "",
+      toolCalls: [{ id: "1", name: "run_shell", arguments: JSON.stringify({ command: "echo hi > /x.txt" }) }],
+    })
+    .mockResolvedValueOnce({ content: "done", toolCalls: [] });
+  return { chat } as unknown as ModelGateway;
+}
+
+describe("approval gate", () => {
+  it("does not run a gated command when denied", async () => {
+    const runtime = new BrowserRuntime();
+    await runtime.boot();
+    const agent = new CodingAgent({
+      runtime,
+      gateway: fakeGateway(),
+      model: {} as ModelConfig,
+      maxSteps: 3,
+      approve: async () => "deny",
+    });
+    await agent.run("make x");
+    expect(runtime.fs.exists("/x.txt")).toBe(false);
+  });
+
+  it("runs the gated command when allowed", async () => {
+    const runtime = new BrowserRuntime();
+    await runtime.boot();
+    const agent = new CodingAgent({
+      runtime,
+      gateway: fakeGateway(),
+      model: {} as ModelConfig,
+      maxSteps: 3,
+      approve: async () => "allow",
+    });
+    await agent.run("make x");
+    expect(runtime.fs.exists("/x.txt")).toBe(true);
   });
 });

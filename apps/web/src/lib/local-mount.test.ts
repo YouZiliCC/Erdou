@@ -1,22 +1,34 @@
 import { describe, it, expect } from "vitest";
 import { Vfs } from "@erdou/runtime-browser";
-import { loadFolderIntoVfs, saveVfsToFolder, type DirHandleLike, type FileHandleLike } from "./local-mount.js";
+import {
+  loadFolderIntoVfs,
+  saveVfsToFolder,
+  rescanFolder,
+  type DirHandleLike,
+  type FileHandleLike,
+  type MountMtimes,
+} from "./local-mount.js";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
 class MockFile implements FileHandleLike {
   kind = "file" as const;
-  constructor(public data: Uint8Array) {}
+  constructor(
+    public data: Uint8Array,
+    public lastModified = 0,
+  ) {}
   async getFile() {
     const d = this.data;
-    return { arrayBuffer: async () => d.slice().buffer };
+    const lastModified = this.lastModified;
+    return { arrayBuffer: async () => d.slice().buffer, lastModified };
   }
   async createWritable() {
     const self = this;
     return {
       async write(d: BufferSource) {
         self.data = new Uint8Array(d as Uint8Array);
+        self.lastModified = Date.now();
       },
       async close() {},
     };
@@ -85,5 +97,32 @@ describe("local folder mount", () => {
     expect(fs.exists("/a.txt")).toBe(true);
     expect(fs.exists("/.git")).toBe(false);
     expect(fs.exists("/node_modules")).toBe(false);
+  });
+
+  it("rescanFolder pulls a file whose disk mtime changed", async () => {
+    const fs = new Vfs({ clock: () => 0 });
+    const mtimes: MountMtimes = new Map();
+    const root = new MockDir("project");
+    root.children.set("a.txt", new MockFile(enc.encode("v1"), 1000));
+    await loadFolderIntoVfs(root, fs, "/", mtimes);
+    expect(fs.readFileText("/a.txt")).toBe("v1");
+
+    // simulate an external edit: same handle, newer content + mtime
+    root.children.set("a.txt", new MockFile(enc.encode("v2"), 2000));
+    const pulled = await rescanFolder(root, fs, mtimes, "/");
+    expect(pulled).toContain("/a.txt");
+    expect(fs.readFileText("/a.txt")).toBe("v2");
+  });
+
+  it("rescanFolder does not re-pull a file the browser just wrote back", async () => {
+    const fs = new Vfs({ clock: () => 0 });
+    const mtimes: MountMtimes = new Map();
+    const root = new MockDir("project");
+    root.children.set("a.txt", new MockFile(enc.encode("v1"), 1000));
+    await loadFolderIntoVfs(root, fs, "/", mtimes);
+    fs.writeFile("/a.txt", "local-edit");
+    await saveVfsToFolder(fs, root, "/", mtimes); // records the written mtime
+    const pulled = await rescanFolder(root, fs, mtimes, "/");
+    expect(pulled).toEqual([]); // our own write is not seen as external
   });
 });

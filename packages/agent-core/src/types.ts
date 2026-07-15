@@ -24,6 +24,14 @@ export interface EnvironmentInfo {
   notes?: string;
 }
 
+export interface ApprovalRequest {
+  tool: string;
+  /** The shell command line, when tool === "run_shell". */
+  command?: string;
+  args: Record<string, unknown>;
+}
+export type ApprovalDecision = "allow" | "deny";
+
 export interface AgentOptions {
   runtime: Runtime;
   gateway: ModelGateway;
@@ -37,6 +45,8 @@ export interface AgentOptions {
   /** Specifics for the generated environment brief. */
   environment?: EnvironmentInfo;
   onEvent?: (event: AgentEvent) => void;
+  /** When set, gated tools (run_shell, remove_path) must be approved before running. */
+  approve?: (req: ApprovalRequest) => Promise<ApprovalDecision>;
 }
 
 export interface AgentRunResult {

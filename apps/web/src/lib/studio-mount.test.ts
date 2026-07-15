@@ -1,0 +1,143 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { Studio } from "./studio.js";
+import type { DirHandleLike, FileHandleLike, MountMtimes } from "./local-mount.js";
+
+// Studio persists the mount handle to IndexedDB, which isn't polyfilled in this
+// package's (node) test environment. Keep the real load/save/rescan behavior
+// from local-mount.ts, but stub out the IndexedDB-backed handle persistence —
+// that plumbing is exercised elsewhere (it's untouched by this task).
+vi.mock("./local-mount.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./local-mount.js")>();
+  return {
+    ...actual,
+    persistHandle: vi.fn(async () => {}),
+    loadPersistedHandle: vi.fn(async () => null),
+    clearPersistedHandle: vi.fn(async () => {}),
+  };
+});
+
+const enc = new TextEncoder();
+
+class MockFile implements FileHandleLike {
+  kind = "file" as const;
+  constructor(
+    public data: Uint8Array,
+    public lastModified = 0,
+  ) {}
+  async getFile() {
+    const d = this.data;
+    const lastModified = this.lastModified;
+    return { arrayBuffer: async () => d.slice().buffer, lastModified };
+  }
+  async createWritable() {
+    const self = this;
+    return {
+      async write(d: BufferSource) {
+        self.data = new Uint8Array(d as Uint8Array);
+      },
+      async close() {},
+    };
+  }
+}
+
+class MockDir implements DirHandleLike {
+  kind = "directory" as const;
+  children = new Map<string, MockFile | MockDir>();
+  constructor(public name: string) {}
+  async *entries(): AsyncIterableIterator<[string, FileHandleLike | DirHandleLike]> {
+    for (const [k, v] of this.children) yield [k, v];
+  }
+  async getDirectoryHandle(name: string, opts?: { create?: boolean }): Promise<DirHandleLike> {
+    let d = this.children.get(name);
+    if (!d) {
+      if (!opts?.create) throw new Error("ENOENT");
+      d = new MockDir(name);
+      this.children.set(name, d);
+    }
+    return d as MockDir;
+  }
+  async getFileHandle(name: string, opts?: { create?: boolean }): Promise<FileHandleLike> {
+    let f = this.children.get(name);
+    if (!f) {
+      if (!opts?.create) throw new Error("ENOENT");
+      f = new MockFile(new Uint8Array());
+      this.children.set(name, f);
+    }
+    return f as MockFile;
+  }
+}
+
+type Internals = {
+  mountMtimes: MountMtimes;
+  mountWatch?: { interval: ReturnType<typeof setInterval>; onFocus: () => void };
+};
+
+describe("Studio mount watcher", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal("document", { hidden: false });
+    vi.stubGlobal("window", { addEventListener: vi.fn(), removeEventListener: vi.fn() });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("mountFolder threads mountMtimes through load, and starts the watcher", async () => {
+    const root = new MockDir("project");
+    root.children.set("a.txt", new MockFile(enc.encode("v1"), 1000));
+
+    const studio = new Studio();
+    await studio.mountFolder(root);
+
+    expect(studio.mount).toBe(root);
+    expect(await studio.readFileText("/a.txt")).toBe("v1");
+    // mtime recorded from the load, keyed by the vfs path (Step 2).
+    expect((studio as unknown as Internals).mountMtimes.get("/a.txt")).toBe(1000);
+    // Watcher registered a focus listener and an interval (Step 3).
+    expect(window.addEventListener).toHaveBeenCalledWith("focus", expect.any(Function));
+    expect((studio as unknown as Internals).mountWatch).toBeDefined();
+  });
+
+  it("polls on a 5s interval and pulls external disk edits into the VFS", async () => {
+    const root = new MockDir("project");
+    root.children.set("a.txt", new MockFile(enc.encode("v1"), 1000));
+
+    const studio = new Studio();
+    await studio.mountFolder(root);
+    const versionAfterMount = studio.fsVersion;
+
+    // No external change yet: a tick should be a no-op.
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(studio.fsVersion).toBe(versionAfterMount);
+    expect(await studio.readFileText("/a.txt")).toBe("v1");
+
+    // Simulate an external edit on disk (same handle, newer mtime).
+    root.children.set("a.txt", new MockFile(enc.encode("v2"), 2000));
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(await studio.readFileText("/a.txt")).toBe("v2");
+    expect(studio.fsVersion).toBeGreaterThan(versionAfterMount);
+  });
+
+  it("does not poll while the tab is hidden, and unmount stops the watcher cleanly", async () => {
+    const root = new MockDir("project");
+    root.children.set("a.txt", new MockFile(enc.encode("v1"), 1000));
+
+    const studio = new Studio();
+    await studio.mountFolder(root);
+
+    (document as unknown as { hidden: boolean }).hidden = true;
+    root.children.set("a.txt", new MockFile(enc.encode("v2"), 2000));
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(await studio.readFileText("/a.txt")).toBe("v1"); // not pulled while hidden
+
+    (document as unknown as { hidden: boolean }).hidden = false;
+    await studio.unmount();
+    expect((studio as unknown as Internals).mountWatch).toBeUndefined();
+    expect(window.removeEventListener).toHaveBeenCalledWith("focus", expect.any(Function));
+
+    // Further ticks (interval already cleared) must not resurrect the pull.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await studio.readFileText("/a.txt")).toBe("v1");
+  });
+});

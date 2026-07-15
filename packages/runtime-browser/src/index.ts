@@ -8,6 +8,7 @@ export { ProcessTable, type ProcessRecord, type InternalSpawnOptions } from "./p
 export type { Program, ProgramRegistry, ProcessContext } from "./process/program.js";
 export { createBuiltins, type BuiltinDeps } from "./builtins/index.js";
 export { Shell, type ShellResult, type ShellDeps } from "./shell/interpreter.js";
+export { createShellSession, type ShellSession } from "./shell/session.js";
 export { PortRegistry } from "./port/registry.js";
 export { NetworkManager, type NetworkOptions } from "./net/network.js";
 export { snapshotVfs, restoreVfs } from "./snapshot/serialize.js";
