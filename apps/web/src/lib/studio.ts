@@ -9,10 +9,12 @@ import { SnapshotReader, buildFileChanges } from "./snapshot-read.js";
 import {
   loadFolderIntoVfs,
   saveVfsToFolder,
+  rescanFolder,
   persistHandle,
   loadPersistedHandle,
   clearPersistedHandle,
   type DirHandleLike,
+  type MountMtimes,
 } from "./local-mount.js";
 
 const SNAPSHOT_ID = "erdou:default";
@@ -103,6 +105,10 @@ export class Studio {
   /** A persisted handle awaiting a user gesture to re-grant permission. */
   pendingMount: DirHandleLike | null = null;
   private folderSaveTimer: ReturnType<typeof setTimeout> | undefined;
+  /** vfsPath -> disk lastModified, so load/save/rescan can tell our own write-backs from external edits. */
+  private mountMtimes: MountMtimes = new Map();
+  /** Polls the mounted folder for external disk edits and pulls them into the VFS. */
+  private mountWatch?: { interval: ReturnType<typeof setInterval>; onFocus: () => void };
 
   get activeRun(): Run | undefined {
     return this.runs.find((r) => r.id === this.activeRunId);
@@ -169,13 +175,14 @@ export class Studio {
   }
 
   async mountFolder(handle: DirHandleLike): Promise<void> {
-    const count = await loadFolderIntoVfs(handle, this.runtime.fs, "/");
+    const count = await loadFolderIntoVfs(handle, this.runtime.fs, "/", this.mountMtimes);
     this.mount = handle;
     this.mountName = handle.name;
     this.pendingMount = null;
     await persistHandle(handle);
     this.fsVersion++;
     this.logSystem("system", `Mounted local folder "${handle.name}" (${count} files). Changes now sync back to disk.`);
+    this.startMountWatcher();
     this.notify();
   }
 
@@ -190,11 +197,39 @@ export class Studio {
   }
 
   async unmount(): Promise<void> {
+    this.stopMountWatcher();
     this.mount = null;
     this.mountName = null;
     this.pendingMount = null;
     await clearPersistedHandle();
     this.notify();
+  }
+
+  /** Poll the mounted folder for external disk edits (focus + every 5s) and pull them into the VFS. */
+  private startMountWatcher(): void {
+    this.stopMountWatcher();
+    const tick = async () => {
+      if (!this.mount || document.hidden) return;
+      try {
+        const pulled = await rescanFolder(this.mount, this.runtime.fs, this.mountMtimes, "/");
+        if (pulled.length) {
+          this.fsVersion++;
+          this.notify(); // belt-and-suspenders: file.changed already fired per pulled file
+        }
+      } catch (err) {
+        this.logSystem("error", "Mount rescan failed", asMessage(err));
+      }
+    };
+    const onFocus = () => void tick();
+    window.addEventListener("focus", onFocus);
+    const interval = setInterval(() => void tick(), 5000);
+    this.mountWatch = { interval, onFocus };
+  }
+  private stopMountWatcher(): void {
+    if (!this.mountWatch) return;
+    clearInterval(this.mountWatch.interval);
+    window.removeEventListener("focus", this.mountWatch.onFocus);
+    this.mountWatch = undefined;
   }
 
   private scheduleFolderSave(): void {
@@ -204,7 +239,7 @@ export class Studio {
   async saveToFolder(): Promise<void> {
     if (!this.mount) return;
     try {
-      await saveVfsToFolder(this.runtime.fs, this.mount, "/");
+      await saveVfsToFolder(this.runtime.fs, this.mount, "/", this.mountMtimes);
     } catch (err) {
       this.logSystem("error", "Failed to sync to local folder", asMessage(err));
     }

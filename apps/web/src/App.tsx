@@ -47,8 +47,10 @@ export function App() {
     try {
       const handle = await picker({ mode: "readwrite" });
       await studio.mountFolder(handle as never);
-    } catch {
-      /* user cancelled the picker */
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return; // real user-cancel
+      studio.logSystem("error", "Failed to mount folder", err instanceof Error ? err.message : String(err));
+      throw err;
     }
   }
 
