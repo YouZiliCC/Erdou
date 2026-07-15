@@ -1,12 +1,14 @@
 import { BrowserRuntime, IndexedDbSnapshotStore, type ShellSession } from "@erdou/runtime-browser";
 import { ModelGateway, type ModelConfig, type ChatMessage } from "@erdou/model-gateway";
 import { CodingAgent, type AgentEvent, type ApprovalRequest } from "@erdou/agent-core";
-import type { ApprovalMode } from "./model-config.js";
+import { loadApprovalMode, saveApprovalMode, loadModel, saveModel, type ApprovalMode } from "./model-config.js";
+import { getTheme, applyTheme } from "./theme.js";
 import type { RuntimeEvent, ProcessInfo, Snapshot } from "@erdou/runtime-contract";
 import { registerLanguages, AGENT_LANGUAGES, AGENT_COMMANDS } from "./languages.js";
 import { loadRuns, saveRuns, clearRuns } from "./runs-store.js";
 import { SnapshotReader, buildFileChanges } from "./snapshot-read.js";
 import { startPreviewProxy } from "./preview-bridge.js";
+import { writeFolderState, readFolderState, type FolderState } from "./folder-state.js";
 import {
   loadFolderIntoVfs,
   saveVfsToFolder,
@@ -116,6 +118,10 @@ export class Studio {
   /** A persisted handle awaiting a user gesture to re-grant permission. */
   pendingMount: DirHandleLike | null = null;
   private folderSaveTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Debounce timer for `.erdou/` session-state (runs + config) writes — a
+   *  dedicated timer, separate from the project file-sync above and from
+   *  `mountMtimes`. */
+  private folderStateTimer: ReturnType<typeof setTimeout> | undefined;
   /** vfsPath -> disk lastModified, so load/save/rescan can tell our own write-backs from external edits. */
   private mountMtimes: MountMtimes = new Map();
   /** Polls the mounted folder for external disk edits and pulls them into the VFS. */
@@ -204,8 +210,60 @@ export class Studio {
     await persistHandle(handle);
     this.fsVersion++;
     this.logSystem("system", `Mounted local folder "${handle.name}" (${count} files). Changes now sync back to disk.`);
+
+    // The folder is the source of truth for session state: if it already has
+    // an `.erdou/`, hydrate from it (chat history + theme/approval/model incl.
+    // the api key); otherwise seed it from what we have now.
+    try {
+      const st = await readFolderState(handle);
+      if (st) {
+        this.runs = st.runs;
+        if (st.config) {
+          applyTheme(st.config.theme);
+          saveApprovalMode(st.config.approvalMode);
+          saveModel(st.config.model);
+        }
+        this.logSystem("system", "Loaded session state from .erdou/ — the folder is now the source of truth.");
+      } else {
+        await writeFolderState(handle, this.currentState());
+      }
+    } catch (err) {
+      this.logSystem("error", "Could not load/seed .erdou/ session state", asMessage(err));
+    }
+
     this.startMountWatcher();
     this.notify();
+  }
+
+  /** Snapshot of what would be written to `.erdou/` right now. */
+  private currentState(): FolderState {
+    return {
+      runs: this.runs,
+      config: { theme: getTheme(), approvalMode: loadApprovalMode(), model: loadModel() },
+    };
+  }
+
+  /** Debounce-write session state (runs + config) to `.erdou/`. No-op if
+   *  nothing is mounted. Call after a run change (start/finish) or a
+   *  theme/approval-mode/model-config change. */
+  private scheduleFolderStateSave(): void {
+    if (!this.mount) return;
+    if (this.folderStateTimer) clearTimeout(this.folderStateTimer);
+    this.folderStateTimer = setTimeout(() => void this.saveStateToFolder(), 600);
+  }
+  private async saveStateToFolder(): Promise<void> {
+    if (!this.mount) return;
+    try {
+      await writeFolderState(this.mount, this.currentState());
+    } catch (err) {
+      this.logSystem("error", "Failed to sync session state to local folder", asMessage(err));
+    }
+  }
+
+  /** Call after a theme/approval-mode/model-config change so a mounted
+   *  folder's `.erdou/` stays current. No-op if nothing is mounted. */
+  saveConfigToFolder(): void {
+    this.scheduleFolderStateSave();
   }
 
   /** Re-grant permission to a persisted mount (needs a user gesture). */
@@ -220,10 +278,15 @@ export class Studio {
 
   async unmount(): Promise<void> {
     this.stopMountWatcher();
+    if (this.folderStateTimer) {
+      clearTimeout(this.folderStateTimer);
+      this.folderStateTimer = undefined;
+    }
     this.mount = null;
     this.mountName = null;
     this.pendingMount = null;
     await clearPersistedHandle();
+    // this.runs is left as-is; future changes go back to IndexedDB via saveRuns.
     this.notify();
   }
 
@@ -426,6 +489,7 @@ export class Studio {
       this.pendingApproval = null;
       await this.save();
       await saveRuns(this.runs);
+      this.scheduleFolderStateSave();
       this.notify();
     }
   }
@@ -486,6 +550,7 @@ export class Studio {
     if (!run || run.status !== "review") return;
     run.status = "done";
     void saveRuns(this.runs);
+    this.scheduleFolderStateSave();
     this.notify();
   }
 

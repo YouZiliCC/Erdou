@@ -16,7 +16,9 @@ export interface DirHandleLike {
   requestPermission?(opts?: { mode?: string }): Promise<PermissionState>;
 }
 
-const SKIP = new Set([".git", "node_modules"]);
+// ".erdou" is session metadata written directly to the handle by folder-state.ts,
+// never a project file — keep it out of the VFS and the file tree.
+const SKIP = new Set([".git", "node_modules", ".erdou"]);
 const joinP = (dir: string, name: string): string => (dir === "/" ? `/${name}` : `${dir}/${name}`);
 
 /** vfsPath -> lastModified, as reported by the local disk file at last load/save/rescan. */

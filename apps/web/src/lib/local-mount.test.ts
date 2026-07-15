@@ -1,66 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { Vfs } from "@erdou/runtime-browser";
-import {
-  loadFolderIntoVfs,
-  saveVfsToFolder,
-  rescanFolder,
-  type DirHandleLike,
-  type FileHandleLike,
-  type MountMtimes,
-} from "./local-mount.js";
+import { loadFolderIntoVfs, saveVfsToFolder, rescanFolder, type MountMtimes } from "./local-mount.js";
+import { MockDir, MockFile } from "./test-support/mock-dir.js";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-
-class MockFile implements FileHandleLike {
-  kind = "file" as const;
-  constructor(
-    public data: Uint8Array,
-    public lastModified = 0,
-  ) {}
-  async getFile() {
-    const d = this.data;
-    const lastModified = this.lastModified;
-    return { arrayBuffer: async () => d.slice().buffer, lastModified };
-  }
-  async createWritable() {
-    const self = this;
-    return {
-      async write(d: BufferSource) {
-        self.data = new Uint8Array(d as Uint8Array);
-        self.lastModified = Date.now();
-      },
-      async close() {},
-    };
-  }
-}
-
-class MockDir implements DirHandleLike {
-  kind = "directory" as const;
-  children = new Map<string, MockFile | MockDir>();
-  constructor(public name: string) {}
-  async *entries(): AsyncIterableIterator<[string, FileHandleLike | DirHandleLike]> {
-    for (const [k, v] of this.children) yield [k, v];
-  }
-  async getDirectoryHandle(name: string, opts?: { create?: boolean }): Promise<DirHandleLike> {
-    let d = this.children.get(name);
-    if (!d) {
-      if (!opts?.create) throw new Error("ENOENT");
-      d = new MockDir(name);
-      this.children.set(name, d);
-    }
-    return d as MockDir;
-  }
-  async getFileHandle(name: string, opts?: { create?: boolean }): Promise<FileHandleLike> {
-    let f = this.children.get(name);
-    if (!f) {
-      if (!opts?.create) throw new Error("ENOENT");
-      f = new MockFile(new Uint8Array());
-      this.children.set(name, f);
-    }
-    return f as MockFile;
-  }
-}
 
 describe("local folder mount", () => {
   it("loads a folder into the VFS, then syncs changes back to disk", async () => {
@@ -87,16 +31,18 @@ describe("local folder mount", () => {
     expect(dec.decode((savedSrc.children.get("new.ts") as MockFile).data)).toBe("export const x = 1;");
   });
 
-  it("skips .git and node_modules on load", async () => {
+  it("skips .git, node_modules and .erdou on load", async () => {
     const root = new MockDir("project");
     root.children.set("a.txt", new MockFile(enc.encode("x")));
     root.children.set(".git", new MockDir(".git"));
     root.children.set("node_modules", new MockDir("node_modules"));
+    root.children.set(".erdou", new MockDir(".erdou"));
     const fs = new Vfs({ clock: () => 0 });
     await loadFolderIntoVfs(root, fs, "/");
     expect(fs.exists("/a.txt")).toBe(true);
     expect(fs.exists("/.git")).toBe(false);
     expect(fs.exists("/node_modules")).toBe(false);
+    expect(fs.exists("/.erdou")).toBe(false);
   });
 
   it("rescanFolder pulls a file whose disk mtime changed", async () => {

@@ -21,6 +21,7 @@ export function App() {
   function changeMode(next: ApprovalMode) {
     setMode(next);
     saveApprovalMode(next);
+    studio.saveConfigToFolder();
   }
 
   useEffect(() => {
@@ -72,6 +73,7 @@ export function App() {
         running={studio.running}
         onSettings={() => setSettingsOpen(true)}
         onReset={() => void studio.resetProject()}
+        onThemeChange={() => studio.saveConfigToFolder()}
       />
       <div className="shell">
         <TaskSidebar studio={studio} onNew={() => studio.newDraft()} onOpenFolder={() => void openFolder()} />
@@ -102,6 +104,7 @@ export function App() {
           onSave={(cfg) => {
             saveModel(cfg);
             setModel(cfg);
+            studio.saveConfigToFolder();
             setSettingsOpen(false);
           }}
           onClose={() => setSettingsOpen(false)}
