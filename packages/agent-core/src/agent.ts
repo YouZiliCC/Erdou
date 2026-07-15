@@ -32,14 +32,20 @@ export class CodingAgent {
     this.opts.onEvent?.(event);
   }
 
-  async run(task: string): Promise<AgentRunResult> {
-    const systemPrompt =
-      this.opts.systemPrompt ??
-      buildSystemPrompt(this.opts.environment ?? {}, await this.opts.runtime.getCapabilities());
-    const messages: ChatMessage[] = [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: task },
-    ];
+  async run(task: string, priorMessages?: ChatMessage[]): Promise<AgentRunResult> {
+    let messages: ChatMessage[];
+    if (priorMessages && priorMessages.length > 0) {
+      // priorMessages already contains the system message + prior turns — don't prepend another.
+      messages = [...priorMessages, { role: "user", content: task }];
+    } else {
+      const systemPrompt =
+        this.opts.systemPrompt ??
+        buildSystemPrompt(this.opts.environment ?? {}, await this.opts.runtime.getCapabilities());
+      messages = [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: task },
+      ];
+    }
 
     for (let step = 1; step <= this.maxSteps; step++) {
       this.emit({ type: "step", step });
