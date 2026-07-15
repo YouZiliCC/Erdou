@@ -5,11 +5,14 @@ import { loadModel, saveModel } from "./lib/model-config.js";
 import { SettingsDialog } from "./components/SettingsDialog.js";
 import { TitleBar } from "./components/TitleBar.js";
 import { TaskSidebar } from "./components/TaskSidebar.js";
+import { Conversation } from "./components/Conversation.js";
+import { Composer } from "./components/Composer.js";
 
 export function App() {
   const studio = useStudio();
   const [model, setModel] = useState<ModelConfig>(() => loadModel());
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [mode, setMode] = useState<"auto" | "confirm">("auto");
 
   const configured = model.apiKey.trim().length > 0;
 
@@ -18,6 +21,14 @@ export function App() {
     // Intentionally mount-only: prompt for a key on first load.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  function runTask(task: string) {
+    if (!configured) {
+      setSettingsOpen(true);
+      return;
+    }
+    void studio.startRun(task, model);
+  }
 
   async function openFolder() {
     const picker = (window as unknown as { showDirectoryPicker?: (o?: unknown) => Promise<unknown> })
@@ -47,7 +58,12 @@ export function App() {
       <div className="shell">
         <TaskSidebar studio={studio} onNew={() => studio.newDraft()} onOpenFolder={() => void openFolder()} />
         <section className="center">
-          <div className="stub">conversation — Task 8</div>
+          <div className="thread-head">
+            <span className="t">{studio.activeRun?.title ?? "New task"}</span>
+            {studio.activeRun && <span className={"chip " + studio.activeRun.status}>{studio.activeRun.status}</span>}
+          </div>
+          <Conversation studio={studio} />
+          <Composer running={studio.running} mode={mode} onModeChange={setMode} onRun={runTask} />
         </section>
         <section className="review">
           <div className="stub">review — Task 10</div>
