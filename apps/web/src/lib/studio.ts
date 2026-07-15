@@ -99,6 +99,12 @@ export class Studio {
   openPorts: { port: number }[] = [];
   /** Bumped on every change so React's useSyncExternalStore re-renders. */
   version = 0;
+  /** Bumped ONLY when `mountFolder` hydrates a persisted config from a mounted
+   *  folder's `.erdou/config.json` (theme/approval-mode/model, incl. the api
+   *  key) — never on every `notify()`. Consumers that seed local state from
+   *  `localStorage` once (e.g. App.tsx's `model`/`mode`) watch this to re-read
+   *  it after a folder mount, instead of requiring a full page reload. */
+  configVersion = 0;
 
   /**
    * A gated command awaiting the user's decision (Confirm mode). While set, the
@@ -222,6 +228,7 @@ export class Studio {
           applyTheme(st.config.theme);
           saveApprovalMode(st.config.approvalMode);
           saveModel(st.config.model);
+          this.configVersion++;
         }
         this.logSystem("system", "Loaded session state from .erdou/ — the folder is now the source of truth.");
       } else {

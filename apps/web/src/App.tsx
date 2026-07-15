@@ -30,6 +30,18 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The folder is the source of truth for config: when `mountFolder` hydrates
+  // a DIFFERENT theme/approval-mode/model from a mounted folder's `.erdou/`,
+  // Studio bumps `configVersion` (never on unrelated notifies). Re-sync from
+  // localStorage so the agent (via `runTask` below) and the composer/settings
+  // UI pick it up immediately — no reload required. Re-reading on the initial
+  // render too is a harmless no-op (same values just loaded by useState above).
+  useEffect(() => {
+    setModel(loadModel());
+    setMode(loadApprovalMode());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [studio.configVersion]);
+
   // Reply into the selected thread if one is active and idle; otherwise start
   // a fresh thread. "+ New task" clears the selection via newDraft(), so the
   // next send always falls into the startRun branch.
