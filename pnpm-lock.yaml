@@ -35,9 +35,6 @@ importers:
       '@erdou/agent-tools':
         specifier: workspace:*
         version: link:../../packages/agent-tools
-      '@erdou/bundler':
-        specifier: workspace:*
-        version: link:../../packages/bundler
       '@erdou/lang-python':
         specifier: workspace:*
         version: link:../../packages/lang-python
@@ -72,9 +69,6 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^4.3.1
         version: 4.3.1(vite@5.4.0(@types/node@22.20.1))
-      esbuild-wasm:
-        specifier: ^0.23.0
-        version: 0.23.0
       vite:
         specifier: ^5.4.0
         version: 5.4.0(@types/node@22.20.1)

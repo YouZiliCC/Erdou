@@ -87,6 +87,10 @@ export class Studio {
   systemLog: TraceLine[] = [];
   running = false;
   fsVersion = 0;
+  /** Ports currently served by the runtime (Preview panel's open-ports list),
+   *  tracked from `port.opened`/`port.closed` — not persisted; a fresh session
+   *  starts with nothing served until something runs. */
+  openPorts: { port: number }[] = [];
   /** Bumped on every change so React's useSyncExternalStore re-renders. */
   version = 0;
 
@@ -163,6 +167,11 @@ export class Studio {
         this.notify();
       } else if (e.type === "port.opened") {
         this.logSystem("system", `Port ${e.port} exposed`, e.url);
+        if (!this.openPorts.some((p) => p.port === e.port)) this.openPorts = [...this.openPorts, { port: e.port }];
+        this.notify();
+      } else if (e.type === "port.closed") {
+        this.openPorts = this.openPorts.filter((p) => p.port !== e.port);
+        this.notify();
       }
     });
 
@@ -455,6 +464,13 @@ export class Studio {
 
   listProcesses(): Promise<ProcessInfo[]> {
     return this.runtime.getProcesses();
+  }
+
+  /** Stop serving a port (the Preview panel's × button). The runtime emits
+   *  `port.closed` synchronously, which the boot-time subscription turns into
+   *  an `openPorts` update + notify — nothing further needed here. */
+  closePort(port: number): void {
+    this.runtime.closePort(port);
   }
 
   async resetProject(): Promise<void> {

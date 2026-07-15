@@ -121,13 +121,24 @@ input, textarea { font-family: var(--mono); }
 .proc td { padding: 5px 14px; color: var(--ink); border-top: 1px solid var(--border2); }
 
 /* preview */
-.preview { display: grid; grid-template-rows: auto 1fr; min-height: 0; height: 100%; }
-.preview-bar { display: flex; align-items: center; gap: 12px; padding: 9px 14px; border-bottom: 1px solid var(--border); }
+.preview { display: grid; grid-template-rows: auto auto 1fr; min-height: 0; height: 100%; }
+.preview-bar { display: flex; align-items: center; gap: 10px; padding: 9px 14px; border-bottom: 1px solid var(--border); }
 .preview-bar .btn.primary { padding: 6px 12px; font-size: 12.5px; }
 .preview-bar .entry { font-family: var(--mono); font-size: 11.5px; color: var(--faint); }
-.live-toggle { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 11.5px; color: var(--muted); cursor: pointer; }
+.run-input { flex: 1; min-width: 0; background: var(--elev); color: var(--ink); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 12.5px; }
+.run-input:focus { outline: none; border-color: var(--accent); }
+.live-toggle { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 11.5px; color: var(--muted); cursor: pointer; flex: 0 0 auto; }
 .live-toggle input { accent-color: var(--accent); }
-.preview-frame { width: 100%; height: 100%; border: none; background: #fff; }
+.ports-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 7px 14px; border-bottom: 1px solid var(--border2); }
+.ports-bar .empty { color: var(--faint); font-size: 11.5px; }
+.port-chip { display: inline-flex; align-items: center; gap: 4px; font-family: var(--mono); font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 20px; padding: 3px 4px 3px 10px; }
+.port-chip.sel { color: var(--accent); border-color: rgba(88, 166, 255, 0.35); }
+.port-chip button { border: none; background: transparent; color: inherit; font-family: var(--sans); font-size: 11px; padding: 2px 6px; border-radius: 10px; cursor: pointer; }
+.port-chip button:hover { background: var(--elev2); color: var(--ink); }
+.port-chip button.x:hover { color: var(--red); }
+.preview-content { min-height: 0; display: flex; flex-direction: column; }
+.preview-frame { flex: 1; width: 100%; border: none; background: var(--elev); }
+.preview-output { padding: 10px 14px; color: var(--faint); font-family: var(--mono); font-size: 11.5px; white-space: pre-wrap; word-break: break-word; border-bottom: 1px solid var(--border2); }
 .build-errors { overflow: auto; padding: 14px; min-height: 0; }
 .build-errors pre { margin: 0; font-family: var(--mono); font-size: 12px; color: var(--red); white-space: pre-wrap; word-break: break-word; }
 
