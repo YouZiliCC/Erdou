@@ -258,7 +258,7 @@ export class Vfs implements FileSystemApi {
       // copy INTO an existing directory, keeping the source name (files and dirs)
       dst.node.children.set(src.name, deepClone(src.node));
       dst.node.mtimeMs = now;
-      this.emit({ type: "file.changed", path: normalize(to) + "/" + src.name, kind: "create" });
+      this.emit({ type: "file.changed", path: join(normalize(to), src.name), kind: "create" });
       return;
     }
     dst.parent.children.set(dst.name, deepClone(src.node));

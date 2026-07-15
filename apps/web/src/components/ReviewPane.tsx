@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Studio } from "../lib/studio.js";
 import { DiffPanel } from "./DiffPanel.js";
 import { FilePanel } from "./FilePanel.js";
@@ -17,6 +17,14 @@ export function ReviewPane({ studio }: { studio: Studio }) {
   );
 
   const run = studio.activeRun;
+
+  // Auto-select the Diff tab whenever the active run finishes with changes, so
+  // DiffPanel mounts and its markReviewed effect fires (review -> done). Keyed
+  // on run id + change count so it doesn't yank the user off a tab they picked
+  // manually on unrelated re-renders.
+  useEffect(() => {
+    if (run && run.changes.length > 0) setTab("Diff");
+  }, [run?.id, run?.changes.length]);
 
   return (
     <div className="review-pane">

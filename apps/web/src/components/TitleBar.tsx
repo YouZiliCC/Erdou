@@ -2,8 +2,8 @@ import { useState } from "react";
 import { toggleTheme } from "../lib/theme.js";
 
 export function TitleBar({
-  workspace, model, running, onSettings,
-}: { workspace: string; model: string; running: boolean; onSettings: () => void }) {
+  workspace, model, running, onSettings, onReset,
+}: { workspace: string; model: string; running: boolean; onSettings: () => void; onReset: () => void }) {
   const [, force] = useState(0);
   return (
     <header className="titlebar">
@@ -13,6 +13,16 @@ export function TitleBar({
       <span className="chip"><span className={"dot " + (running ? "busy" : "on")} /> runtime · js·py·wasi</span>
       <span className="chip">{model}</span>
       <button className="btn ghost" onClick={() => { toggleTheme(); force((n) => n + 1); }}>◐</button>
+      <button
+        className="btn ghost"
+        onClick={() => {
+          if (window.confirm("Reset the project? This deletes the workspace and run history from this browser.")) {
+            onReset();
+          }
+        }}
+      >
+        Reset
+      </button>
       <button className="btn ghost" onClick={onSettings}>Settings</button>
     </header>
   );

@@ -170,6 +170,19 @@ describe("rename", () => {
   });
 });
 
+describe("copy", () => {
+  it("copy into root emits a well-formed event path (no //)", () => {
+    const { vfs, events } = make();
+    vfs.mkdir("/dir", { recursive: true });
+    vfs.writeFile("/dir/a.txt", "hi");
+    events.length = 0;
+    vfs.copy("/dir/a.txt", "/");
+    expect(vfs.exists("/a.txt")).toBe(true);
+    expect(events).toContainEqual({ type: "file.changed", path: "/a.txt", kind: "create" });
+    expect(events.some((e) => e.type === "file.changed" && e.path.includes("//"))).toBe(false);
+  });
+});
+
 describe("Vfs events", () => {
   it("emits file.changed for create, modify and delete", () => {
     const { vfs, events } = make();

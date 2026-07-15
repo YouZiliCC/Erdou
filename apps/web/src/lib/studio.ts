@@ -4,7 +4,7 @@ import { CodingAgent, type AgentEvent, type ApprovalRequest } from "@erdou/agent
 import type { ApprovalMode } from "./model-config.js";
 import type { RuntimeEvent, ProcessInfo, Snapshot } from "@erdou/runtime-contract";
 import { registerLanguages, AGENT_LANGUAGES, AGENT_COMMANDS } from "./languages.js";
-import { loadRuns, saveRuns } from "./runs-store.js";
+import { loadRuns, saveRuns, clearRuns } from "./runs-store.js";
 import { SnapshotReader, buildFileChanges } from "./snapshot-read.js";
 import {
   loadFolderIntoVfs,
@@ -18,6 +18,8 @@ import {
 } from "./local-mount.js";
 
 const SNAPSHOT_ID = "erdou:default";
+/** Cap on `Studio.systemLog` entries so a noisy source (e.g. failing rescans) can't grow it unbounded. */
+const SYSTEM_LOG_LIMIT = 200;
 
 export type TraceKind = "system" | "user" | "thought" | "tool" | "result" | "done" | "error";
 
@@ -109,6 +111,8 @@ export class Studio {
   private mountMtimes: MountMtimes = new Map();
   /** Polls the mounted folder for external disk edits and pulls them into the VFS. */
   private mountWatch?: { interval: ReturnType<typeof setInterval>; onFocus: () => void };
+  /** Set once a rescan fails, so we log it only once instead of every 5s until a rescan succeeds again. */
+  private mountRescanFailed = false;
 
   get activeRun(): Run | undefined {
     return this.runs.find((r) => r.id === this.activeRunId);
@@ -168,8 +172,8 @@ export class Studio {
           this.mountName = handle.name;
         }
       }
-    } catch {
-      /* no persisted mount */
+    } catch (err) {
+      this.logSystem("error", "Could not restore mounted folder", asMessage(err));
     }
     this.notify();
   }
@@ -212,12 +216,18 @@ export class Studio {
       if (!this.mount || document.hidden) return;
       try {
         const pulled = await rescanFolder(this.mount, this.runtime.fs, this.mountMtimes, "/");
+        this.mountRescanFailed = false;
         if (pulled.length) {
           this.fsVersion++;
           this.notify(); // belt-and-suspenders: file.changed already fired per pulled file
         }
       } catch (err) {
-        this.logSystem("error", "Mount rescan failed", asMessage(err));
+        // Guard against logging (and notifying) every 5s while the rescan keeps
+        // failing the same way — only surface it once until a rescan succeeds.
+        if (!this.mountRescanFailed) {
+          this.mountRescanFailed = true;
+          this.logSystem("error", "Mount rescan failed", asMessage(err));
+        }
       }
     };
     const onFocus = () => void tick();
@@ -259,7 +269,7 @@ export class Studio {
 
   /** Append a system/terminal/mount message (not tied to any run). */
   logSystem(kind: TraceKind, text: string, detail?: string): void {
-    this.systemLog = [...this.systemLog, this.line(kind, text, detail)];
+    this.systemLog = [...this.systemLog, this.line(kind, text, detail)].slice(-SYSTEM_LOG_LIMIT);
     this.notify();
   }
 
@@ -420,15 +430,6 @@ export class Studio {
     }
   }
 
-  async exec(command: string): Promise<{ stdout: string; stderr: string; code: number }> {
-    const p = await this.runtime.exec(command);
-    const [status, stdout, stderr] = await Promise.all([p.wait(), p.stdout.text(), p.stderr.text()]);
-    this.fsVersion++;
-    this.scheduleSave();
-    this.notify();
-    return { stdout, stderr, code: status.code };
-  }
-
   async readTree(path = "/"): Promise<FileNode[]> {
     const entries = await this.runtime.readdir(path);
     const out: FileNode[] = [];
@@ -453,6 +454,7 @@ export class Studio {
 
   async resetProject(): Promise<void> {
     await this.store.delete(SNAPSHOT_ID);
+    await clearRuns();
     location.reload();
   }
 }

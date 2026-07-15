@@ -63,6 +63,7 @@ export function App() {
         model={configured ? model.model : "no model key"}
         running={studio.running}
         onSettings={() => setSettingsOpen(true)}
+        onReset={() => void studio.resetProject()}
       />
       <div className="shell">
         <TaskSidebar studio={studio} onNew={() => studio.newDraft()} onOpenFolder={() => void openFolder()} />

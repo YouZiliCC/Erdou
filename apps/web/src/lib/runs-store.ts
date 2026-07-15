@@ -63,3 +63,8 @@ export async function loadRuns(): Promise<Run[]> {
   const result = await withStore<Run[] | undefined>("readonly", (s) => s.get(KEY));
   return result ?? [];
 }
+
+/** Delete the run history entirely (used by Studio.resetProject). */
+export async function clearRuns(): Promise<void> {
+  await withStore("readwrite", (s) => s.delete(KEY));
+}

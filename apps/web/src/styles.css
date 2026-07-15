@@ -68,10 +68,6 @@ input, textarea { font-family: var(--mono); }
   .dot.busy { animation: none; }
 }
 
-/* ---- placeholder stub regions (Tasks 7/8/10 replace this) ---- */
-.stub { margin: auto; color: var(--faint); font-size: 12px; font-family: var(--mono); text-align: center; padding: 24px; }
-.sidebar-footer { margin-top: auto; padding: 10px 12px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
-
 /* ---- task sidebar (Task 7) ---- */
 .newtask { display: block; width: calc(100% - 20px); margin: 10px 10px 6px; text-align: left; }
 .sbh { padding: 6px 12px 4px; color: var(--faint); font-size: 10.5px; letter-spacing: 1px; text-transform: uppercase; }
