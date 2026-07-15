@@ -3,6 +3,7 @@ import type { Program, ProgramRegistry } from "../process/program.js";
 import { describeError } from "./util.js";
 import * as fsCmd from "./fs.js";
 import * as textCmd from "./text.js";
+import { erdou } from "./serve.js";
 
 export interface BuiltinDeps {
   /** The registry to populate (also read by `which`). */
@@ -97,6 +98,7 @@ export function createBuiltins(deps: BuiltinDeps): ProgramRegistry {
     which,
     ps,
     kill,
+    erdou,
     cd: noop,
     export: noop,
   };
