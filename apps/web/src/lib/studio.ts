@@ -550,6 +550,14 @@ export class Studio {
 
 const asMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 const firstLine = (s: string): string => s.split("\n")[0] ?? "";
+
+/** Collapse whitespace/newlines to a single line and cut to `max` chars, for a
+ *  one-line summary of a (possibly multi-line) args/result string. */
+export function truncate(s: string, max: number): string {
+  const oneLine = s.replace(/\s+/g, " ").trim();
+  return oneLine.length > max ? oneLine.slice(0, max) + "…" : oneLine;
+}
+
 function formatArgs(args: Record<string, unknown>): string {
   return Object.entries(args)
     .map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`)

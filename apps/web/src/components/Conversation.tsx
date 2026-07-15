@@ -1,7 +1,8 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import type { Studio, TraceLine } from "../lib/studio.js";
+import { truncate, type Studio, type TraceLine } from "../lib/studio.js";
 import { ApprovalPrompt } from "./ApprovalPrompt.js";
+import { Chevron } from "./ui/icons.js";
 
 const EXAMPLES = ["Open a local folder", "Scaffold a Vite app", "Write & run a Python script"];
 
@@ -97,17 +98,33 @@ function TraceBlock({ line }: { line: TraceLine }) {
   }
 }
 
+/**
+ * A tool call (+ its paired result, if any) as a collapsible block: collapsed
+ * shows one header line (status dot, tool name, truncated arg/result summary,
+ * chevron); expanded reveals the full args and the full result output. Each
+ * block owns its own open/closed state, seeded closed — the surrounding list
+ * already keys each `ToolBlock` instance by the tool line's id (see
+ * `renderTrace`/`TraceBlock`), so that state naturally resets per block.
+ */
 function ToolBlock({ call, result }: { call?: TraceLine; result?: TraceLine }) {
   const status = result ? (result.ok ? "ok" : "fail") : "busy";
+  const [open, setOpen] = useState(false);
+  const summary = call?.detail || result?.text || "";
   return (
     <div className="tool-block">
-      <div className="tool">
+      <button type="button" className="tool" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
         <span className={`dot ${status}`} />
         <span className="name">{call ? call.text : result?.text}</span>
-        {call?.detail && <span className="arg">{call.detail}</span>}
-      </div>
-      {call && result && (
-        <div className={`tool-result ${status === "fail" ? "fail" : ""}`}>{clip(result.detail ?? result.text)}</div>
+        {summary && <span className="arg">{truncate(summary, 60)}</span>}
+        <Chevron className={`chev ${open ? "open" : ""}`} />
+      </button>
+      {open && (
+        <div className="tool-detail">
+          {call?.detail && <div className="tool-args">{call.detail}</div>}
+          {call && result && (
+            <div className={`tool-result ${status === "fail" ? "fail" : ""}`}>{result.detail ?? result.text}</div>
+          )}
+        </div>
       )}
     </div>
   );
@@ -121,8 +138,4 @@ function SystemLine({ line }: { line: TraceLine }) {
       {line.detail && line.detail !== line.text && <span className="detail"> — {line.detail}</span>}
     </div>
   );
-}
-
-function clip(s: string): string {
-  return s.length > 1400 ? s.slice(0, 1400) + "…" : s;
 }
