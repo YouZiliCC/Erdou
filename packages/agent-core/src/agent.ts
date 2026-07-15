@@ -3,6 +3,8 @@ import { createTools, type ToolDef } from "@erdou/agent-tools";
 import type { AgentOptions, AgentRunResult, AgentEvent } from "./types.js";
 import { buildSystemPrompt } from "./prompt.js";
 
+const GATED_TOOLS = new Set(["run_shell", "remove_path"]);
+
 /**
  * The reference Coding Agent. It drives a Runtime through agent-tools using a
  * model (via the gateway), looping plan → act → observe until the model
@@ -56,8 +58,36 @@ export class CodingAgent {
       if (result.content.length > 0) this.emit({ type: "assistant", content: result.content });
 
       for (const call of result.toolCalls) {
-        const { args, output, ok } = await this.runTool(call.name, call.arguments);
+        let args: Record<string, unknown> = {};
+        let parseError: string | null = null;
+        try {
+          args = call.arguments.trim().length > 0 ? (JSON.parse(call.arguments) as Record<string, unknown>) : {};
+        } catch {
+          parseError = `invalid JSON arguments for ${call.name}: ${call.arguments}`;
+        }
         this.emit({ type: "tool_call", name: call.name, args });
+
+        if (parseError) {
+          this.emit({ type: "tool_result", name: call.name, ok: false, output: parseError });
+          messages.push({ role: "tool", toolCallId: call.id, content: parseError });
+          continue;
+        }
+
+        if (this.opts.approve && GATED_TOOLS.has(call.name)) {
+          const decision = await this.opts.approve({
+            tool: call.name,
+            command: typeof args.command === "string" ? args.command : undefined,
+            args,
+          });
+          if (decision === "deny") {
+            const output = "Denied by the user.";
+            this.emit({ type: "tool_result", name: call.name, ok: false, output });
+            messages.push({ role: "tool", toolCallId: call.id, content: output });
+            continue;
+          }
+        }
+
+        const { output, ok } = await this.executeTool(call.name, args);
         this.emit({ type: "tool_result", name: call.name, ok, output });
         messages.push({ role: "tool", toolCallId: call.id, content: output });
       }
@@ -68,21 +98,13 @@ export class CodingAgent {
     return { steps: this.maxSteps, finalMessage, stoppedReason: "max_steps", transcript: messages };
   }
 
-  private async runTool(
+  private async executeTool(
     name: string,
-    rawArgs: string,
-  ): Promise<{ args: Record<string, unknown>; output: string; ok: boolean }> {
-    let args: Record<string, unknown>;
-    try {
-      args = rawArgs.trim().length > 0 ? (JSON.parse(rawArgs) as Record<string, unknown>) : {};
-    } catch {
-      return { args: {}, ok: false, output: `invalid JSON arguments for ${name}: ${rawArgs}` };
-    }
+    args: Record<string, unknown>,
+  ): Promise<{ output: string; ok: boolean }> {
     const tool = this.toolByName.get(name);
-    if (!tool) {
-      return { args, ok: false, output: `unknown tool: ${name}` };
-    }
+    if (!tool) return { ok: false, output: `unknown tool: ${name}` };
     const result = await tool.execute({ runtime: this.opts.runtime }, args);
-    return { args, ok: result.ok, output: result.output };
+    return { ok: result.ok, output: result.output };
   }
 }
