@@ -7,7 +7,7 @@ import { TitleBar } from "./components/TitleBar.js";
 import { TaskSidebar } from "./components/TaskSidebar.js";
 import { Conversation } from "./components/Conversation.js";
 import { Composer } from "./components/Composer.js";
-import { DiffPanel } from "./components/DiffPanel.js";
+import { ReviewPane } from "./components/ReviewPane.js";
 
 export function App() {
   const studio = useStudio();
@@ -67,12 +67,7 @@ export function App() {
           <Composer running={studio.running} mode={mode} onModeChange={setMode} onRun={runTask} />
         </section>
         <section className="review">
-          {/* Task 10 wires the tabbed ReviewPane; until then, surface the diff directly. */}
-          {studio.activeRun && studio.activeRun.changes.length > 0 ? (
-            <DiffPanel run={studio.activeRun} studio={studio} />
-          ) : (
-            <div className="stub">review — Task 10</div>
-          )}
+          <ReviewPane studio={studio} />
         </section>
       </div>
 

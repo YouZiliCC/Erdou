@@ -1,4 +1,4 @@
-import { BrowserRuntime, IndexedDbSnapshotStore } from "@erdou/runtime-browser";
+import { BrowserRuntime, IndexedDbSnapshotStore, type ShellSession } from "@erdou/runtime-browser";
 import { ModelGateway, type ModelConfig } from "@erdou/model-gateway";
 import { CodingAgent, type AgentEvent } from "@erdou/agent-core";
 import type { RuntimeEvent, ProcessInfo, Snapshot } from "@erdou/runtime-contract";
@@ -72,6 +72,7 @@ export class Studio {
   private booted = false;
   private nextId = 1;
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
+  private _shell?: ShellSession;
 
   /** Agent run history, most-recent first (persisted in IndexedDB). */
   runs: Run[] = [];
@@ -92,6 +93,11 @@ export class Studio {
 
   get activeRun(): Run | undefined {
     return this.runs.find((r) => r.id === this.activeRunId);
+  }
+
+  /** A persistent shell session (cwd/env survive across commands), for the terminal. */
+  get shell(): ShellSession {
+    return (this._shell ??= this.runtime.openShell());
   }
 
   private readonly listeners = new Set<() => void>();

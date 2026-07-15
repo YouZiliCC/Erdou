@@ -32,12 +32,25 @@ input, textarea { font-family: var(--mono); }
 .chip { font-size:10px; padding:1.5px 8px; border-radius:20px; border:1px solid var(--border); color:var(--muted); display:inline-flex; align-items:center; gap:5px; }
 .chip.run,.chip.running{color:var(--accent);border-color:rgba(88,166,255,.35);}
 .chip.review{color:var(--purple);border-color:rgba(198,149,198,.35);}
-.chip.done{color:var(--green);border-color:rgba(63,185,80,.3);}
-.chip.error{color:var(--red);border-color:rgba(248,81,73,.3);}
+.chip.done,.chip.exited{color:var(--green);border-color:rgba(63,185,80,.3);}
+.chip.error,.chip.killed{color:var(--red);border-color:rgba(248,81,73,.3);}
 .btn { font-size:12px; border:1px solid var(--border); background:var(--elev); color:var(--ink); border-radius:6px; padding:5px 11px; cursor:pointer; }
 .btn.primary { background:var(--accent); color:#00121f; border-color:transparent; font-weight:600; }
 .btn.ghost { background:transparent; color:var(--muted); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* generic tab bar (Task 10 — ReviewPane) */
+.tabs { flex:0 0 auto; display:flex; align-items:center; gap:3px; padding:6px 10px; border-bottom:1px solid var(--border); }
+.tabs .tab { font-size:12px; font-family:var(--sans); padding:5px 11px; border-radius:6px; border:1px solid transparent; background:transparent; color:var(--muted); cursor:pointer; }
+.tabs .tab:hover { background:var(--elev); color:var(--ink); }
+.tabs .tab.sel { background:var(--elev); color:var(--ink); border-color:var(--border); }
+.tabs .tab.muted { font-size:11px; color:var(--faint); }
+.tabs .tab.muted.sel { color:var(--muted); }
+.tabs .sp { flex:1; }
+
+.review-pane { flex:1; min-height:0; display:flex; flex-direction:column; }
+.tab-body { flex:1; min-height:0; display:flex; flex-direction:column; }
+.tab-body > * { flex:1; min-height:0; }
 
 /* ---- title bar ---- */
 .titlebar { height:38px; flex:0 0 38px; display:flex; align-items:center; gap:10px; padding:0 12px; border-bottom:1px solid var(--border); background:var(--panel); }
@@ -89,26 +102,27 @@ input, textarea { font-family: var(--mono); }
 .panel { min-height: 0; overflow: auto; padding: 8px 0; font-family: var(--mono); font-size: 12.5px; }
 
 /* terminal */
-.term { display: grid; grid-template-rows: 1fr auto; height: 100%; min-height: 0; }
+.term { display: grid; grid-template-rows: 1fr auto; height: 100%; min-height: 0; font-family: var(--mono); }
 .term .out { overflow: auto; padding: 10px 14px; font-size: 12.5px; line-height: 1.55; }
-.term .blk { margin-bottom: 8px; }
-.term .cmd { color: var(--amber); }
-.term .cmd::before { content: "erdou:/ $ "; color: var(--green); }
-.term .res { white-space: pre-wrap; word-break: break-word; color: var(--ink); }
+.term .blk { margin-bottom: 9px; }
+.term .prompt-line { color: var(--ink); word-break: break-word; }
+.term .prompt-line .ws { color: var(--accent); }
+.term .prompt-line .cwd { color: var(--muted); }
+.term .prompt-line .p { color: var(--green); }
+.term .res { white-space: pre-wrap; word-break: break-word; color: var(--ink); padding: 2px 0 0; }
 .term .res.err { color: var(--red); }
-.term .code { color: var(--faint); }
-.term .inrow { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--border); padding: 8px 12px; }
-.term .prompt { color: var(--green); }
-.term input { flex: 1; background: transparent; border: none; color: var(--ink); font-size: 12.5px; }
+.term .code { color: var(--red); font-size: 11.5px; padding-top: 2px; }
+.term .inrow { display: flex; align-items: center; gap: 6px; border-top: 1px solid var(--border); padding: 8px 12px; }
+.term .inrow .ws { color: var(--accent); }
+.term .inrow .cwd { color: var(--muted); }
+.term .inrow .p { color: var(--green); }
+.term input { flex: 1; background: transparent; border: none; color: var(--ink); font-size: 12.5px; font-family: var(--mono); }
 .term input:focus { outline: none; }
 
 /* processes */
 .proc { width: 100%; border-collapse: collapse; }
 .proc th { text-align: left; color: var(--faint); font-weight: 500; padding: 6px 14px; font-size: 11px; }
 .proc td { padding: 5px 14px; color: var(--ink); border-top: 1px solid var(--border2); }
-.proc .st-running { color: var(--green); }
-.proc .st-exited { color: var(--muted); }
-.proc .st-killed { color: var(--red); }
 
 /* preview */
 .preview { display: grid; grid-template-rows: auto 1fr; min-height: 0; height: 100%; }

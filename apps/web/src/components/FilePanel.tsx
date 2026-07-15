@@ -38,7 +38,7 @@ export function FilePanel({ studio }: { studio: Studio }) {
         <div className="viewer">
           <div className="vhead">
             <span>{sel}</span>
-            <span>{content.length} chars</span>
+            <span className="chip">{content.length} chars</span>
           </div>
           <pre>{content}</pre>
         </div>

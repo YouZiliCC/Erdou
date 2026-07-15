@@ -67,7 +67,7 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
         <label className="live-toggle">
           <input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} /> live
         </label>
-        {entry && <span className="entry">entry: {entry}</span>}
+        {entry && <span className="chip entry">entry: {entry}</span>}
       </div>
       {!src && !srcDoc && errors.length === 0 && (
         <div className="hint">
