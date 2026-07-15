@@ -6,6 +6,7 @@ import type { RuntimeEvent, ProcessInfo, Snapshot } from "@erdou/runtime-contrac
 import { registerLanguages, AGENT_LANGUAGES, AGENT_COMMANDS } from "./languages.js";
 import { loadRuns, saveRuns, clearRuns } from "./runs-store.js";
 import { SnapshotReader, buildFileChanges } from "./snapshot-read.js";
+import { startPreviewProxy } from "./preview-bridge.js";
 import {
   loadFolderIntoVfs,
   saveVfsToFolder,
@@ -138,6 +139,10 @@ export class Studio {
     this.booted = true;
     await this.runtime.boot();
     registerLanguages(this.runtime);
+    // Preview reverse-proxy: SW intercepts /__preview__/<port>/ iframe requests
+    // and forwards them here to `runtime.dispatch`. Fire-and-forget: SW
+    // registration must not block boot, and it self-guards for no-SW envs.
+    void startPreviewProxy(this.runtime);
     this.runs = await loadRuns();
     try {
       const snap = await this.store.load(SNAPSHOT_ID);
