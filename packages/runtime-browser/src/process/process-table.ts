@@ -5,6 +5,7 @@ import type {
   ProcessState,
   ExitStatus,
   Signal,
+  HttpHandler,
 } from "@erdou/runtime-contract";
 import { PipeStream } from "../core/byte-stream.js";
 import type { EventBus } from "../core/event-bus.js";
@@ -49,6 +50,8 @@ export interface ProcessTableDeps {
   bus: EventBus;
   registry: ProgramRegistry;
   clock: () => number;
+  /** Register an HTTP handler on a virtual port (backed by the PortRegistry). */
+  serve: (port: number, handler: HttpHandler) => void;
 }
 
 function toInfo(r: ProcessRecord): ProcessInfo {
@@ -145,6 +148,7 @@ export class ProcessTable {
       stdout,
       stderr,
       fs: this.deps.vfs,
+      serve: (port, handler) => this.deps.serve(port, handler),
     };
 
     queueMicrotask(() => {

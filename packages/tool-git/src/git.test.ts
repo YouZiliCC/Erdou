@@ -12,7 +12,7 @@ async function run(
   stdin.end();
   const stdout = new PipeStream();
   const stderr = new PipeStream();
-  const ctx: ExecContext = { pid: 1, argv, env: {}, cwd: "/repo", stdin, stdout, stderr, fs };
+  const ctx: ExecContext = { pid: 1, argv, env: {}, cwd: "/repo", stdin, stdout, stderr, fs, serve: () => {} };
   const code = await runner(ctx);
   stdout.end();
   stderr.end();

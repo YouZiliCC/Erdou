@@ -17,6 +17,8 @@ import type {
   VirtualPort,
   Executor,
   FileSystemApi,
+  HttpRequest,
+  HttpResponse,
 } from "@erdou/runtime-contract";
 import { EventBus } from "./core/event-bus.js";
 import { PipeStream } from "./core/byte-stream.js";
@@ -49,18 +51,19 @@ export class BrowserRuntime implements Runtime {
   constructor(options: BrowserRuntimeOptions = {}) {
     this.clock = options.clock ?? (() => Date.now());
     this.vfs = new Vfs({ clock: this.clock, onEvent: (e) => this.bus.emit(e) });
+    this.ports = new PortRegistry(this.bus);
     this.table = new ProcessTable({
       vfs: this.vfs,
       bus: this.bus,
       registry: this.registry,
       clock: this.clock,
+      serve: (port, handler) => this.ports.serve(port, handler),
     });
     createBuiltins({
       registry: this.registry,
       listProcesses: () => this.table.list(),
       killProcess: (pid, signal) => this.table.kill(pid, signal),
     });
-    this.ports = new PortRegistry(this.bus);
   }
 
   async boot(): Promise<void> {}
@@ -172,6 +175,10 @@ export class BrowserRuntime implements Runtime {
 
   async exposePort(port: number): Promise<string> {
     return this.ports.exposePort(port);
+  }
+
+  async dispatch(port: number, req: HttpRequest): Promise<HttpResponse> {
+    return this.ports.dispatch(port, req);
   }
 
   async getCapabilities(): Promise<RuntimeCapabilities> {

@@ -16,6 +16,7 @@ function table(programs: Record<string, Program>, bus = new EventBus()) {
     bus,
     registry: new Map(Object.entries(programs)),
     clock: () => 0,
+    serve: () => {},
   });
 }
 
