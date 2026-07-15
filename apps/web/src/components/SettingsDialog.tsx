@@ -1,6 +1,17 @@
 import { useState } from "react";
 import type { ModelConfig } from "@erdou/model-gateway";
 import type { ApprovalMode } from "../lib/model-config.js";
+import { Select } from "./ui/Select.js";
+
+const PROVIDER_OPTIONS: { value: ModelConfig["provider"]; label: string }[] = [
+  { value: "openai-compatible", label: "OpenAI-compatible" },
+  { value: "anthropic", label: "Anthropic" },
+];
+
+const APPROVAL_OPTIONS: { value: ApprovalMode; label: string }[] = [
+  { value: "auto", label: "Auto — run shell & delete commands without asking" },
+  { value: "confirm", label: "Confirm — ask before each shell or delete command" },
+];
 
 export function SettingsDialog({
   initial,
@@ -26,10 +37,13 @@ export function SettingsDialog({
 
         <div className="field">
           <label>Provider</label>
-          <select value={cfg.provider} onChange={(e) => patch({ provider: e.target.value as ModelConfig["provider"] })}>
-            <option value="openai-compatible">OpenAI-compatible</option>
-            <option value="anthropic">Anthropic</option>
-          </select>
+          <Select
+            className="block"
+            value={cfg.provider}
+            options={PROVIDER_OPTIONS}
+            onChange={(provider) => patch({ provider })}
+            ariaLabel="Provider"
+          />
         </div>
         <div className="field">
           <label>Base URL</label>
@@ -51,10 +65,13 @@ export function SettingsDialog({
 
         <div className="field">
           <label>Command approvals</label>
-          <select value={approvalMode} onChange={(e) => onApprovalModeChange(e.target.value as ApprovalMode)}>
-            <option value="auto">Auto — run shell &amp; delete commands without asking</option>
-            <option value="confirm">Confirm — ask before each shell or delete command</option>
-          </select>
+          <Select
+            className="block"
+            value={approvalMode}
+            options={APPROVAL_OPTIONS}
+            onChange={onApprovalModeChange}
+            ariaLabel="Command approvals"
+          />
         </div>
 
         <div className="actions">

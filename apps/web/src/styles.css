@@ -21,6 +21,13 @@ button { font-family: var(--sans); cursor: pointer; }
 input, textarea { font-family: var(--mono); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
+/* ---- scrollbars (Chromium; Firefox gets the cheap `scrollbar-*` fallback) ---- */
+* { scrollbar-width: thin; scrollbar-color: var(--faint) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--faint); border-radius: 20px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: padding-box; }
+
 /* ---- app shell ---- */
 .app { height:100vh; display:flex; flex-direction:column; overflow:hidden; }
 .shell { flex:1; display:flex; min-height:0; }
@@ -38,6 +45,29 @@ input, textarea { font-family: var(--mono); }
 .btn.primary { background:var(--accent); color:#00121f; border-color:transparent; font-weight:600; }
 .btn.ghost { background:transparent; color:var(--muted); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* ---- custom Select (Task 13) ---- */
+.ui-select { position: relative; display: inline-flex; }
+.ui-select-btn { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-family: var(--sans); font-size: 11px; color: var(--muted); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 3px 9px; cursor: pointer; }
+.ui-select-btn:hover { background: var(--elev); color: var(--ink); }
+.ui-select-chev { flex: 0 0 auto; color: var(--faint); transform: rotate(90deg); transition: transform 0.12s ease; }
+.ui-select-btn[aria-expanded="true"] .ui-select-chev { transform: rotate(-90deg); }
+.ui-select-pop { position: absolute; top: calc(100% + 4px); left: 0; z-index: 30; min-width: 100%; margin: 0; padding: 4px; list-style: none; background: var(--elev2); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 14px 34px rgba(0, 0, 0, 0.35); max-height: 220px; overflow-y: auto; }
+.ui-select-opt { padding: 6px 10px; border-radius: 5px; font-size: 12.5px; color: var(--ink); white-space: nowrap; cursor: pointer; }
+.ui-select-opt.active { background: var(--elev); }
+.ui-select-opt[aria-selected="true"] { color: var(--accent); }
+.ui-select.block { display: block; }
+.ui-select.block .ui-select-btn { width: 100%; color: var(--ink); background: var(--elev); border-radius: 8px; padding: 9px 11px; font-size: 13px; }
+.ui-select.block .ui-select-btn:hover { background: var(--elev); }
+.ui-select.block .ui-select-pop { white-space: normal; }
+
+/* ---- custom Toggle (Task 13) ---- */
+.ui-toggle { display: inline-flex; align-items: center; gap: 8px; background: transparent; border: none; padding: 0; color: var(--muted); font-family: var(--mono); font-size: 11.5px; cursor: pointer; }
+.ui-toggle-track { position: relative; flex: 0 0 auto; width: 30px; height: 17px; border-radius: 20px; background: var(--elev2); border: 1px solid var(--border); transition: background 0.15s ease, border-color 0.15s ease; }
+.ui-toggle-knob { position: absolute; top: 1px; left: 1px; width: 13px; height: 13px; border-radius: 50%; background: var(--faint); transition: transform 0.15s ease, background 0.15s ease; }
+.ui-toggle.on { color: var(--ink); }
+.ui-toggle.on .ui-toggle-track { background: rgba(88, 166, 255, 0.25); border-color: rgba(88, 166, 255, 0.4); }
+.ui-toggle.on .ui-toggle-knob { transform: translateX(13px); background: var(--accent); }
 
 /* generic tab bar (Task 10 — ReviewPane) */
 .tabs { flex:0 0 auto; display:flex; align-items:center; gap:3px; padding:6px 10px; border-bottom:1px solid var(--border); }
@@ -128,8 +158,7 @@ input, textarea { font-family: var(--mono); }
 .preview-bar .entry { font-family: var(--mono); font-size: 11.5px; color: var(--faint); }
 .run-input { flex: 1; min-width: 0; background: var(--elev); color: var(--ink); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 12.5px; }
 .run-input:focus { outline: none; border-color: var(--accent); }
-.live-toggle { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 11.5px; color: var(--muted); cursor: pointer; flex: 0 0 auto; }
-.live-toggle input { accent-color: var(--accent); }
+.live-toggle { flex: 0 0 auto; }
 .ports-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 7px 14px; border-bottom: 1px solid var(--border2); }
 .ports-bar .empty { color: var(--faint); font-size: 11.5px; }
 .sibling-hint { color: var(--faint); font-size: 11px; margin-left: auto; }
@@ -189,7 +218,6 @@ input, textarea { font-family: var(--mono); }
 .composer textarea::placeholder { color: var(--faint); }
 .composer textarea:focus { outline: none; }
 .composer-bar { display: flex; align-items: center; gap: 9px; margin-top: 8px; }
-.mode { font-size: 11px; color: var(--muted); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 3px 9px; }
 .run { margin-left: auto; padding: 5px 14px; }
 
 /* ---- approval prompt (Task 11) ---- */
@@ -206,8 +234,8 @@ input, textarea { font-family: var(--mono); }
 .dialog .sub { color: var(--muted); font-size: 12.5px; margin-bottom: 18px; line-height: 1.5; }
 .field { margin-bottom: 13px; }
 .field label { display: block; font-family: var(--mono); font-size: 10.5px; letter-spacing: 1px; text-transform: uppercase; color: var(--faint); margin-bottom: 5px; }
-.field input, .field select { width: 100%; color: var(--ink); background: var(--elev); border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; font-size: 13px; }
-.field input:focus, .field select:focus { border-color: var(--accent); }
+.field input { width: 100%; color: var(--ink); background: var(--elev); border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; font-size: 13px; }
+.field input:focus { border-color: var(--accent); }
 .dialog .actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 20px; }
 .dialog .note { color: var(--faint); font-size: 11.5px; margin-top: 14px; line-height: 1.5; }
 

@@ -1,4 +1,11 @@
 import { useState } from "react";
+import { Select } from "./ui/Select.js";
+
+const MODE_OPTIONS: { value: "auto" | "confirm"; label: string }[] = [
+  { value: "auto", label: "Auto" },
+  { value: "confirm", label: "Confirm" },
+];
+
 export function Composer({
   running, replying, mode, onModeChange, onRun,
 }: {
@@ -17,10 +24,7 @@ export function Composer({
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit(); }} />
       <div className="composer-bar">
-        <select className="mode" value={mode} onChange={(e) => onModeChange(e.target.value as "auto"|"confirm")}>
-          <option value="auto">Auto</option>
-          <option value="confirm">Confirm</option>
-        </select>
+        <Select value={mode} options={MODE_OPTIONS} onChange={onModeChange} ariaLabel="Run mode" />
         <button className="btn primary run" disabled={running || text.trim().length===0} onClick={submit}>
           {running ? "Working…" : "Run ⌘⏎"}
         </button>

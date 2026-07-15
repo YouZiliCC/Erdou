@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Studio } from "../lib/studio.js";
 import { detectRunCommand } from "../lib/run-detect.js";
 import { bundleProject, hasBundleEntry } from "../lib/bundle-project.js";
+import { Toggle } from "./ui/Toggle.js";
 
 /** Preview: type/detect a run command, execute it in the persistent shell, then
  *  view whichever virtual port it opened via the `/__preview__/<port>/`
@@ -115,9 +116,7 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
         >
           {building ? "Bundling…" : "Bundle & Run"}
         </button>
-        <label className="live-toggle">
-          <input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} /> live
-        </label>
+        <Toggle className="live-toggle" checked={live} onChange={setLive} label="live" />
       </div>
 
       <div className="ports-bar">
