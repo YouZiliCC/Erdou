@@ -25,6 +25,7 @@ import { ProcessTable, type ProcessRecord } from "./process/process-table.js";
 import type { ProgramRegistry } from "./process/program.js";
 import { createBuiltins } from "./builtins/index.js";
 import { Shell } from "./shell/interpreter.js";
+import { createShellSession, type ShellSession } from "./shell/session.js";
 import { PortRegistry } from "./port/registry.js";
 import { snapshotVfs, restoreVfs } from "./snapshot/serialize.js";
 
@@ -96,6 +97,11 @@ export class BrowserRuntime implements Runtime {
       wait: async (): Promise<ExitStatus> => ({ code: await result.wait(), signal: null }),
       kill: async (signal?: Signal) => result.kill(signal),
     };
+  }
+
+  /** Open a persistent interactive shell whose cwd/env survive across commands. */
+  openShell(opts?: { cwd?: string; env?: Record<string, string> }): ShellSession {
+    return createShellSession({ table: this.table, vfs: this.vfs, cwd: opts?.cwd, env: opts?.env });
   }
 
   async kill(pid: number, signal?: Signal): Promise<void> {
