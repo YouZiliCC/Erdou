@@ -1,5 +1,5 @@
 import { BrowserRuntime, IndexedDbSnapshotStore, type ShellSession } from "@erdou/runtime-browser";
-import { ModelGateway, type ModelConfig } from "@erdou/model-gateway";
+import { ModelGateway, type ModelConfig, type ChatMessage } from "@erdou/model-gateway";
 import { CodingAgent, type AgentEvent, type ApprovalRequest } from "@erdou/agent-core";
 import type { ApprovalMode } from "./model-config.js";
 import type { RuntimeEvent, ProcessInfo, Snapshot } from "@erdou/runtime-contract";
@@ -50,6 +50,10 @@ export interface Run {
   status: RunStatus;
   trace: TraceLine[];
   changes: FileChange[];
+  /** The model transcript so far (system + user/assistant/tool turns), seeded
+   *  from `AgentRunResult.transcript` after each turn. Replies pass this back
+   *  in as `priorMessages` so the agent continues the same conversation. */
+  messages: ChatMessage[];
   createdAt: number;
 }
 
@@ -330,8 +334,6 @@ export class Studio {
   /** Start a new agent run: create the thread, drive the agent, persist. */
   async startRun(task: string, model: ModelConfig, approvalMode: ApprovalMode): Promise<void> {
     if (this.running) return;
-    this.running = true;
-    this.autoAllow = new Set();
     const run: Run = {
       id: crypto.randomUUID(),
       title: runTitle(task),
@@ -339,14 +341,49 @@ export class Studio {
       status: "running",
       trace: [],
       changes: [],
+      messages: [],
       createdAt: Date.now(),
     };
     this.runs = [run, ...this.runs];
     this.activeRunId = run.id;
     this.notify();
+    await this.runAgentTurn(run, task, model, approvalMode);
+  }
 
-    // Capture the VFS at run start, then collect every path the agent touches
-    // via a run-scoped subscription (separate from the boot-time save handler).
+  /**
+   * Continue an existing thread: append the reply as a "you" bubble, then
+   * drive another agent turn seeded with the thread's transcript so far
+   * (`run.messages`), so the model sees the whole conversation. No-op if
+   * something is already running or the run doesn't exist.
+   */
+  async replyToRun(runId: string, task: string, model: ModelConfig, approvalMode: ApprovalMode): Promise<void> {
+    if (this.running) return;
+    const run = this.runs.find((r) => r.id === runId);
+    if (!run || run.status === "running") return;
+    run.status = "running";
+    this.appendLine(run, "user", task);
+    await this.runAgentTurn(run, task, model, approvalMode);
+  }
+
+  /**
+   * Drive one agent turn — a fresh run's first turn, or a reply — against
+   * `run`: builds the agent (seeded with `run.messages`, empty on a fresh
+   * run), streams events into `run`'s trace, captures the file diff for just
+   * this turn, and updates `run.status`/`run.messages`/`run.changes`.
+   * Shared by `startRun` and `replyToRun` so the two can't diverge.
+   */
+  private async runAgentTurn(
+    run: Run,
+    task: string,
+    model: ModelConfig,
+    approvalMode: ApprovalMode,
+  ): Promise<void> {
+    this.running = true;
+    this.autoAllow = new Set();
+
+    // Capture the VFS at turn start, then collect every path the agent
+    // touches via a run-scoped subscription (separate from the boot-time
+    // save handler).
     const startSnap = await this.runtime.createSnapshot();
     const changed = new Set<string>();
     const unsub = this.runtime.subscribe((e) => {
@@ -368,11 +405,16 @@ export class Studio {
       approve: this.makeApprove(approvalMode),
     });
     try {
-      await agent.run(task);
+      // Empty `run.messages` (a fresh run) makes the agent build its system
+      // prompt from scratch; a non-empty transcript (a reply) makes it
+      // continue the existing conversation instead — see CodingAgent.run.
+      const result = await agent.run(task, run.messages);
       // Compute the diff BEFORE deciding status, so "review" actually triggers
       // when the run changed files (the guard was a no-op while changes was []).
-      run.changes = await this.computeRunChanges(startSnap, changed);
+      const turnChanges = await this.computeRunChanges(startSnap, changed);
+      run.changes = this.mergeChanges(run.changes, turnChanges);
       run.status = run.changes.length > 0 ? "review" : "done";
+      run.messages = result.transcript;
     } catch (err) {
       this.appendLine(run, "error", "Agent stopped", asMessage(err));
       run.status = "error";
@@ -388,13 +430,39 @@ export class Studio {
     }
   }
 
-  /** Diff the paths touched during a run against the run-start snapshot. */
+  /** Diff the paths touched during a turn against the snapshot taken at its start. */
   private async computeRunChanges(startSnap: Snapshot, changed: Set<string>): Promise<FileChange[]> {
     if (changed.size === 0) return [];
     const before = await SnapshotReader.open(startSnap);
     const after = (path: string): string | null =>
       this.runtime.fs.exists(path) ? new TextDecoder().decode(this.runtime.fs.readFile(path)) : null;
     return buildFileChanges(changed, (p) => before.read(p), after);
+  }
+
+  /**
+   * Fold a turn's file changes into the run's cumulative list, keyed by path.
+   * A reply often touches a file a prior turn already changed; appending a
+   * second entry for the same path would collide with `DiffPanel`'s
+   * `key={path}` and confuse `revertChange`'s by-path lookup, so instead each
+   * path keeps ONE entry spanning every turn: `before` stays the earliest
+   * known content (first time this run touched the path) and `after` becomes
+   * the latest. `kind` is re-derived from that span (net create/delete/modify),
+   * and a path that nets out unchanged since the run started is dropped.
+   */
+  private mergeChanges(existing: FileChange[], turnChanges: FileChange[]): FileChange[] {
+    const byPath = new Map(existing.map((c) => [c.path, c]));
+    for (const c of turnChanges) {
+      const prior = byPath.get(c.path);
+      const before = prior ? prior.before : c.before;
+      if (before === c.after) {
+        byPath.delete(c.path); // net no-op since the run started
+        continue;
+      }
+      const kind: FileChange["kind"] =
+        c.after === "" ? "delete" : prior?.kind === "create" ? "create" : prior ? "modify" : c.kind;
+      byPath.set(c.path, { path: c.path, kind, before, after: c.after });
+    }
+    return [...byPath.values()].sort((x, y) => (x.path < y.path ? -1 : 1));
   }
 
   /** Undo a single file change from a run: creates are removed, others restored. */

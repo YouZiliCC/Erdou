@@ -58,10 +58,11 @@ export async function saveRuns(runs: Run[]): Promise<void> {
   await withStore("readwrite", (s) => s.put(capRuns(runs), KEY));
 }
 
-/** Load the run history (most-recent first), or [] if none stored yet. */
+/** Load the run history (most-recent first), or [] if none stored yet.
+ *  Defaults `messages` for runs persisted before that field existed. */
 export async function loadRuns(): Promise<Run[]> {
   const result = await withStore<Run[] | undefined>("readonly", (s) => s.get(KEY));
-  return result ?? [];
+  return (result ?? []).map((r) => ({ ...r, messages: r.messages ?? [] }));
 }
 
 /** Delete the run history entirely (used by Studio.resetProject). */

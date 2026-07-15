@@ -9,6 +9,7 @@ const mkRun = (id: string): Run => ({
   status: "done",
   trace: [],
   changes: [],
+  messages: [],
   createdAt: 0,
 });
 
