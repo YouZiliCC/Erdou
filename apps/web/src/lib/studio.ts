@@ -1,9 +1,10 @@
 import { BrowserRuntime, IndexedDbSnapshotStore } from "@erdou/runtime-browser";
 import { ModelGateway, type ModelConfig } from "@erdou/model-gateway";
 import { CodingAgent, type AgentEvent } from "@erdou/agent-core";
-import type { RuntimeEvent, ProcessInfo } from "@erdou/runtime-contract";
+import type { RuntimeEvent, ProcessInfo, Snapshot } from "@erdou/runtime-contract";
 import { registerLanguages, AGENT_LANGUAGES, AGENT_COMMANDS } from "./languages.js";
 import { loadRuns, saveRuns } from "./runs-store.js";
+import { SnapshotReader, buildFileChanges } from "./snapshot-read.js";
 import {
   loadFolderIntoVfs,
   saveVfsToFolder,
@@ -230,6 +231,14 @@ export class Studio {
     this.activeRunId = run.id;
     this.notify();
 
+    // Capture the VFS at run start, then collect every path the agent touches
+    // via a run-scoped subscription (separate from the boot-time save handler).
+    const startSnap = await this.runtime.createSnapshot();
+    const changed = new Set<string>();
+    const unsub = this.runtime.subscribe((e) => {
+      if (e.type === "file.changed") changed.add(e.path);
+    });
+
     const agent = new CodingAgent({
       runtime: this.runtime,
       gateway: this.gateway,
@@ -245,17 +254,39 @@ export class Studio {
     });
     try {
       await agent.run(task);
-      // Task 9 populates run.changes; the "review" branch is guarded on it.
+      // Compute the diff BEFORE deciding status, so "review" actually triggers
+      // when the run changed files (the guard was a no-op while changes was []).
+      run.changes = await this.computeRunChanges(startSnap, changed);
       run.status = run.changes.length > 0 ? "review" : "done";
     } catch (err) {
       this.appendLine(run, "error", "Agent stopped", asMessage(err));
       run.status = "error";
     } finally {
+      unsub();
       this.running = false;
       await this.save();
       await saveRuns(this.runs);
       this.notify();
     }
+  }
+
+  /** Diff the paths touched during a run against the run-start snapshot. */
+  private async computeRunChanges(startSnap: Snapshot, changed: Set<string>): Promise<FileChange[]> {
+    if (changed.size === 0) return [];
+    const before = await SnapshotReader.open(startSnap);
+    const after = (path: string): string | null =>
+      this.runtime.fs.exists(path) ? new TextDecoder().decode(this.runtime.fs.readFile(path)) : null;
+    return buildFileChanges(changed, (p) => before.read(p), after);
+  }
+
+  /** Undo a single file change from a run: creates are removed, others restored. */
+  async revertChange(runId: string, path: string): Promise<void> {
+    const run = this.runs.find((r) => r.id === runId);
+    const change = run?.changes.find((c) => c.path === path);
+    if (!change) return;
+    if (change.kind === "create") await this.runtime.rm(path, { force: true });
+    else await this.runtime.writeFile(path, change.before);
+    this.notify();
   }
 
   selectRun(id: string): void {

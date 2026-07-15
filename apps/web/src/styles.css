@@ -173,6 +173,28 @@ input, textarea { font-family: var(--mono); }
 .dialog .actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 20px; }
 .dialog .note { color: var(--faint); font-size: 11.5px; margin-top: 14px; line-height: 1.5; }
 
+/* ---- diff review pane (Task 9) ---- */
+.diff-panel { min-height: 0; overflow: auto; padding: 12px 14px; }
+.diff-files { display: flex; flex-direction: column; gap: 2px; margin-bottom: 12px; }
+.diff-file { display: flex; align-items: center; gap: 9px; font-family: var(--mono); font-size: 12px; padding: 5px 8px; color: var(--ink); border-radius: 6px; border: 1px solid transparent; cursor: pointer; }
+.diff-file:hover { background: var(--elev); }
+.diff-file.sel { background: var(--elev); border-color: var(--border); }
+.diff-file .fp { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diff-file .mark.create, .diff-file .add { color: var(--green); }
+.diff-file .mark.delete, .diff-file .del { color: var(--red); }
+.diff-file .mark.modify { color: var(--amber); }
+.diff-file .revert { padding: 2px 9px; font-size: 11px; }
+
+.hunk { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; font-family: var(--mono); font-size: 11.5px; line-height: 1.7; }
+.hunk .ln { display: flex; }
+.hunk .g { width: 40px; flex: 0 0 40px; text-align: right; padding-right: 9px; color: var(--faint); user-select: none; border-right: 1px solid var(--border2); }
+.hunk .c { padding-left: 10px; white-space: pre-wrap; word-break: break-word; }
+.hunk .a { background: rgba(63, 185, 80, .12); }
+.hunk .a .c { color: var(--green); }
+.hunk .d { background: rgba(248, 81, 73, .12); }
+.hunk .d .c { color: var(--red); }
+.hunk .h { background: rgba(88, 166, 255, .06); color: var(--accent); }
+
 @media (max-width: 900px) {
   .shell { flex-direction: column; }
   .sidebar { width: auto; flex: 0 0 auto; border-right: none; border-bottom: 1px solid var(--border); }
