@@ -224,22 +224,29 @@ export class Vfs implements FileSystemApi {
     const now = this.clock();
     const src = resolvePath(this.root, from, { followSymlinks: false });
     if (src.node === undefined) throw new ErrnoError("ENOENT", { path: from, syscall: "rename" });
+
+    const dst = resolvePath(this.root, to, { followSymlinks: false });
+
+    // Move INTO an existing directory, keeping the source's basename (mirrors `copy`).
+    const intoDir = dst.node !== undefined && dst.node.type === "directory";
+    const targetParent = intoDir ? (dst.node as DirInode) : dst.parent;
+    const targetName = intoDir ? src.name : dst.name;
+    const effectivePath = intoDir ? join(normalize(to), src.name) : normalize(to);
+
     if (src.node.type === "directory") {
-      // A directory cannot be moved into itself or one of its descendants —
-      // that would detach it from the tree and create a cycle.
+      // A directory cannot be moved into itself or one of its descendants.
       const nf = normalize(from);
-      const nt = normalize(to);
-      if (nt === nf || nt.startsWith(nf === "/" ? "/" : nf + "/")) {
-        throw new ErrnoError("EINVAL", { path: to, syscall: "rename" });
+      if (effectivePath === nf || effectivePath.startsWith(nf === "/" ? "/" : nf + "/")) {
+        throw new ErrnoError("EINVAL", { path: effectivePath, syscall: "rename" });
       }
     }
-    const dst = resolvePath(this.root, to, { followSymlinks: false });
+
     src.parent.children.delete(src.name);
     src.parent.mtimeMs = now;
-    dst.parent.children.set(dst.name, src.node);
-    dst.parent.mtimeMs = now;
+    targetParent.children.set(targetName, src.node);
+    targetParent.mtimeMs = now;
     this.emit({ type: "file.changed", path: normalize(from), kind: "delete" });
-    this.emit({ type: "file.changed", path: normalize(to), kind: "create" });
+    this.emit({ type: "file.changed", path: effectivePath, kind: "create" });
   }
 
   copy(from: string, to: string): void {

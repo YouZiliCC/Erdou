@@ -121,6 +121,55 @@ describe("Vfs rename / stat / symlinks", () => {
   });
 });
 
+describe("rename", () => {
+  it("mv into an existing directory keeps the source name (the reported bug)", () => {
+    const fs = new Vfs();
+    fs.mkdir("/1", { recursive: true });
+    fs.mkdir("/1/src", { recursive: true });
+    fs.writeFile("/1/src/a.txt", "hi");
+    // `mv /1/src /`  — destination is the root directory
+    fs.rename("/1/src", "/");
+    expect(fs.exists("/src")).toBe(true);
+    expect(fs.exists("/src/a.txt")).toBe(true);
+    expect(fs.exists("/1/src")).toBe(false);
+    // no phantom entry literally named "/"
+    expect(fs.readdir("/").map((e) => e.name).sort()).toEqual(["1", "src"]);
+  });
+
+  it("mv a file into a directory with a trailing form", () => {
+    const fs = new Vfs();
+    fs.mkdir("/dir", { recursive: true });
+    fs.writeFile("/a.txt", "x");
+    fs.rename("/a.txt", "/dir");
+    expect(fs.exists("/dir/a.txt")).toBe(true);
+    expect(fs.exists("/a.txt")).toBe(false);
+  });
+
+  it("mv a dir onto an existing dir moves it inside", () => {
+    const fs = new Vfs();
+    fs.mkdir("/a", { recursive: true });
+    fs.mkdir("/b", { recursive: true });
+    fs.rename("/a", "/b");
+    expect(fs.exists("/b/a")).toBe(true);
+  });
+
+  it("mv rejects moving a directory into itself or a descendant", () => {
+    const fs = new Vfs();
+    fs.mkdir("/a", { recursive: true });
+    expect(() => fs.rename("/a", "/a")).toThrow(/EINVAL/);
+    fs.mkdir("/a/b", { recursive: true });
+    expect(() => fs.rename("/a", "/a/b")).toThrow(/EINVAL/);
+  });
+
+  it("plain rename (destination absent) still works", () => {
+    const fs = new Vfs();
+    fs.writeFile("/a.txt", "x");
+    fs.rename("/a.txt", "/b.txt");
+    expect(fs.exists("/b.txt")).toBe(true);
+    expect(fs.exists("/a.txt")).toBe(false);
+  });
+});
+
 describe("Vfs events", () => {
   it("emits file.changed for create, modify and delete", () => {
     const { vfs, events } = make();
