@@ -1,6 +1,7 @@
 import { BrowserRuntime, IndexedDbSnapshotStore, type ShellSession } from "@erdou/runtime-browser";
 import { ModelGateway, type ModelConfig } from "@erdou/model-gateway";
-import { CodingAgent, type AgentEvent } from "@erdou/agent-core";
+import { CodingAgent, type AgentEvent, type ApprovalRequest } from "@erdou/agent-core";
+import type { ApprovalMode } from "./model-config.js";
 import type { RuntimeEvent, ProcessInfo, Snapshot } from "@erdou/runtime-contract";
 import { registerLanguages, AGENT_LANGUAGES, AGENT_COMMANDS } from "./languages.js";
 import { loadRuns, saveRuns } from "./runs-store.js";
@@ -83,6 +84,18 @@ export class Studio {
   fsVersion = 0;
   /** Bumped on every change so React's useSyncExternalStore re-renders. */
   version = 0;
+
+  /**
+   * A gated command awaiting the user's decision (Confirm mode). While set, the
+   * agent is blocked inside its `approve` callback; the UI resolves it on click.
+   */
+  pendingApproval: {
+    req: ApprovalRequest;
+    resolve: (d: "allow" | "deny") => void;
+    allowAlways: () => void;
+  } | null = null;
+  /** Tools the user chose to "always allow" for the duration of the current run. */
+  private autoAllow = new Set<string>();
 
   /** A mounted local folder (File System Access API), if any. */
   mount: DirHandleLike | null = null;
@@ -220,10 +233,46 @@ export class Studio {
     this.notify();
   }
 
+  /**
+   * The agent's `approve` callback for the current run, or `undefined` in Auto
+   * mode (Auto passes no callback, so gated tools run freely as before).
+   *
+   * In Confirm mode the returned callback parks a `pendingApproval` for the UI
+   * and returns a Promise the agent awaits. Every settling path — immediate
+   * auto-allow, Allow, Always allow, Deny — resolves that Promise exactly once
+   * AND clears `pendingApproval` + notifies, so the agent can never hang.
+   */
+  private makeApprove(mode: ApprovalMode): ((req: ApprovalRequest) => Promise<"allow" | "deny">) | undefined {
+    if (mode !== "confirm") return undefined;
+    return (req) =>
+      new Promise<"allow" | "deny">((resolve) => {
+        if (this.autoAllow.has(req.tool)) {
+          resolve("allow"); // already always-allowed this run
+          return;
+        }
+        this.pendingApproval = {
+          req,
+          resolve: (d) => {
+            this.pendingApproval = null;
+            this.notify();
+            resolve(d);
+          },
+          allowAlways: () => {
+            this.autoAllow.add(req.tool);
+            this.pendingApproval = null;
+            this.notify();
+            resolve("allow");
+          },
+        };
+        this.notify();
+      });
+  }
+
   /** Start a new agent run: create the thread, drive the agent, persist. */
-  async startRun(task: string, model: ModelConfig): Promise<void> {
+  async startRun(task: string, model: ModelConfig, approvalMode: ApprovalMode): Promise<void> {
     if (this.running) return;
     this.running = true;
+    this.autoAllow = new Set();
     const run: Run = {
       id: crypto.randomUUID(),
       title: runTitle(task),
@@ -257,6 +306,7 @@ export class Studio {
           "You can build & preview web apps: write a React/TS project (e.g. /src/main.tsx), and the user can Build & Run it (bundled in-browser, npm deps from a CDN).",
       },
       onEvent: (e) => this.onAgentEvent(run, e),
+      approve: this.makeApprove(approvalMode),
     });
     try {
       await agent.run(task);
@@ -270,6 +320,9 @@ export class Studio {
     } finally {
       unsub();
       this.running = false;
+      // Defensive: if the run threw while a prompt was open, drop it so the UI
+      // doesn't show a stale approval for a run that is no longer executing.
+      this.pendingApproval = null;
       await this.save();
       await saveRuns(this.runs);
       this.notify();

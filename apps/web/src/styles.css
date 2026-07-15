@@ -175,6 +175,13 @@ input, textarea { font-family: var(--mono); }
 .mode { font-size: 11px; color: var(--muted); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 3px 9px; }
 .run { margin-left: auto; padding: 5px 14px; }
 
+/* ---- approval prompt (Task 11) ---- */
+.approval { border: 1px solid var(--amber); background: var(--elev); border-radius: 9px; padding: 11px 13px; margin: 6px 0 16px; }
+.approval-head { font-size: 12.5px; color: var(--amber); margin-bottom: 8px; }
+.approval-head code { font-family: var(--mono); }
+.approval-cmd { font-family: var(--mono); font-size: 12px; color: var(--ink); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; white-space: pre-wrap; word-break: break-word; }
+.approval-actions { display: flex; gap: 8px; margin-top: 10px; }
+
 /* ---- settings dialog ---- */
 .scrim { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); backdrop-filter: blur(3px); display: grid; place-items: center; z-index: 40; }
 .dialog { width: min(460px, 92vw); background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 22px; box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5); }

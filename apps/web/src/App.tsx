@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import type { ModelConfig } from "@erdou/model-gateway";
 import { useStudio } from "./lib/use-studio.js";
-import { loadModel, saveModel } from "./lib/model-config.js";
+import { loadModel, saveModel, loadApprovalMode, saveApprovalMode, type ApprovalMode } from "./lib/model-config.js";
 import { SettingsDialog } from "./components/SettingsDialog.js";
 import { TitleBar } from "./components/TitleBar.js";
 import { TaskSidebar } from "./components/TaskSidebar.js";
@@ -13,9 +13,15 @@ export function App() {
   const studio = useStudio();
   const [model, setModel] = useState<ModelConfig>(() => loadModel());
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [mode, setMode] = useState<"auto" | "confirm">("auto");
+  const [mode, setMode] = useState<ApprovalMode>(() => loadApprovalMode());
 
   const configured = model.apiKey.trim().length > 0;
+
+  // Composer selector and Settings share this one persisted value.
+  function changeMode(next: ApprovalMode) {
+    setMode(next);
+    saveApprovalMode(next);
+  }
 
   useEffect(() => {
     if (!configured) setSettingsOpen(true);
@@ -28,7 +34,7 @@ export function App() {
       setSettingsOpen(true);
       return;
     }
-    void studio.startRun(task, model);
+    void studio.startRun(task, model, mode);
   }
 
   async function openFolder() {
@@ -64,7 +70,7 @@ export function App() {
             {studio.activeRun && <span className={"chip " + studio.activeRun.status}>{studio.activeRun.status}</span>}
           </div>
           <Conversation studio={studio} />
-          <Composer running={studio.running} mode={mode} onModeChange={setMode} onRun={runTask} />
+          <Composer running={studio.running} mode={mode} onModeChange={changeMode} onRun={runTask} />
         </section>
         <section className="review">
           <ReviewPane studio={studio} />
@@ -74,6 +80,8 @@ export function App() {
       {settingsOpen && (
         <SettingsDialog
           initial={model}
+          approvalMode={mode}
+          onApprovalModeChange={changeMode}
           onSave={(cfg) => {
             saveModel(cfg);
             setModel(cfg);

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 import type { Studio, TraceLine } from "../lib/studio.js";
+import { ApprovalPrompt } from "./ApprovalPrompt.js";
 
 const EXAMPLES = ["Open a local folder", "Scaffold a Vite app", "Write & run a Python script"];
 
@@ -11,7 +12,7 @@ export function Conversation({ studio }: { studio: Studio }) {
 
   useEffect(() => {
     ref.current?.scrollTo({ top: ref.current.scrollHeight });
-  }, [run?.id, run?.trace.length, studio.systemLog.length]);
+  }, [run?.id, run?.trace.length, studio.systemLog.length, studio.pendingApproval]);
 
   if (!run) {
     return (
@@ -46,6 +47,7 @@ export function Conversation({ studio }: { studio: Studio }) {
         <div className="you">{run.task}</div>
       </div>
       {renderTrace(run.trace)}
+      {studio.pendingApproval && run.status === "running" && <ApprovalPrompt studio={studio} />}
     </div>
   );
 }
