@@ -68,6 +68,20 @@ describe("assembleDist", () => {
     expect(fs.exists("/dist/dist")).toBe(false);
     expect(text(fs, "/dist/app.js")).toBe("v2");
   });
+
+  it("purges a stale /dist so a source asset removed between builds no longer lingers", () => {
+    const fs = new BrowserRuntime().fs;
+    fs.writeFile("/data.json", '{"a":1}');
+
+    assembleDist(fs, { js: "v1", css: "" });
+    expect(text(fs, "/dist/data.json")).toBe('{"a":1}');
+
+    fs.rm("/data.json");
+    assembleDist(fs, { js: "v2", css: "" });
+
+    expect(fs.exists("/dist/data.json")).toBe(false);
+    expect(text(fs, "/dist/app.js")).toBe("v2");
+  });
 });
 
 describe("bundleProject", () => {

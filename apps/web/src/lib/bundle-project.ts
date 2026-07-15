@@ -53,6 +53,7 @@ function shell(hasCss: boolean): string {
  * the unit tests exercise without needing a live bundler.
  */
 export function assembleDist(fs: FileSystemApi, out: { js: string; css: string }): void {
+  fs.rm("/dist", { recursive: true, force: true });
   fs.mkdir("/dist", { recursive: true });
 
   const all: string[] = [];
