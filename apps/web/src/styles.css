@@ -84,11 +84,12 @@ input, textarea { font-family: var(--mono); }
 
 /* files */
 .tree { padding: 4px 6px; }
-.node { display: flex; align-items: center; gap: 7px; padding: 3px 10px; border-radius: 6px; cursor: default; color: var(--ink); }
-.node.file { cursor: pointer; }
-.node.file:hover { background: var(--elev); }
+.node { display: flex; align-items: center; gap: 7px; padding: 3px 10px; border-radius: 6px; cursor: pointer; color: var(--ink); }
+.node:hover { background: var(--elev); }
 .node.sel { background: rgba(88, 166, 255, 0.1); color: var(--accent); }
-.node .ico { color: var(--faint); width: 14px; text-align: center; }
+.node .chev { flex: 0 0 14px; width: 14px; height: 14px; color: var(--faint); transition: transform 0.12s ease; }
+.node .chev.open { transform: rotate(90deg); }
+.node .ico { flex: 0 0 14px; width: 14px; height: 14px; color: var(--faint); }
 .node.dir .ico { color: var(--amber); }
 .viewer { border-top: 1px solid var(--border); }
 .viewer .vhead { display: flex; justify-content: space-between; color: var(--faint); padding: 8px 14px; font-size: 11px; }
