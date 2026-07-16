@@ -156,8 +156,10 @@ export class VmRuntime implements Runtime {
   /** A synchronous FileSystemApi over the guest workspace, sharing this runtime's
    *  event bus. Page-side creates, deletes, and directory-creates can double with
    *  the async bridge's coalesced event (Fs9pBridge.attach wraps CreateFile,
-   *  CreateDirectory, and Unlink — both observe the same fs9p mutation) — harmless,
-   *  deduped by consumers (the app's file.changed handler keys by path). After boot(). */
+   *  CreateDirectory, and Unlink — both observe the same fs9p mutation). Harmless for
+   *  the app: its file.changed handler only bumps an fsVersion counter + debounces
+   *  saves (idempotent under a duplicate), and the turn-scoped diff capture keys by
+   *  path. A consumer that COUNTS events would over-count. Available after boot(). */
   syncFs(): SyncFs9pFs {
     if (!this.booted) throw new Error("VmRuntime.syncFs(): not booted");
     return new SyncFs9pFs(this.host.fs9p, (e) => this.emit(e));

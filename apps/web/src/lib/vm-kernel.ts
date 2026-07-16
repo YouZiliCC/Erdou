@@ -15,9 +15,9 @@ interface VmLike extends Runtime {
 export async function createVmKernel(opts: { onProgress?: (phase: string) => void; makeRuntime?: () => VmLike } = {}): Promise<Kernel> {
   const onProgress = opts.onProgress ?? (() => {});
   onProgress("Loading VM image…");
-  const runtime = opts.makeRuntime
+  const runtime: VmLike = opts.makeRuntime
     ? opts.makeRuntime()
-    : (new VmRuntime(() => loadBrowserInputs(vmAssets())) as unknown as VmLike);
+    : new VmRuntime(() => loadBrowserInputs(vmAssets()));
   onProgress("Booting Alpine Linux…");
   await runtime.boot();
   onProgress("Ready");
