@@ -127,7 +127,7 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
   async function doRun(action: () => Promise<boolean>): Promise<void> {
     busy.current = true;
     try {
-      for (const p of openedPorts.current) studio.closePort(p);
+      for (const p of openedPorts.current) await studio.closePort(p);
       openedPorts.current = [];
       const before = new Set(studio.openPorts.map((p) => p.port));
       const ok = await action();
@@ -182,7 +182,7 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
   }, [studio.fsVersion, live]);
 
   function stop(port: number): void {
-    studio.closePort(port);
+    void studio.closePort(port);
     if (selectedPort === port) setSelectedPort(null);
   }
 

@@ -32,5 +32,10 @@ export function portSuite(make: MakeRuntime): void {
       expect(res.body).toBeInstanceOf(Uint8Array);
       expect(res.headers).toBeTruthy();
     });
+
+    it("closePort is contract surface and idempotent — closing an unserved port resolves as a no-op", async () => {
+      const rt = await booted(make);
+      await expect(rt.closePort(59998)).resolves.toBeUndefined();
+    });
   });
 }

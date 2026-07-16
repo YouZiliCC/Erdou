@@ -184,9 +184,8 @@ export class BrowserRuntime implements Runtime {
     return this.ports.dispatch(port, req);
   }
 
-  /** Stop serving `port` (emits `port.closed`). Concrete-runtime-only: the
-   *  contract has no notion of closing a served port, only opening one. */
-  closePort(port: number): void {
+  /** Stop serving `port` (emits `port.closed`). Idempotent — see the contract. */
+  async closePort(port: number): Promise<void> {
     this.ports.close(port);
   }
 

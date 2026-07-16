@@ -606,11 +606,11 @@ export class Studio {
     return this.runtime.getProcesses();
   }
 
-  /** Stop serving a port (the Preview panel's × button). The runtime emits
-   *  `port.closed` synchronously, which the boot-time subscription turns into
-   *  an `openPorts` update + notify — nothing further needed here. */
-  closePort(port: number): void {
-    this.runtime.closePort(port);
+  /** Stop serving a port (the Preview panel's × button). `openPorts` updates
+   *  when the runtime's `port.closed` event arrives — which the contract
+   *  allows to be asynchronous — via the boot-time subscription. */
+  closePort(port: number): Promise<void> {
+    return this.runtime.closePort(port);
   }
 
   async resetProject(): Promise<void> {

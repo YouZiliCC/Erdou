@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { runConformance } from "./index.js";
-import { BrowserRuntime, type PortRegistry } from "@erdou/runtime-browser";
+import { BrowserRuntime } from "@erdou/runtime-browser";
 import type { HttpHandler, RuntimeEvent } from "@erdou/runtime-contract";
 
 // This is the only place a concrete Runtime is imported — the suite modules
@@ -46,13 +46,9 @@ describe("BrowserRuntime: HTTP serve/dispatch/close roundtrip", () => {
     expect(new TextDecoder().decode(served.body)).toBe("echo GET /ping");
     expect(events.some((e) => e.type === "port.opened" && e.port === 8090)).toBe(true);
 
-    // `closePort` isn't on the public Runtime/BrowserRuntime surface yet (it
-    // lands with the preview panel's stop button, per the round-9 plan) —
-    // reach the kernel's PortRegistry directly so this test still exercises
-    // the real close()/port.closed wiring through this runtime's own event
-    // bus, on the exact port just served above.
-    const ports = (rt as unknown as { ports: PortRegistry }).ports;
-    ports.close(8090);
+    // `closePort` is contract surface as of round 10 — close through the
+    // public Runtime API and verify the port.closed event + 502 afterwards.
+    await rt.closePort(8090);
 
     expect(events.some((e) => e.type === "port.closed" && e.port === 8090)).toBe(true);
 
