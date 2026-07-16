@@ -214,7 +214,7 @@ Replace `assets.ts` with (keeps `assetsPresent`/`defaultAssets`, adds the Node l
 import { existsSync, readFileSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import { createRequire } from "node:module";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import type { V86BootInputs } from "./v86-host.js";
 
@@ -243,7 +243,13 @@ const exactBuffer = (b: Buffer): ArrayBuffer => new Uint8Array(b).buffer;
 
 /** Node inputs loader: read files, gunzip state.zst, resolve v86.wasm via the package. */
 export async function loadNodeInputs(assets: V86Assets): Promise<V86BootInputs> {
-  const wasmUrl = pathToFileURL(join(dirname(createRequire(import.meta.url).resolve("v86")), "v86.wasm")).href;
+  // BARE filesystem path — v86's Node loader does `fs.promises.readFile(wasm_path)`
+  // (libv86.mjs). A file:// URL string ENOENTs there, the load rejects unhandled,
+  // emulator-ready never fires → boot hangs. This is the exact value the shipped
+  // pre-refactor code passed; keep it.
+  const wasmUrl = join(dirname(createRequire(import.meta.url).resolve("v86")), "v86.wasm");
+  const meta = JSON.parse(readFileSync(join(assets.statePath, "..", "state.meta.json"), "utf8")) as { codec: string };
+  if (meta.codec !== "gzip") throw new Error(`unknown state codec ${meta.codec} — expected gzip`);
   const stateGz = readFileSync(assets.statePath);
   return {
     bios: exactBuffer(readFileSync(assets.biosPath)),
@@ -256,7 +262,7 @@ export async function loadNodeInputs(assets: V86Assets): Promise<V86BootInputs> 
 }
 ```
 
-> v86 in Node fetches `wasm_path` via XHR; a `file://` URL works under Node's XHR shim used by v86, matching the pre-refactor `createRequire` path. If the gated conformance boot regresses on the URL form, fall back to the bare filesystem path string (what the pre-refactor code passed) — verify in Task 1's gated re-run.
+> `wasmUrl` is a bare filesystem path in Node (v86 reads it with `fs.promises.readFile`). In the browser (Task 2) it is a served URL. The `V86BootInputs.wasmUrl` field is thus environment-appropriate at the loader, not the host.
 
 - [ ] **Step 5: `vm-runtime.ts` — loader-based boot**
 
@@ -275,6 +281,8 @@ await this.host.boot(inputs, this.bootTimeoutMs ? { bootTimeoutMs: this.bootTime
 ```
 
 Add the `bootTimeoutMs` private field and adjust the `V86Host` construction (now no-arg).
+
+**Also fix the now-stale `V86Assets` references** (Step 3 moved `V86Assets` to `assets.ts`): in `vm-runtime.ts`, change the import from `import { V86Host, type V86Assets } from "./v86-host.js";` to `import { V86Host } from "./v86-host.js";`, and **delete the `export type { V86Assets };` line** at the bottom of the file. (Without this, `pnpm typecheck` in Step 7 fails TS2305.)
 
 - [ ] **Step 6: Update the conformance factory**
 
@@ -475,9 +483,9 @@ export function openIdbBlobStore(dbName = "erdou-vm-assets"): IdbBlobStore {
 - [ ] **Step 4: Run to verify pass + gates + commit**
 
 Run: `pnpm vitest run packages/runtime-vm/src/browser-assets.test.ts && pnpm typecheck && pnpm lint:deps`
-Expected: PASS (2 tests); typecheck clean (uses browser lib types — ensure `packages/runtime-vm/tsconfig.json` includes DOM lib OR guard the IndexedDB code; see note).
+Expected: PASS (2 tests); typecheck clean.
 
-> **tsconfig note:** `browser-assets.ts` uses `indexedDB`/`IDBDatabase`/`DecompressionStream`/`Blob`/`Response`/`fetch`. Add `"lib": ["ES2022", "DOM"]` to `packages/runtime-vm/tsconfig.json`'s compilerOptions (extending the base) so these types resolve without pulling `@types/node`-only. Verify the Node-only files (assets.ts, v86-host.ts) still typecheck (they use node built-ins, which the base lib already covers).
+> **No tsconfig change needed:** `tsconfig.base.json` already sets `"lib": ["ES2022", "DOM", "DOM.Iterable"]`, so `indexedDB`/`IDBDatabase`/`DecompressionStream`/`Blob`/`Response`/`fetch` all resolve in `browser-assets.ts`, and the Node-only files (assets.ts, v86-host.ts) keep their node built-ins from `@types/node`. Do NOT add a package-level `lib` override (it replaces the base list wholesale and would silently drop `DOM.Iterable`).
 
 ```bash
 git add packages/runtime-vm
@@ -504,7 +512,12 @@ Spike E verified a synchronous `FileSystemApi` over v86's in-memory fs9p, includ
 
 - [ ] **Step 1: Extend the fake fs9p + write the failing test**
 
-In `packages/runtime-vm/src/test-support/fake-fs9p.ts`, add an `inodedata: {}` record to the fake, make `CreateBinaryFile`/`Write`/`ChangeSize` maintain BOTH `inodedata[idx]` and `inode.size` (so a sync reader sees the same store the async path leaves), and ensure `read_file` reads `inodedata[idx].slice(0, inode.size)`. (Mirror real v86: `Write` may over-allocate — to exercise the clamp trap, have the fake's `Write` allocate `inodedata[idx]` to `Math.floor(3*len/2)` while setting `inode.size = len`.)
+Extend `packages/runtime-vm/src/test-support/fake-fs9p.ts` to faithfully model real v86 (else the unit tests are false-green). Make these EXACT changes:
+1. **Single store.** Replace the closure-local `data` array with an exposed `inodedata: Record<number, Uint8Array | undefined> = {}` on the returned fake object — it must be the ONE store both the guest-path methods (`CreateBinaryFile`/`Write`/`ChangeSize`) and the sync reader use. (Naively adding `inodedata` beside the old `data` array creates two out-of-sync stores.)
+2. **read_file:** `const d = inodedata[w.id]; return d ? d.slice(0, inodes[w.id].size) : null;` — returns **null** when there's no inodedata entry (matches real v86; Task 6's empty-file red phase depends on this).
+3. **Write over-allocation:** the fake's `Write(idx, offset, count, buf)` must allocate `inodedata[idx]` to `Math.floor(3 * (offset + count) / 2)` while setting `inodes[idx].size = offset + count` — so the clamp test (readFile returns exactly `inode.size`) is real.
+4. **SearchPath name:** on a FULL-path match (`id !== -1`), return `name: undefined` (real v86 only sets `name` when the leaf is missing) — so `SyncFs9pFs.rm`/`Fs9pBridge` relying on `base(path)` is actually exercised, not masked. Keep returning the real leaf `name` in the `id === -1` (missing-leaf) branch (the writeFile-create path needs it). Update the interface/typing so `name` is `string | undefined` where consumers read it, or cast — match how `fs-bridge.ts` already handles it.
+5. `CreateBinaryFile(name, parent, buf)` sets `inodedata[idx] = new Uint8Array(buf)` + `inodes[idx].size = buf.length`. `ChangeSize(idx, size)` reslices `inodedata[idx]` to `size` and sets `inodes[idx].size = size`.
 
 `packages/runtime-vm/src/sync-fs.test.ts`:
 
@@ -521,7 +534,7 @@ describe("SyncFs9pFs", () => {
     const events: RuntimeEvent[] = [];
     const sf = new SyncFs9pFs(fs9p, (e) => events.push(e));
     sf.writeFile("/a.txt", "hello");
-    expect(new TextDecoder().decode(sf.readFile("/a.txt"))).toBe("hello"); // not the over-allocated tail
+    expect(new TextDecoder().decode(sf.readFile("/a.txt"))).toBe("hello");
     expect(events).toContainEqual({ type: "file.changed", path: "/a.txt", kind: "create" });
     sf.writeFile("/a.txt", "hi");
     expect(new TextDecoder().decode(sf.readFile("/a.txt"))).toBe("hi");
@@ -535,9 +548,20 @@ describe("SyncFs9pFs", () => {
     sf.writeFile("/d/x.txt", "1");
     expect(sf.readdir("/d").map((e) => e.name)).toEqual(["x.txt"]);
     expect(sf.exists("/d/x.txt")).toBe(true);
+    const id = fs9p.SearchPath("workspace/d/x.txt").id; // capture BEFORE rm (SearchPath returns -1 after)
     sf.rm("/d/x.txt", {});
     expect(sf.exists("/d/x.txt")).toBe(false);
-    expect(fs9p.inodedata).not.toHaveProperty(String(fs9p.SearchPath("workspace/d/x.txt").id)); // inodedata freed
+    expect(fs9p.inodedata).not.toHaveProperty(String(id)); // inodedata freed
+  });
+
+  it("readFile clamps to inode.size when fs9p.Write over-allocates (3/2×)", async () => {
+    const fs9p = makeFakeFs9p(); bootWorkspace(fs9p);
+    const sf = new SyncFs9pFs(fs9p, () => {});
+    // drive a GUEST-style write through fs9p.Write (which over-allocates inodedata to 3/2×size)
+    const id = fs9p.CreateFile("g.txt", fs9p.SearchPath(WORKSPACE).id);
+    await fs9p.Write(id, 0, 4, new TextEncoder().encode("data"));
+    expect(sf.readFile("/g.txt").length).toBe(4);                 // clamped to inode.size, not the padded tail
+    expect(new TextDecoder().decode(sf.readFile("/g.txt"))).toBe("data");
   });
 
   it("readFile of a missing path throws ENOENT; readFile of an empty file returns 0 bytes", () => {
@@ -575,7 +599,16 @@ type ChangeKind = "create" | "modify" | "delete";
 
 /** A synchronous FileSystemApi over v86's in-memory fs9p (Spike E). fs9p is the
  *  single shared store (guest sees writes via 9p; host reads/writes inodedata
- *  directly) — no page-side mirror. Page mutations emit file.changed synchronously. */
+ *  directly) — no page-side mirror. Page mutations emit file.changed synchronously.
+ *
+ *  EMISSION INVARIANT (resolved in Round 11c): when NO Fs9pBridge is attached over
+ *  the same fs9p (as in 11b's standalone use + the e2e), SyncFs9pFs is the sole
+ *  emitter and its synchronous file.changed is correct. If 11c attaches BOTH a
+ *  Fs9pBridge (for the async Runtime FS) AND this SyncFs over one fs9p, the wrapped
+ *  CreateFile/CreateDirectory/Unlink would ALSO emit → duplicate create/delete
+ *  events. 11c must coordinate (share one emit+suppress path — e.g. construct
+ *  SyncFs9pFs with the bridge and route mutations through its suppressed helpers).
+ *  Not exercised in 11b (callers pass a no-op emit or none); do NOT pre-build it. */
 export class SyncFs9pFs {
   constructor(private readonly fs9p: Fs9p, private readonly emit: (e: RuntimeEvent) => void) {}
 
@@ -584,6 +617,9 @@ export class SyncFs9pFs {
     return norm === "/" ? WORKSPACE : WORKSPACE + norm;
   }
   private cpath(path: string): string { return "/" + path.split("/").filter(Boolean).join("/"); }
+  /** Basename — v86's SearchPath leaves `name` undefined for EXISTING paths, so
+   *  rm/rename of an existing entry must derive it (same as fs-bridge.ts). */
+  private base(path: string): string { const p = path.split("/").filter(Boolean); return p[p.length - 1] ?? ""; }
   /** Reject mutations under an image-owned mount point (bin/lib/usr/proc/dev/tmp). */
   private guardSkeleton(path: string, syscall: string): void {
     const first = path.split("/").filter(Boolean)[0];
@@ -593,10 +629,18 @@ export class SyncFs9pFs {
   }
   private now(): number { return Math.round(Date.now() / 1000); }
 
+  /** Fail loud on non-resident inodes (forwarder/submount status 5, on-storage
+   *  status 2). Neither occurs in Erdou's `filesystem:{}` setup today; this keeps
+   *  a future submount/lazy-image from silently returning wrong bytes. */
+  private assertPlain(inode: { status?: number }, path: string, syscall: string): void {
+    if (inode.status === 5 || inode.status === 2) throw new ErrnoError("EIO", { path, syscall });
+  }
+
   readFile(path: string): Uint8Array {
     const w = this.fs9p.SearchPath(this.ws(path));
     if (w.id === -1) throw new ErrnoError("ENOENT", { path, syscall: "open" });
     const inode = this.fs9p.GetInode(w.id);
+    this.assertPlain(inode as { status?: number }, path, "read");
     if ((inode.mode & S_IFMT) === S_IFDIR) throw new ErrnoError("EISDIR", { path, syscall: "read" });
     const data = this.fs9p.inodedata[w.id];
     if (!data) return new Uint8Array(0);                 // empty file (touch): no inodedata, size 0
@@ -668,8 +712,9 @@ export class SyncFs9pFs {
       if (kids.length && !opts?.recursive) throw new ErrnoError("ENOTEMPTY", { path, syscall: "rmdir" });
       for (const k of kids) this.rm(path.replace(/\/$/, "") + "/" + k, { recursive: true, force: true });
     }
-    delete this.fs9p.inodedata[w.id];                     // free bytes (no guest CloseInode for host rm)
-    this.fs9p.Unlink(w.parentid, w.name);
+    const ret = this.fs9p.Unlink(w.parentid, this.base(path));   // NOT w.name (undefined for existing paths)
+    if (ret < 0) { if (opts?.force) return; throw new ErrnoError("ENOENT", { path, syscall: "unlink" }); }
+    delete this.fs9p.inodedata[w.id];                            // free bytes only after a successful unlink
     this.emit({ type: "file.changed", path: this.cpath(path), kind: "delete" });
   }
 
@@ -768,14 +813,13 @@ In `vm-runtime.ts` `shutdown()`:
 async shutdown(): Promise<void> {
   if (!this.booted) { if (this.host) await this.host.destroy().catch(() => {}); return; }
   this.booted = false;
-  this.guestd?.dispose();
+  this.guestd?.dispose();   // ends open ChunkStreams + rejects pending (via its own `pending` map)
   this.bridge?.dispose();
-  for (const rec of this.procs.values()) rec.proc.stdout.end?.(); // best-effort; end open streams
   await this.host.destroy().catch(() => {});
 }
 ```
 
-(Adjust to the actual field names; `stdout.end` exists on the ChunkStream. Guard optional chaining since shutdown may run pre-boot.)
+(`GuestdClient.dispose()` already ends the concrete ChunkStreams through its `pending` map, so no per-record stream loop is needed here — and `ProcRecord.proc.stdout` is statically typed `ByteStream`, which has no `end()`. Guard optional chaining since shutdown may run pre-boot; adjust to the actual field names.)
 
 - [ ] **Step 4: Run to verify pass + gates + Node gated re-verify + commit**
 
@@ -992,19 +1036,22 @@ try:
 except OSError:
     pass
 
-# record the daemon pid so guestd can return it (for kill-based teardown)
-try:
-    with open("/tmp/erdou-pty-%d.pid" % port, "w") as f:
-        f.write(str(os.getpid()))
-except OSError:
-    pass
-
 pid, master = os.forkpty()      # child: real tty (pts) = stdin/out/err + ctty
 if pid == 0:
     os.environ["TERM"] = "vt100"
     os.environ["PS1"] = "$ "
     os.execv("/bin/sh", ["/bin/sh"])
     os._exit(127)
+
+# forkpty SUCCEEDED — only now record the daemon pid so guestd's pty-open returns
+# it. If forkpty had failed (e.g. devpts not mounted) we'd have crashed before
+# writing the pidfile → guestd's poll times out → it replies EIO (fail-fast),
+# instead of the host hanging on a bridge that never came up.
+try:
+    with open("/tmp/erdou-pty-%d.pid" % port, "w") as f:
+        f.write(str(os.getpid()))
+except OSError:
+    pass
 
 def winch(_sig, _frm):
     try:
@@ -1040,36 +1087,43 @@ while True:
 
 - [ ] **Step 2: Add the `pty-open` op to `guestd.py`**
 
-In `guestd.py`'s `handle()`, add a `pty-open` branch: launch the bridge, poll briefly for its pid file, reply `PTY_OPENED {pid, port}` (or an error). Keep it small:
+Add `import time` to `guestd.py`'s top-level imports (with `os`/`json`/`subprocess`/`threading`/`struct`). In `handle()`, add a `pty-open` branch that dispatches to a DAEMON THREAD (the ~2 s pidfile poll must not block guestd's single frame-reader loop):
 
 ```python
-    elif type_char == "t":          # PTY_OPEN {port}
-        req = json.loads(body or b"{}")
-        port = int(req.get("port", 1))
-        pidfile = "/tmp/erdou-pty-%d.pid" % port
-        try:
-            os.remove(pidfile)
-        except OSError:
-            pass
-        subprocess.Popen(["/usr/bin/python3", "/usr/lib/erdou/ptybridge.py", str(port)],
+    elif type_char == "t":          # PTY_OPEN {port} — launch ptybridge, reply {pid}
+        threading.Thread(target=pty_open, args=(ident, json.loads(body or b"{}")), daemon=True).start()
+```
+
+And a top-level helper (beside `run_command`):
+
+```python
+def pty_open(ident, req):
+    port = int(req.get("port", 1))
+    pidfile = "/tmp/erdou-pty-%d.pid" % port
+    try:
+        os.remove(pidfile)
+    except OSError:
+        pass
+    p = subprocess.Popen(["/usr/bin/python3", "/usr/lib/erdou/ptybridge.py", str(port)],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        pid = None
-        for _ in range(200):        # up to ~2s for the daemon to write its pid
-            try:
-                with open(pidfile) as f:
-                    pid = int(f.read().strip()); break
-            except (OSError, ValueError):
-                import time; time.sleep(0.01)
-        if pid is None:
-            send_json("!", ident, {"code": "EIO", "message": "pty bridge did not start"})
-        else:
-            send_json("T", ident, {"pid": pid, "port": port})
+    p.wait()                        # reap the intermediate — ptybridge double-forks the daemon away, so this returns fast
+    pid = None
+    for _ in range(200):            # up to ~2s for the daemon to write its pid (after a successful forkpty)
+        try:
+            with open(pidfile) as f:
+                pid = int(f.read().strip()); break
+        except (OSError, ValueError):
+            time.sleep(0.01)
+    if pid is None:
+        send_json("!", ident, {"code": "EIO", "message": "pty bridge did not start (forkpty/devpts?)"})
+    else:
+        send_json("T", ident, {"pid": pid, "port": port})
 ```
 
 - [ ] **Step 3: Update `preload.mjs` — devpts mount, ship ptybridge, warm pycache**
 
 In `packages/runtime-vm/scripts/lib/preload.mjs`:
-- `GUEST_SETUP_CMD`: append `; mkdir -p /mnt/workspace/dev/pts; mount -t devpts devpts /mnt/workspace/dev/pts` (mount devpts inside the workspace chroot's /dev so `forkpty` works).
+- `GUEST_SETUP_CMD`: append `; mkdir -p /mnt/workspace/dev/pts; mount -t devpts devpts /mnt/workspace/dev/pts` to **the `GUEST_SETUP_CMD` string constant itself** (mount devpts inside the workspace chroot's /dev so `forkpty` works). The bake driver runs `GUEST_SETUP_CMD + "; echo SETUPDONE"`, so appending inside the constant guarantees devpts is mounted BEFORE the SETUPDONE marker the driver waits on — do NOT put it after the marker.
 - In `setupSplitFs`, also copy `ptybridge.py` into `sys-root/usr/lib/erdou/ptybridge.py` (beside guestd.py), mode 0o100755.
 - `PYCACHE_WARMUP_CMD`: extend the import list with `pty, fcntl, select, struct, signal, termios` so the bridge's cold-start is warmed read-write before the ro remount.
 
@@ -1134,12 +1188,13 @@ function fakeChannel(): PtyChannel & { sent: Uint8Array[]; emit: (b: Uint8Array)
 const enc = new TextEncoder();
 
 describe("openPtySession", () => {
-  it("buffers writes until PTYBRIDGE_READY, then flushes; streams onData; resize passes through", async () => {
+  it("subscribes before launch, buffers writes until READY, streams onData, resize passes through", async () => {
     const ch = fakeChannel();
     const kill = vi.fn(async () => {});
-    const sessionP = openPtySession(ch, { pid: 99, kill });
-    // resolve once READY arrives
-    ch.emit(enc.encode("PTYBRIDGE_READY\n"));
+    const launch = vi.fn(async () => ({ pid: 99 }));
+    const sessionP = openPtySession(ch, launch, kill, { deadlineMs: 10_000 });
+    expect(launch).toHaveBeenCalled();        // launch fired (after subscribe, which happened synchronously)
+    ch.emit(enc.encode("PTYBRIDGE_READY\n"));  // the banner we could only catch by subscribing first
     const session = await sessionP;
 
     const got: Uint8Array[] = [];
@@ -1154,6 +1209,22 @@ describe("openPtySession", () => {
 
     await session.dispose();
     expect(kill).toHaveBeenCalledWith(99);
+  });
+
+  it("holds data that shares the READY chunk until onData registers (no first-prompt loss)", async () => {
+    const ch = fakeChannel();
+    const sessionP = openPtySession(ch, async () => ({ pid: 1 }), async () => {}, { deadlineMs: 10_000 });
+    ch.emit(enc.encode("PTYBRIDGE_READY\n$ "));   // banner AND the first prompt in one chunk
+    const session = await sessionP;
+    const got: Uint8Array[] = [];
+    session.onData((d) => got.push(d));            // registered AFTER the chunk arrived
+    expect(new TextDecoder().decode(got[0] ?? new Uint8Array())).toBe("$ ");
+  });
+
+  it("rejects if PTYBRIDGE_READY never arrives (deadline)", async () => {
+    const ch = fakeChannel();
+    await expect(openPtySession(ch, async () => ({ pid: 1 }), async () => {}, { deadlineMs: 30 }))
+      .rejects.toThrow(/PTYBRIDGE_READY/);
   });
 });
 ```
@@ -1183,43 +1254,68 @@ export interface PtySession {
 
 const READY = new TextEncoder().encode("PTYBRIDGE_READY");
 
-/** Wrap a PtyChannel as a streaming PtySession. Resolves once the guest bridge
- *  announces PTYBRIDGE_READY (v86 drops input sent before the guest posts a
- *  receive buffer), buffering any pre-ready writes. dispose() kills the bridge. */
-export function openPtySession(channel: PtyChannel, control: { pid: number; kill(pid: number): Promise<void> }): Promise<PtySession> {
-  return new Promise((resolve) => {
-    let ready = false;
+/** Wrap a PtyChannel as a streaming PtySession. CRITICAL ORDERING (Spike F): it
+ *  SUBSCRIBES to the channel synchronously FIRST, then calls `launch()` (which
+ *  sends the guest the pty-open request) — otherwise the guest's PTYBRIDGE_READY
+ *  banner is emitted before any listener exists and is lost forever (v86 buffers
+ *  nothing), hanging boot. Resolves once BOTH the banner is seen AND launch()
+ *  yields the bridge pid; rejects on a deadline (fail-fast parity with boot).
+ *  Pre-ready writes and pre-onData data are buffered, not dropped. dispose() kills
+ *  the bridge by pid. */
+export function openPtySession(
+  channel: PtyChannel,
+  launch: () => Promise<{ pid: number }>,
+  kill: (pid: number) => Promise<void>,
+  opts: { deadlineMs?: number } = {},
+): Promise<PtySession> {
+  return new Promise((resolve, reject) => {
+    let ready = false, settled = false;
     let banner = new Uint8Array(0);
-    const preReady: Uint8Array[] = [];
-    const dataCbs = new Set<(d: Uint8Array) => void>();
+    let pid: number | undefined;
+    const preReady: Uint8Array[] = [];     // write()s issued before READY
+    const buffered: Uint8Array[] = [];     // data arriving before onData is registered
+    let dataCb: ((d: Uint8Array) => void) | undefined;
+    const deadlineMs = opts.deadlineMs ?? 15_000;
+
+    const deadline = setTimeout(() => {
+      if (settled) return; settled = true;
+      reject(new Error(`pty bridge did not announce PTYBRIDGE_READY within ${deadlineMs}ms`));
+    }, deadlineMs);
+
+    const emitData = (d: Uint8Array) => { if (dataCb) dataCb(d); else buffered.push(d); };
+    const maybeResolve = () => {
+      if (settled || !ready || pid === undefined) return;
+      settled = true; clearTimeout(deadline); resolve(session);
+    };
 
     const session: PtySession = {
       write: (d) => { if (ready) channel.send(d); else preReady.push(d); },
-      onData: (cb) => { dataCbs.add(cb); },
+      onData: (cb) => { dataCb = cb; for (const b of buffered) cb(b); buffered.length = 0; }, // flush pre-onData buffer
       resize: (cols, rows) => channel.resize(cols, rows),
-      dispose: async () => { await control.kill(control.pid).catch(() => {}); },
+      dispose: async () => { if (pid !== undefined) await kill(pid).catch(() => {}); },
     };
 
+    // 1) SUBSCRIBE FIRST — before launch(), so we cannot miss the READY banner.
     channel.subscribe((bytes) => {
-      if (!ready) {
-        // scan for the READY banner in the leading bytes; forward the rest as data
-        const merged = new Uint8Array(banner.length + bytes.length);
-        merged.set(banner, 0); merged.set(bytes, banner.length);
-        const idx = indexOf(merged, READY);
-        if (idx === -1) { banner = merged; return; }
-        ready = true;
-        for (const w of preReady) channel.send(w);
-        preReady.length = 0;
-        resolve(session);
-        // anything after the banner+newline is live terminal data
-        const after = merged.subarray(idx + READY.length);
-        const nl = after.indexOf(0x0a);
-        const rest = nl === -1 ? new Uint8Array(0) : after.subarray(nl + 1);
-        if (rest.length) for (const cb of dataCbs) cb(rest);
-        return;
-      }
-      for (const cb of dataCbs) cb(bytes);
+      if (ready) { emitData(bytes); return; }
+      const merged = new Uint8Array(banner.length + bytes.length);
+      merged.set(banner, 0); merged.set(bytes, banner.length);
+      const idx = indexOf(merged, READY);
+      if (idx === -1) { banner = merged; return; }
+      ready = true;
+      for (const w of preReady) channel.send(w); preReady.length = 0;
+      const after = merged.subarray(idx + READY.length);
+      const nl = after.indexOf(0x0a);
+      const rest = nl === -1 ? new Uint8Array(0) : after.subarray(nl + 1);
+      if (rest.length) emitData(rest.slice());   // held until onData registers (I3)
+      maybeResolve();
     });
+
+    // 2) THEN launch the guest bridge (sends the PTY_OPEN frame).
+    launch().then(
+      (c) => { pid = c.pid; maybeResolve(); },
+      (err) => { if (!settled) { settled = true; clearTimeout(deadline); reject(err); } },
+    );
   });
 }
 
@@ -1270,13 +1366,24 @@ async openPty(opts: { cols?: number; rows?: number } = {}): Promise<PtySession> 
   const port = [1, 2, 3].find((p) => !this.ptyPorts.has(p));
   if (port === undefined) throw new Error("VmRuntime: all 3 PTY ports are in use");
   this.ptyPorts.add(port);
-  const { pid } = await this.guestd.ptyOpen(port);
-  const channel = this.host.terminal(port as 1 | 2 | 3);
-  const session = await openPtySession(channel, { pid, kill: (p) => this.guestd.kill(p, "SIGKILL") });
-  session.resize(opts.cols ?? 80, opts.rows ?? 24); // hvc<port> starts 0×0 — send an initial size
-  const origDispose = session.dispose;
-  session.dispose = async () => { this.ptyPorts.delete(port); await origDispose(); };
-  return session;
+  try {
+    // Subscribe (inside openPtySession) BEFORE ptyOpen fires — see the ordering
+    // note in pty.ts. openPtySession calls launch() only after it has subscribed.
+    const channel = this.host.terminal(port as 1 | 2 | 3);
+    const session = await openPtySession(
+      channel,
+      () => this.guestd.ptyOpen(port),
+      (pid) => this.guestd.kill(pid, "SIGKILL"),
+      { deadlineMs: 15_000 },
+    );
+    session.resize(opts.cols ?? 80, opts.rows ?? 24); // hvc<port> starts 0×0 — send an initial size
+    const origDispose = session.dispose;
+    session.dispose = async () => { this.ptyPorts.delete(port); await origDispose(); };
+    return session;
+  } catch (e) {
+    this.ptyPorts.delete(port); // release the port if the bridge never came up
+    throw e;
+  }
 }
 ```
 
@@ -1314,7 +1421,6 @@ Productionize Spike D's verified harness into a gated test that boots the **real
 import { loadBrowserInputs } from "./browser-assets.js";
 import { V86Host } from "./v86-host.js";
 import { GuestdClient } from "./guestd-client.js";
-import { Fs9pBridge } from "./fs-bridge.js";
 import { SyncFs9pFs } from "./sync-fs.js";
 import { openPtySession } from "./pty.js";
 
@@ -1345,10 +1451,13 @@ export async function bootAndSelfTest(baseUrl: string, wasmUrl: string): Promise
   await (await guestd.exec("echo from-guest > /g.txt")).wait();
   results.push(dec.decode(sync.readFile("/g.txt")).trim() === "from-guest" ? "PASS sync-read" : "FAIL sync-read");
 
-  // 3) PTY: open, see the prompt/echo, run a command
-  const { pid, port } = await guestd.ptyOpen(1);
-  const channel = host.terminal(port as 1 | 2 | 3);
-  const session = await openPtySession(channel, { pid, kill: (x) => guestd.kill(x, "SIGKILL") });
+  // 3) PTY: open (subscribe-before-launch), see the prompt/echo, run a command
+  const session = await openPtySession(
+    host.terminal(1),
+    () => guestd.ptyOpen(1),
+    (x) => guestd.kill(x, "SIGKILL"),
+    { deadlineMs: 15_000 },
+  );
   let ptyOut = "";
   session.onData((d) => { ptyOut += dec.decode(d); });
   session.resize(80, 24);
@@ -1368,9 +1477,9 @@ export async function bootAndSelfTest(baseUrl: string, wasmUrl: string): Promise
 - [ ] **Step 2: The harness (server + page + driver) — port Spike D's verified files**
 
 Read Spike D's `r11b-spikes/d/{server.mjs, run-browser.mjs, web/index.html, web/main.js}` and port them into `packages/runtime-vm/scripts/browser-e2e/`:
-- `server.mjs`: static server serving `page.html`, the esbuild bundle, `v86.wasm`+`v86-fallback.wasm` (from node_modules), and `assets/{seabios.bin,vgabios.bin,kernel.bin,state.zst}` — parameterized by a bundle path + port (verbatim structure from Spike D's server.mjs, which already handles MIME + range).
-- `page.html`: imports the bundle as `<script type="module">`, calls `bootAndSelfTest(assetsBase, wasmUrl)`, and `console.log`s the returned string (prefix `RESULT `).
-- `run.mjs`: playwright-core driver (system `/usr/bin/chromium-browser`, headless, `--no-proxy-server` because this box sets `http_proxy`), captures console, exits 0 iff a `RESULT ALL_PASS` line appears — verbatim structure from Spike D's `run-browser.mjs`.
+- `server.mjs`: static server serving `page.html`, the esbuild bundle, **`libv86.mjs` + `v86.wasm` + `v86-fallback.wasm`** (copied/served from `node_modules/.pnpm/v86@0.5.424/node_modules/v86/build/`), and `assets/{seabios.bin,vgabios.bin,kernel.bin,state.zst}` — parameterized by a bundle path + port (verbatim structure from Spike D's server.mjs, which already handles MIME + range). Serving `libv86.mjs` is REQUIRED because the bundle imports `v86` as an EXTERNAL (see Step 3).
+- `page.html`: **an import map that resolves the external `v86` to the served libv86** (`<script type="importmap">{"imports":{"v86":"./v86/libv86.mjs"}}</script>`) placed BEFORE the bundle script, then imports the bundle as `<script type="module">`, calls `bootAndSelfTest(assetsBase, wasmUrl)` where `wasmUrl` is `new URL("./v86/v86.wasm", location.href).href`, and `console.log`s the returned string (prefix `RESULT `).
+- `run.mjs`: playwright-core driver (system Chromium via `process.env.CHROMIUM` — do NOT hardcode `/usr/bin/chromium-browser`; the test forwards it, default to that path if unset — headless, `--no-proxy-server` because this box sets `http_proxy`), captures console, exits 0 iff a `RESULT ALL_PASS` line appears — verbatim structure from Spike D's `run-browser.mjs`.
 
 - [ ] **Step 3: The gated vitest wrapper**
 
@@ -1394,14 +1503,17 @@ describe.skipIf(!RUN)("VmRuntime browser e2e (gated)", () => {
     // and exits 0 iff RESULT ALL_PASS. Delegating to a script keeps vitest out of the
     // browser process lifecycle.
     const out = execFileSync("node", [join(here, "..", "scripts", "browser-e2e", "run.mjs")], {
-      encoding: "utf8", timeout: 120_000, env: { ...process.env, CHROMIUM: chromium! },
+      encoding: "utf8",
+      timeout: 110_000,                 // < the it() timeout, so the inner one governs with a clean error
+      maxBuffer: 16 * 1024 * 1024,      // a browser boot logs a lot
+      env: { ...process.env, CHROMIUM: chromium! },
     });
     expect(out).toMatch(/RESULT ALL_PASS/);
   }, 120_000);
 });
 ```
 
-(`run.mjs` does the esbuild bundling of `browser-entry.ts` at start — `esbuild.build({ entryPoints:[browser-entry], bundle:true, format:"esm", outfile:<tmp>, platform:"browser" })` — then starts the server and Chromium. Port Spike D's structure; add the esbuild step.)
+(`run.mjs` esbuild-bundles `browser-entry.ts` at start with **`v86` marked external** so esbuild doesn't try to follow libv86's node `crypto`/`fs`/`perf_hooks` references (which fail "Could not resolve"): `esbuild.build({ entryPoints:[browser-entry], bundle:true, format:"esm", outfile:<tmp>, platform:"browser", external:["v86"] })`. The external `v86` import is then resolved in the browser by the `page.html` import map → the served `libv86.mjs`. Then start the server + Chromium. Port Spike D's structure; add the esbuild step + the external + the served libv86.)
 
 - [ ] **Step 4: Add devDeps + run the gated browser e2e**
 
@@ -1457,6 +1569,17 @@ git commit -m "docs(runtime-vm): browser + PTY usage; Round 11b complete — VmR
 **Explicitly out of scope (Round 11c):** `Kernel.kind` union, `createVmKernel`, apps/web Studio kernel toggle + VmRuntime construction, the xterm.js terminal panel (streaming vs the browser kernel's request/response `RpcShellSession`), and the live in-app browser e2e with the kernel switch. Task 9's `browser-entry.ts` is the reference 11c wires from.
 
 **Placeholder scan:** the harness files in Task 9 (`server.mjs`/`run.mjs`/`page.html`) are "port the verified Spike D files + add the esbuild bundling and the sync-fs/PTY checks" rather than fully transcribed — acceptable because the Spike D originals are verified, runnable, and on disk this session; the NEW logic (`browser-entry.ts`, the gated vitest wrapper) is given complete. All other code is complete.
+
+**Adversarial verification pass (4 reviewers before execution; 4 critical + 8 important + 12 minor findings, all folded in):**
+- **C1** — `loadNodeInputs` `wasmUrl` is a **bare filesystem path**, not a `file://` URL (v86's Node loader does `fs.promises.readFile(wasm_path)` — a URL string ENOENTs → boot hangs → 0/24). + re-added the `state.meta.json` codec guard.
+- **C2** — `SyncFs9pFs.rm` uses `base(path)` for `Unlink` (v86's `SearchPath` returns `name: undefined` for existing paths) and frees `inodedata` only after a successful unlink; the fake fs9p's `SearchPath` now returns `name: undefined` on a full-path match so the test exercises real behavior.
+- **C3** — the Task-9 esbuild bundle marks **`v86` external** (else libv86's node `crypto`/`fs` refs break the bundle) + an import map in `page.html` resolves it to the served `libv86.mjs`.
+- **C4** — `openPtySession` **subscribes to hvc\<port\> BEFORE launching** the guest bridge (else `PTYBRIDGE_READY` is emitted with no listener → hang), takes a `launch()` thunk + a `kill` + a **deadline**, buffers pre-onData data; `ptybridge.py` writes its pidfile **after** `forkpty` (a failure → guestd `EIO`, not a hang); `VmRuntime.openPty`/`browser-entry` reordered + release the port on failure.
+- **I1/I2** — dropped the stale `V86Assets` import/re-export (TS2305) and the `stdout.end?.()` line (TS2339) from `vm-runtime.ts`.
+- **I3** — `openPtySession` holds data sharing the READY chunk until `onData` registers (no first-prompt loss).
+- **I4** — the fake fs9p unifies its single byte store into the exposed `inodedata` (no dual-truth).
+- **I5** — documented the SyncFs/bridge double-emit invariant (resolved in 11c; not pre-built).
+- **Minors** — deleted the needless Task-2 tsconfig step (base already has DOM libs); fixed a vacuous "inodedata freed" assertion + added an over-allocation clamp test; fake `read_file` returns `null` for missing data; devpts mounts before the SETUPDONE marker; guestd `pty-open` runs in a daemon thread + reaps its Popen; dropped an unused import; hardened the e2e `execFileSync` (maxBuffer + timeout ordering + `CHROMIUM` env); kept Spike E's `status` fail-fast guards.
 
 **Type consistency:** `V86BootInputs` (Task 1) is produced by `loadNodeInputs` (Task 1) + `loadBrowserInputs` (Task 2) and consumed by `V86Host.boot` (Task 1) + `VmRuntime` (Task 1). `Fs9p` gains `inodedata` (Task 3) — the fake fs9p (test-support) and real v86 both have it; consumed by `SyncFs9pFs` (Task 3). `PtyChannel`/`PtySession` (Task 8) produced by `V86Host.terminal` + `openPtySession` and consumed by `VmRuntime.openPty` + `browser-entry.ts` (Task 9). `FrameType.PTY_OPEN/PTY_OPENED` (Task 7) used by `guestd.py` (Task 7) + `GuestdClient.ptyOpen` (Task 8). `SyncFs9pFs`/`SKELETON_DIRS` guard shared between Tasks 3 and 6. The re-bake (Task 7) changes `state.zst` that Tasks 8/9 + the Node conformance boot from — Task 7 re-verifies the Node conformance stays 24/24, and Tasks 9/10 exercise the re-baked image.
 
