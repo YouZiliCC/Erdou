@@ -26,7 +26,6 @@ describe("contract surface", () => {
         nativeProcesses: true,
         virtualPorts: true,
         persistentStorage: true,
-        network: true,
         threads: false,
         nativeAddons: false,
         realOs: false,

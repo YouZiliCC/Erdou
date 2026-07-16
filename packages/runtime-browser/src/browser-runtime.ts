@@ -204,7 +204,6 @@ export class BrowserRuntime implements Runtime {
       nativeProcesses: true,
       virtualPorts: true,
       persistentStorage: true,
-      network: true,
       threads: false,
       nativeAddons: false,
       realOs: false,

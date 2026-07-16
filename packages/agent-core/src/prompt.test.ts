@@ -6,7 +6,6 @@ const caps: RuntimeCapabilities = {
   nativeProcesses: true,
   virtualPorts: true,
   persistentStorage: true,
-  network: false,
   threads: false,
   nativeAddons: false,
   realOs: false,

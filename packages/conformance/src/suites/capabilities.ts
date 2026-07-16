@@ -5,7 +5,6 @@ const BOOLEAN_KEYS = [
   "nativeProcesses",
   "virtualPorts",
   "persistentStorage",
-  "network",
   "threads",
   "nativeAddons",
   "realOs",

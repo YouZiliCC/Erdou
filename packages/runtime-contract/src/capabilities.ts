@@ -12,7 +12,6 @@ export interface RuntimeCapabilities {
   nativeProcesses: boolean;
   virtualPorts: boolean;
   persistentStorage: boolean;
-  network: boolean;
   threads: boolean;
   nativeAddons: boolean;
   /** True when this runtime is a real OS (kernel + userland); false for simulated environments. */
