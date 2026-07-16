@@ -15,7 +15,7 @@ import { openPtySession, type PtySession } from "./pty.js";
 
 const SIG = (s?: Signal): string => s ?? "SIGTERM";
 
-/** A retained runtime-side process record (survives exit). */
+/** A retained runtime-side task record (survives exit). */
 interface ProcRecord {
   pid: number;
   cmd: string;
@@ -34,7 +34,7 @@ export class VmRuntime implements Runtime {
   private readonly listeners = new Set<RuntimeEventListener>();
   // Retained per pid — kept AFTER exit (unlike guestd.ps(), which only lists
   // live /proc) so wait()/kill()/getProcesses() honor the contract for an
-  // already-exited process. BrowserRuntime's process table never deletes
+  // already-exited task. BrowserRuntime's task table never deletes
   // records either; VmRuntime must match.
   private readonly procs = new Map<number, ProcRecord>();
   private readonly clock: () => number;
@@ -74,7 +74,7 @@ export class VmRuntime implements Runtime {
     await this.host.destroy().catch(() => {});
   }
 
-  // ---- process (guestd) ----
+  // ---- exec/spawn (guestd) ----
   private track(p: GuestProcess, cmd: string, args: string[]): ProcessHandle {
     const rec: ProcRecord = { pid: p.pid, cmd, args, proc: p, state: "running", status: null, waited: p.wait() };
     this.procs.set(p.pid, rec);
@@ -107,7 +107,7 @@ export class VmRuntime implements Runtime {
   }
   async getProcesses(): Promise<ProcessInfo[]> {
     // Merge live guest /proc with our retained exited records (dedup by pid), so
-    // a process that has exited still appears with state "exited"/"killed".
+    // a task that has exited still appears with state "exited"/"killed".
     const live = await this.guestd.ps();
     const seen = new Set(live.map((p) => p.pid));
     const retained: ProcessInfo[] = [];

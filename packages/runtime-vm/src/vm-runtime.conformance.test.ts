@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { runConformance } from "@erdou/conformance";
 import { VmRuntime } from "./vm-runtime.js";
-import { assetsPresent, defaultAssets, loadNodeInputs } from "./assets.js";
+import { assetsPresent, defaultAssets, loadNodeInputs } from "./node.js";
 
 const RUN = assetsPresent() && process.env.ERDOU_VM_E2E === "1";
 const makeInputs = () => loadNodeInputs(defaultAssets());

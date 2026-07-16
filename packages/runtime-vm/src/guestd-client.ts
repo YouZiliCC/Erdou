@@ -114,7 +114,7 @@ export class GuestdClient {
   }
 
   /** Tear down: stop pinging, reject a still-pending ready(), and settle every
-   *  in-flight process (reject its start / end its streams) + settle in-flight
+   *  in-flight task (reject its start / end its streams) + settle in-flight
    *  kill/ps/ptyOpen control requests so no awaiter hangs. */
   dispose(): void {
     if (this.disposed) return;
