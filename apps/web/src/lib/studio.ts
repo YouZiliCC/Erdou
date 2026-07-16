@@ -74,6 +74,11 @@ export function runTitle(task: string): string {
   return base.length > 48 ? base.slice(0, 47).trimEnd() + "…" : base;
 }
 
+/** One macrotask — lets asynchronously-delivered runtime events land before a
+ *  turn's changes are read (the contract allows delivery after the triggering
+ *  call resolves; see runtime-contract/src/events.ts). */
+export const eventsSettled = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+
 /**
  * Owns the browser runtime, model gateway, agent and project persistence.
  * React subscribes for re-render; all Erdou logic lives here, not in components.
@@ -490,6 +495,7 @@ export class Studio {
       // prompt from scratch; a non-empty transcript (a reply) makes it
       // continue the existing conversation instead — see CodingAgent.run.
       const result = await agent.run(task, run.messages);
+      await eventsSettled(); // async-delivered file.changed events land before we read `changed`
       // Compute the diff BEFORE deciding status, so "review" actually triggers
       // when the run changed files (the guard was a no-op while changes was []).
       const turnChanges = await this.computeRunChanges(startSnap, changed);
