@@ -17,6 +17,7 @@
     "@erdou/model-gateway": "workspace:*",
     "@erdou/runtime-browser": "workspace:*",
     "@erdou/runtime-contract": "workspace:*",
+    "@erdou/runtime-vm": "workspace:*",
     "@erdou/runtime-wasi": "workspace:*",
     "@erdou/tool-git": "workspace:*",
     "esbuild-wasm": "^0.23.0",

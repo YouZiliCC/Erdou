@@ -50,6 +50,9 @@ importers:
       '@erdou/runtime-contract':
         specifier: workspace:*
         version: link:../../packages/runtime-contract
+      '@erdou/runtime-vm':
+        specifier: workspace:*
+        version: link:../../packages/runtime-vm
       '@erdou/runtime-wasi':
         specifier: workspace:*
         version: link:../../packages/runtime-wasi
