@@ -115,4 +115,20 @@ describe("GuestdClient", () => {
     ]);
     expect(result).toBeUndefined(); // kill() resolves with void
   });
+
+  it("dispose() settles in-flight ptyOpen() promise", async () => {
+    // fake channel that swallows PTY_OPEN requests (never replies)
+    const channel: GuestChannel = { send() {}, subscribe() {} };
+    const client = new GuestdClient(channel);
+    await client.ready({ deadlineMs: 50 }).catch(() => {}); // skip ready; just init
+    const ptyPromise = client.ptyOpen(9999); // start ptyOpen(), never reply
+    client.dispose();
+    // assert ptyOpen() settles within 100ms, not hanging forever
+    await expect(
+      Promise.race([
+        ptyPromise,
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error("ptyOpen() hung after dispose()")), 100)),
+      ])
+    ).rejects.toThrow(/disposed/i);
+  });
 });

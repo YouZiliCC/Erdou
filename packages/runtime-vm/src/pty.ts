@@ -38,6 +38,10 @@ export function openPtySession(
 
     const deadline = setTimeout(() => {
       if (settled) return; settled = true;
+      // Reap the bridge process if launch() already resolved with a pid
+      if (pid !== undefined) {
+        void kill(pid).catch(() => {});
+      }
       reject(new Error(`pty bridge did not announce PTYBRIDGE_READY within ${deadlineMs}ms`));
     }, deadlineMs);
 

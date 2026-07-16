@@ -54,4 +54,14 @@ describe("openPtySession", () => {
     await expect(openPtySession(ch, async () => ({ pid: 1 }), async () => {}, { deadlineMs: 30 }))
       .rejects.toThrow(/PTYBRIDGE_READY/);
   });
+
+  it("calls kill(pid) when deadline fires after launch resolves", async () => {
+    const ch = fakeChannel();
+    const kill = vi.fn(async () => {});
+    // launch resolves with pid=42, but READY never arrives and deadline fires
+    await expect(openPtySession(ch, async () => ({ pid: 42 }), kill, { deadlineMs: 30 }))
+      .rejects.toThrow(/PTYBRIDGE_READY/);
+    // assert kill(42) was called to reap the orphaned bridge
+    expect(kill).toHaveBeenCalledWith(42);
+  });
 });

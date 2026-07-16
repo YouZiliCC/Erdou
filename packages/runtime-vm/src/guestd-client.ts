@@ -65,6 +65,7 @@ export class GuestdClient {
   private readonly control = new Map<number, (frame: { type: string; body: Uint8Array }) => void>();
   private readonly killResolvers = new Map<number, () => void>();
   private readonly psResolvers = new Map<number, (procs: ProcessInfo[]) => void>();
+  private readonly ptyOpenResolvers = new Map<number, (e: Error) => void>();
   private readyResolve?: (v: { pid: number }) => void;
   private readyReject?: (e: Error) => void;
   private readonly readyPromise: Promise<{ pid: number }>;
@@ -111,7 +112,7 @@ export class GuestdClient {
 
   /** Tear down: stop pinging, reject a still-pending ready(), and settle every
    *  in-flight process (reject its start / end its streams) + settle in-flight
-   *  kill/ps control requests so no awaiter hangs. */
+   *  kill/ps/ptyOpen control requests so no awaiter hangs. */
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
@@ -124,7 +125,7 @@ export class GuestdClient {
       p.onExit?.({ code: -1, signal: "SIGKILL" });
       this.pending.delete(id);
     }
-    // Settle in-flight kill/ps control requests
+    // Settle in-flight kill/ps/ptyOpen control requests
     for (const [id, resolve] of this.killResolvers) {
       resolve();
     }
@@ -133,6 +134,10 @@ export class GuestdClient {
       resolve([]);
     }
     this.psResolvers.clear();
+    for (const [id, reject] of this.ptyOpenResolvers) {
+      reject(new Error("GuestdClient disposed"));
+    }
+    this.ptyOpenResolvers.clear();
     this.control.clear();
   }
 
@@ -216,8 +221,10 @@ export class GuestdClient {
   ptyOpen(port: number): Promise<{ pid: number; port: number }> {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
+      this.ptyOpenResolvers.set(id, reject);
       this.control.set(id, ({ type, body }) => {
         this.control.delete(id);
+        this.ptyOpenResolvers.delete(id);
         if (type === FrameType.ERROR) reject(new Error((decodeJson(body) as { message: string }).message));
         else resolve(decodeJson(body) as { pid: number; port: number });
       });
