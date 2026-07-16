@@ -9,6 +9,12 @@ const caps: RuntimeCapabilities = {
   network: false,
   threads: false,
   nativeAddons: false,
+  realOs: false,
+  interpreters: [],
+  packageManagers: [],
+  networkEgress: "none",
+  memoryLimitMB: null,
+  snapshotCost: "cheap",
 };
 
 describe("buildSystemPrompt", () => {

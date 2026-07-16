@@ -47,6 +47,8 @@ export class BrowserRuntime implements Runtime {
   private readonly vfs: Vfs;
   private readonly table: ProcessTable;
   private readonly ports: PortRegistry;
+  /** Names registered via registerProgram — reported as capabilities.interpreters. */
+  private readonly programNames = new Set<string>();
 
   constructor(options: BrowserRuntimeOptions = {}) {
     this.clock = options.clock ?? (() => Date.now());
@@ -126,6 +128,7 @@ export class BrowserRuntime implements Runtime {
    */
   registerProgram(name: string, executor: Executor): void {
     this.table.register(name, executor);
+    this.programNames.add(name);
   }
 
   /** The runtime's synchronous filesystem — for in-process tools like the bundler. */
@@ -195,6 +198,12 @@ export class BrowserRuntime implements Runtime {
       network: true,
       threads: false,
       nativeAddons: false,
+      realOs: false,
+      interpreters: [...this.programNames],
+      packageManagers: [],
+      networkEgress: "cors-only",
+      memoryLimitMB: null,
+      snapshotCost: "cheap",
     };
   }
 
