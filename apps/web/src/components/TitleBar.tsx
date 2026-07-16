@@ -1,8 +1,9 @@
 import { useState } from "react";
+import type { ReactNode } from "react";
 import { toggleTheme } from "../lib/theme.js";
 
 export function TitleBar({
-  workspace, model, running, onSettings, onReset, onThemeChange,
+  workspace, model, running, onSettings, onReset, onThemeChange, children,
 }: {
   workspace: string;
   model: string;
@@ -10,6 +11,7 @@ export function TitleBar({
   onSettings: () => void;
   onReset: () => void;
   onThemeChange?: () => void;
+  children?: ReactNode;
 }) {
   const [, force] = useState(0);
   return (
@@ -18,6 +20,7 @@ export function TitleBar({
       <span className="ws">— {workspace}</span>
       <span className="sp" />
       <span className="chip"><span className={"dot " + (running ? "busy" : "on")} /> runtime · js·py·wasi</span>
+      {children}
       <span className="chip">{model}</span>
       <button
         className="btn ghost"
