@@ -60,7 +60,7 @@ export class VmRuntime implements Runtime {
     this.bridge.attach();          // wraps fs9p + builds the workspace path index from the restored state
     this.host.run();               // resume the CPU from the baked state (guestd is already resident)
     this.guestd = new GuestdClient(this.host.channel());
-    await this.guestd.ready();      // first hvc0 frame is the kick; guestd replies READY
+    await this.guestd.ready({ deadlineMs: this.bootTimeoutMs ?? 60_000 });      // first hvc0 frame is the kick; guestd replies READY
     this.booted = true;
   }
 

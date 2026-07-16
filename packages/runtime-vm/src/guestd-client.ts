@@ -63,6 +63,8 @@ export class GuestdClient {
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
   private readonly control = new Map<number, (frame: { type: string; body: Uint8Array }) => void>();
+  private readonly killResolvers = new Map<number, () => void>();
+  private readonly psResolvers = new Map<number, (procs: ProcessInfo[]) => void>();
   private readyResolve?: (v: { pid: number }) => void;
   private readyReject?: (e: Error) => void;
   private readonly readyPromise: Promise<{ pid: number }>;
@@ -108,7 +110,8 @@ export class GuestdClient {
   }
 
   /** Tear down: stop pinging, reject a still-pending ready(), and settle every
-   *  in-flight process (reject its start / end its streams) so no awaiter hangs. */
+   *  in-flight process (reject its start / end its streams) + settle in-flight
+   *  kill/ps control requests so no awaiter hangs. */
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
@@ -121,6 +124,15 @@ export class GuestdClient {
       p.onExit?.({ code: -1, signal: "SIGKILL" });
       this.pending.delete(id);
     }
+    // Settle in-flight kill/ps control requests
+    for (const [id, resolve] of this.killResolvers) {
+      resolve();
+    }
+    this.killResolvers.clear();
+    for (const [id, resolve] of this.psResolvers) {
+      resolve([]);
+    }
+    this.psResolvers.clear();
     this.control.clear();
   }
 
@@ -190,7 +202,13 @@ export class GuestdClient {
   kill(pid: number, signal = "SIGTERM"): Promise<void> {
     const id = this.nextId++;
     return new Promise((resolve) => {
-      this.control.set(id, () => { this.control.delete(id); resolve(); });
+      this.killResolvers.set(id, resolve);
+      this.control.set(id, () => {
+        this.control.delete(id);
+        const resolver = this.killResolvers.get(id);
+        this.killResolvers.delete(id);
+        resolver?.();
+      });
       this.channel.send(encodeJsonFrame(FrameType.KILL, id, { pid, signal }));
     });
   }
@@ -198,9 +216,12 @@ export class GuestdClient {
   ps(): Promise<ProcessInfo[]> {
     const id = this.nextId++;
     return new Promise((resolve) => {
+      this.psResolvers.set(id, resolve);
       this.control.set(id, ({ body }) => {
         this.control.delete(id);
-        resolve((decodeJson(body) as { procs: ProcessInfo[] }).procs);
+        const resolver = this.psResolvers.get(id);
+        this.psResolvers.delete(id);
+        resolver?.((decodeJson(body) as { procs: ProcessInfo[] }).procs);
       });
       this.channel.send(encodeJsonFrame(FrameType.PS, id, {}));
     });

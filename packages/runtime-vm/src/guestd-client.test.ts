@@ -85,4 +85,34 @@ describe("GuestdClient", () => {
     await new Promise((r) => setTimeout(r, 260)); // > one ping interval
     expect(pings).toBe(before); // no further pings after dispose
   });
+
+  it("dispose() settles in-flight ps() promise", async () => {
+    // fake channel that swallows PS requests (never replies)
+    const channel: GuestChannel = { send() {}, subscribe() {} };
+    const client = new GuestdClient(channel);
+    await client.ready({ deadlineMs: 50 }).catch(() => {}); // skip ready; just init
+    const psPromise = client.ps(); // start ps(), never reply
+    client.dispose();
+    // assert ps() settles within 100ms, not hanging forever
+    const result = await Promise.race([
+      psPromise,
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error("ps() hung after dispose()")), 100)),
+    ]);
+    expect(result).toEqual([]); // expect ps() to resolve to empty array
+  });
+
+  it("dispose() settles in-flight kill() promise", async () => {
+    // fake channel that swallows KILL requests (never replies)
+    const channel: GuestChannel = { send() {}, subscribe() {} };
+    const client = new GuestdClient(channel);
+    await client.ready({ deadlineMs: 50 }).catch(() => {}); // skip ready; just init
+    const killPromise = client.kill(1); // start kill(), never reply
+    client.dispose();
+    // assert kill() settles within 100ms, not hanging forever
+    const result = await Promise.race([
+      killPromise,
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error("kill() hung after dispose()")), 100)),
+    ]);
+    expect(result).toBeUndefined(); // kill() resolves with void
+  });
 });
