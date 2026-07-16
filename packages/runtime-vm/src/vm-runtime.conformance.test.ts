@@ -1,19 +1,20 @@
 import { describe, it, expect } from "vitest";
 import { runConformance } from "@erdou/conformance";
 import { VmRuntime } from "./vm-runtime.js";
-import { assetsPresent, defaultAssets } from "./assets.js";
+import { assetsPresent, defaultAssets, loadNodeInputs } from "./assets.js";
 
 const RUN = assetsPresent() && process.env.ERDOU_VM_E2E === "1";
+const makeInputs = () => loadNodeInputs(defaultAssets());
 
 // Gated: needs the baked asset (pnpm --filter @erdou/runtime-vm bake) AND
 // ERDOU_VM_E2E=1. Keeps the default `pnpm test` hermetic and fast.
 describe.skipIf(!RUN)("VmRuntime (gated e2e)", () => {
   // Each conformance test gets a FRESH VM booted from the self-contained state.
-  runConformance("VmRuntime", () => new VmRuntime(defaultAssets(), { clock: () => 0 }));
+  runConformance("VmRuntime", () => new VmRuntime(makeInputs, { clock: () => 0 }));
 
   // VM-specific checks the shared suite doesn't cover:
   it("runs real python3 in the guest", async () => {
-    const rt = new VmRuntime(defaultAssets());
+    const rt = new VmRuntime(makeInputs);
     await rt.boot();
     const p = await rt.exec("python3 -c 'print(6*7)'");
     expect((await p.stdout.text()).trim()).toBe("42");
@@ -21,7 +22,7 @@ describe.skipIf(!RUN)("VmRuntime (gated e2e)", () => {
   });
 
   it("snapshot captures only the workspace, not the 37MB Alpine system", async () => {
-    const rt = new VmRuntime(defaultAssets());
+    const rt = new VmRuntime(makeInputs);
     await rt.boot();
     await rt.writeFile("/only.txt", "x");
     const snap = await rt.createSnapshot();
@@ -32,7 +33,7 @@ describe.skipIf(!RUN)("VmRuntime (gated e2e)", () => {
   });
 
   it("kills a long-running guest process", async () => {
-    const rt = new VmRuntime(defaultAssets());
+    const rt = new VmRuntime(makeInputs);
     await rt.boot();
     const p = await rt.exec("sleep 30");
     await rt.kill(p.pid, "SIGKILL");

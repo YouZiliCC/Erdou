@@ -5,7 +5,7 @@ import type {
   RuntimeCapabilities, RuntimeEvent, RuntimeEventListener, Unsubscribe, Snapshot,
   VirtualPort, HttpRequest, HttpResponse,
 } from "@erdou/runtime-contract";
-import { V86Host, type V86Assets } from "./v86-host.js";
+import { V86Host } from "./v86-host.js";
 import { Fs9pBridge } from "./fs-bridge.js";
 import { GuestdClient, type GuestProcess } from "./guestd-client.js";
 import { PortRegistry } from "./port-registry.js";
@@ -37,18 +37,24 @@ export class VmRuntime implements Runtime {
   // records either; VmRuntime must match.
   private readonly procs = new Map<number, ProcRecord>();
   private readonly clock: () => number;
+  private readonly bootTimeoutMs: number | undefined;
   private booted = false;
 
-  constructor(assets: V86Assets, opts: { clock?: () => number } = {}) {
-    this.host = new V86Host(assets);
+  constructor(
+    private readonly loadInputs: () => Promise<import("./v86-host.js").V86BootInputs>,
+    opts: { clock?: () => number; bootTimeoutMs?: number } = {},
+  ) {
+    this.host = new V86Host();
     this.clock = opts.clock ?? (() => Date.now());
+    this.bootTimeoutMs = opts.bootTimeoutMs;
   }
 
   private emit(e: RuntimeEvent): void { for (const l of this.listeners) { try { l(e); } catch (err) { console.error("VmRuntime listener threw:", err); } } }
 
   async boot(): Promise<void> {
     if (this.booted) return;
-    await this.host.boot();
+    const inputs = await this.loadInputs();
+    await this.host.boot(inputs, this.bootTimeoutMs ? { bootTimeoutMs: this.bootTimeoutMs } : {});
     this.ports = new PortRegistry((e) => this.emit(e));
     this.bridge = new Fs9pBridge(this.host.fs9p, (e) => this.emit(e));
     this.bridge.attach();          // wraps fs9p + builds the workspace path index from the restored state
@@ -129,5 +135,3 @@ export class VmRuntime implements Runtime {
   async getCapabilities(): Promise<RuntimeCapabilities> { return vmCapabilities(["python3"]); }
   subscribe(l: RuntimeEventListener): Unsubscribe { this.listeners.add(l); return () => this.listeners.delete(l); }
 }
-
-export type { V86Assets };
