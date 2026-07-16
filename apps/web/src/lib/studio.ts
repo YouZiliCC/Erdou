@@ -3,12 +3,13 @@ import { ModelGateway, type ModelConfig, type ChatMessage } from "@erdou/model-g
 import { CodingAgent, type AgentEvent, type ApprovalRequest } from "@erdou/agent-core";
 import { loadApprovalMode, saveApprovalMode, loadModel, saveModel, type ApprovalMode } from "./model-config.js";
 import { getTheme, applyTheme } from "./theme.js";
-import type { RuntimeEvent, ProcessInfo, Snapshot, Runtime, FileSystemApi } from "@erdou/runtime-contract";
+import type { RuntimeEvent, ProcessInfo, Snapshot, Runtime, FileSystemApi, Unsubscribe } from "@erdou/runtime-contract";
 import { AGENT_LANGUAGES, AGENT_COMMANDS } from "./languages.js";
 import { createBrowserKernel, type Kernel, type RpcShellSession } from "./kernel.js";
 import { loadRuns, saveRuns, clearRuns } from "./runs-store.js";
 import { SnapshotReader, buildFileChanges } from "./snapshot-read.js";
-import { startPreviewProxy } from "./preview-bridge.js";
+import { startPreviewProxy, setPreviewRuntime } from "./preview-bridge.js";
+import { copyWorkspace } from "./workspace-copy.js";
 import { writeFolderState, readFolderState, type FolderState } from "./folder-state.js";
 import {
   loadFolderIntoVfs,
@@ -85,14 +86,30 @@ export const eventsSettled = (): Promise<void> => new Promise((r) => setTimeout(
  * React subscribes for re-render; all Erdou logic lives here, not in components.
  */
 export class Studio {
-  /** The active kernel — the seam a second runtime implementation plugs into. */
-  readonly kernel: Kernel = createBrowserKernel();
+  /** The active kernel — the seam a second runtime implementation plugs into.
+   *  Mutable so `switchKernel` can re-point it; `runtime`/`fs`/`shell` below
+   *  delegate to it so they follow the swap polymorphically. */
+  kernel: Kernel = createBrowserKernel();
+  /** The browser kernel, kept alive for an instant switch back to it. */
+  private browserKernel = this.kernel;
+  /** The booted VM kernel, cached across switches so a second "vm" switch
+   *  reuses the same guest instead of booting a second one (~40 MB + ~2 s). */
+  private vmKernel: Kernel | null = null;
+  private _browserBooted = false;
+  /** Progress state for the kernel-switch UI; `null` when no switch is in flight. */
+  switchingKernel: { phase: string } | null = null;
   private readonly gateway = new ModelGateway();
   private readonly store = new IndexedDbSnapshotStore();
   private booted = false;
   private nextId = 1;
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
   private _shell?: RpcShellSession;
+  private _unsubRuntime?: Unsubscribe;
+
+  /** `"browser"` or `"vm"` — which kernel is currently active. */
+  get kernelKind(): Kernel["kind"] {
+    return this.kernel.kind;
+  }
 
   /** The contract-typed runtime of the active kernel. */
   get runtime(): Runtime {
@@ -176,9 +193,12 @@ export class Studio {
     if (this.booted) return;
     this.booted = true;
     await this.runtime.boot();
+    this._browserBooted = true;
     // Preview reverse-proxy: SW intercepts /__preview__/<port>/ iframe requests
     // and forwards them here to `runtime.dispatch`. Fire-and-forget: SW
     // registration must not block boot, and it self-guards for no-SW envs.
+    // Installs the listener + seeds the preview-runtime holder; a later kernel
+    // switch re-aims it via `setPreviewRuntime` instead of re-registering.
     void startPreviewProxy(this.runtime);
     this.runs = await loadRuns();
     try {
@@ -192,21 +212,7 @@ export class Studio {
     } catch (err) {
       this.logSystem("error", "Could not restore project.", asMessage(err));
     }
-    this.runtime.subscribe((e: RuntimeEvent) => {
-      if (e.type === "file.changed") {
-        this.fsVersion++;
-        this.scheduleSave();
-        if (this.mount) this.scheduleFolderSave();
-        this.notify();
-      } else if (e.type === "port.opened") {
-        this.logSystem("system", `Port ${e.port} exposed`, e.url);
-        if (!this.openPorts.some((p) => p.port === e.port)) this.openPorts = [...this.openPorts, { port: e.port }];
-        this.notify();
-      } else if (e.type === "port.closed") {
-        this.openPorts = this.openPorts.filter((p) => p.port !== e.port);
-        this.notify();
-      }
-    });
+    this.subscribeRuntime();
 
     // Restore a previously-mounted local folder if permission is still granted.
     try {
@@ -223,6 +229,86 @@ export class Studio {
       this.logSystem("error", "Could not restore mounted folder", asMessage(err));
     }
     this.notify();
+  }
+
+  /** Subscribe to the active kernel's runtime events (file.changed / port.opened /
+   *  port.closed). Extracted from `boot()` so `switchKernel` can unsubscribe from
+   *  the outgoing kernel and re-subscribe to the incoming one. */
+  private subscribeRuntime(): void {
+    this._unsubRuntime = this.runtime.subscribe((e: RuntimeEvent) => {
+      if (e.type === "file.changed") {
+        this.fsVersion++;
+        this.scheduleSave();
+        if (this.mount) this.scheduleFolderSave();
+        this.notify();
+      } else if (e.type === "port.opened") {
+        this.logSystem("system", `Port ${e.port} exposed`, e.url);
+        if (!this.openPorts.some((p) => p.port === e.port)) this.openPorts = [...this.openPorts, { port: e.port }];
+        this.notify();
+      } else if (e.type === "port.closed") {
+        this.openPorts = this.openPorts.filter((p) => p.port !== e.port);
+        this.notify();
+      }
+    });
+  }
+
+  /**
+   * Switch the active kernel between the fast browser kernel and the real
+   * Alpine VM kernel. Lazily constructs+boots the VM kernel on first use (with
+   * progress via `switchingKernel`), copies the current workspace into the
+   * target kernel, re-subscribes runtime events, resets the persistent shell,
+   * and re-aims the preview bridge. Both kernels are kept alive once booted so
+   * either direction of the toggle is instant on a later switch.
+   */
+  async switchKernel(
+    kind: "browser" | "vm",
+    opts: { makeKernel?: (o: { onProgress?: (p: string) => void }) => Promise<Kernel> } = {},
+  ): Promise<void> {
+    // Plan-review I2: never switch mid-run — a swap during an agent turn would
+    // corrupt the run's diff capture and mis-target autosave. The toggle is also
+    // disabled in the UI while running, but guard here too (defense in depth).
+    if (kind === this.kernel.kind || this.switchingKernel || this.running) return;
+    const makeKernel = opts.makeKernel ?? (async (o) => (await import("./vm-kernel.js")).createVmKernel(o));
+    this.switchingKernel = { phase: "Starting…" };
+    this.notify();
+    try {
+      let next: Kernel;
+      if (kind === "browser") {
+        next = this.browserKernel;
+      } else if (this.vmKernel) {
+        next = this.vmKernel; // plan-review I4: reuse the already-booted guest
+      } else {
+        next = await makeKernel({
+          onProgress: (p) => {
+            this.switchingKernel = { phase: p };
+            this.notify();
+          },
+        });
+        this.vmKernel = next; // cache for the next switch back to vm
+      }
+      if (kind === "browser" && !this._browserBooted) {
+        await next.runtime.boot(); // (browser boots once; see note)
+      }
+      // copy the current workspace into the target kernel so the project follows
+      copyWorkspace(this.kernel.fs, next.fs);
+      // swap: unsubscribe old runtime events, point at the new kernel, re-subscribe
+      this._unsubRuntime?.();
+      this.kernel = next;
+      this._shell = undefined; // the `shell` getter re-opens on the new kernel
+      this.subscribeRuntime();
+      setPreviewRuntime(this.runtime); // plan-review I5: re-aim the (already-installed) preview bridge
+      this.fsVersion++;
+      // Note (plan-review M1): persistence uses one shared SNAPSHOT_ID across both
+      // kernels — intentionally last-writer-wins, since there is one logical
+      // project that follows the toggle. A snapshot saved by either kernel is a
+      // contract-level `Snapshot`, restorable by the other on next boot.
+      this.logSystem("system", `Switched to the ${kind === "vm" ? "Linux VM" : "browser"} kernel.`);
+    } catch (err) {
+      this.logSystem("error", `Failed to switch to the ${kind} kernel`, asMessage(err));
+    } finally {
+      this.switchingKernel = null;
+      this.notify();
+    }
   }
 
   async mountFolder(handle: DirHandleLike): Promise<void> {
