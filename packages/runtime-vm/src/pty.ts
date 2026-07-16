@@ -42,7 +42,7 @@ export function openPtySession(
     const deadline = setTimeout(() => {
       if (settled) return; settled = true;
       unsubscribe(); // detach — a failed/timed-out session must not keep receiving channel data
-      // Reap the bridge's child if launch() already resolved with a pid
+      // Reap the bridge process if launch() already resolved with a pid
       if (pid !== undefined) {
         void kill(pid).catch(() => {});
       }

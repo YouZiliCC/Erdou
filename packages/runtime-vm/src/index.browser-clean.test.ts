@@ -14,11 +14,20 @@ function topLevelImports(file: string): string[] {
 }
 const NODE_BUILTINS = /^(node:|fs$|path$|zlib$|module$|url$|crypto$|os$|child_process$)/;
 // Bare Node-only globals that ReferenceError in the browser (no import to catch).
-// Negative lookbehind excludes matches at the start of a string literal (e.g. the
-// `"process.started"` / `"process.exited"` event-type names from
-// @erdou/runtime-contract) — those are string values, not a bare identifier
-// reference to the Node `process` global.
-const BARE_GLOBALS = /(?<!["'])\b(Buffer|process|__dirname|__filename|global)\b/;
+const BARE_GLOBALS = /\b(Buffer|process|__dirname|__filename|global)\b/;
+
+// Strip comments and string/template literals so the bare-global scan sees only
+// executable code — the word "process" in prose or the "process.started" event
+// literals are not references to the Node `process` global. Order matters:
+// comments first (so an apostrophe inside a comment can't start a bogus string).
+function codeOnly(src: string): string {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, " ")        // block comments
+    .replace(/\/\/[^\n]*/g, " ")               // line comments
+    .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')     // double-quoted strings
+    .replace(/'(?:[^'\\\n]|\\.)*'/g, "''")     // single-quoted strings
+    .replace(/`(?:[^`\\]|\\.)*`/g, "``");      // template literals
+}
 
 // Walk the default-entry import graph transitively so a bare global two hops
 // down (e.g. Buffer in workspace-snapshot.ts) is still caught.
@@ -57,7 +66,7 @@ describe("runtime-vm default entry is browser-clean", () => {
     for (const f of localGraph(join(here, "index.ts"))) {
       if (/\/node\.ts$/.test(f)) continue;
       const src = readFileSync(f, "utf8");
-      const m = BARE_GLOBALS.exec(src);
+      const m = BARE_GLOBALS.exec(codeOnly(src));
       expect(m, `${f} uses bare Node global: ${m?.[0]}`).toBeNull();
     }
   });
