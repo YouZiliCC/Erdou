@@ -21,5 +21,15 @@ export function processSuite(make: MakeRuntime): void {
       const rt = await booted(make);
       await expect(rt.spawn({ cmd: "definitely-not-a-command" })).rejects.toThrow(/ENOENT/);
     });
+
+    it("exec's handle carries a real pid — visible to getProcesses and waitable via the runtime", async () => {
+      const rt = await booted(make);
+      const p = await rt.exec("echo pid-check");
+      expect(p.pid).toBeGreaterThan(0);
+      expect((await rt.wait(p.pid)).code).toBe(0);
+      expect(await p.stdout.text()).toBe("pid-check\n");
+      const info = (await rt.getProcesses()).find((x) => x.pid === p.pid);
+      expect(info?.state).toBe("exited");
+    });
   });
 }

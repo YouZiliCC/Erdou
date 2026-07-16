@@ -55,4 +55,10 @@ describe("agent tools", () => {
     const res = await byName("write_file").execute({ runtime }, { path: 5, content: "x" });
     expect(res.ok).toBe(false);
   });
+
+  it("run_shell's description names no concrete command list — the environment brief owns that", () => {
+    const desc = byName("run_shell").description;
+    expect(desc).not.toMatch(/ls cat grep/);
+    expect(desc).toMatch(/environment brief/i);
+  });
 });

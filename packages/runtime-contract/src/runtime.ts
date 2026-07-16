@@ -28,6 +28,8 @@ export interface Runtime {
   shutdown(): Promise<void>;
 
   spawn(options: SpawnOptions): Promise<ProcessHandle>;
+  /** Run a shell command line. The handle carries a REAL pid: the command
+   *  appears in getProcesses() and can be awaited/killed via wait()/kill(). */
   exec(
     commandLine: string,
     options?: Omit<SpawnOptions, "cmd" | "args">,
@@ -55,6 +57,10 @@ export interface Runtime {
   exposePort(port: number): Promise<string>;
   /** Dispatch an HTTP request to whatever handler is serving `port`. */
   dispatch(port: number, req: HttpRequest): Promise<HttpResponse>;
+  /** Stop serving `port`, freeing it for a future serve. Idempotent — closing
+   *  a port nothing serves is a no-op. Emits `port.closed` when something was
+   *  actually closed (delivery may be asynchronous — see events.ts). */
+  closePort(port: number): Promise<void>;
 
   getCapabilities(): Promise<RuntimeCapabilities>;
   subscribe(listener: RuntimeEventListener): Unsubscribe;

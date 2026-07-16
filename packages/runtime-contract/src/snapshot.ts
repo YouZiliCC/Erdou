@@ -1,5 +1,8 @@
-/** A serialized filesystem node. File bytes are base64-encoded so the whole
- *  snapshot is JSON- and structured-clone-safe. */
+/** A snapshot captures the WORKSPACE filesystem — the user-visible project
+ *  tree the Runtime exposes through its fs methods — never machine state. A
+ *  runtime whose OS lives elsewhere (e.g. a VM guest's system dirs) excludes
+ *  that from snapshots; restoring affects the workspace only. File bytes are
+ *  base64-encoded so the whole snapshot is JSON/structured-clone-safe. */
 export type SnapshotFsNode =
   | { type: "directory"; mode: number; children: Record<string, SnapshotFsNode> }
   | { type: "file"; mode: number; data: string }

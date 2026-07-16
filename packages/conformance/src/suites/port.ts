@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { RuntimeEvent } from "@erdou/runtime-contract";
-import { type MakeRuntime, booted } from "../types.js";
+import { type MakeRuntime, booted, until } from "../types.js";
 
 export function portSuite(make: MakeRuntime): void {
   describe("port", () => {
@@ -10,7 +10,7 @@ export function portSuite(make: MakeRuntime): void {
       rt.subscribe((e) => events.push(e));
       const url = await rt.exposePort(4321);
       expect(url).toContain("4321");
-      expect(events.some((e) => e.type === "port.opened" && e.port === 4321)).toBe(true);
+      await until(() => events.some((e) => e.type === "port.opened" && e.port === 4321));
     });
 
     // `dispatch` is the pure-contract half of the HTTP surface: any Runtime
@@ -31,6 +31,11 @@ export function portSuite(make: MakeRuntime): void {
       expect(res.status).toBe(502);
       expect(res.body).toBeInstanceOf(Uint8Array);
       expect(res.headers).toBeTruthy();
+    });
+
+    it("closePort is contract surface and idempotent — closing an unserved port resolves as a no-op", async () => {
+      const rt = await booted(make);
+      await expect(rt.closePort(59998)).resolves.toBeUndefined();
     });
   });
 }

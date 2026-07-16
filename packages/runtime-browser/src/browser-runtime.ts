@@ -47,6 +47,8 @@ export class BrowserRuntime implements Runtime {
   private readonly vfs: Vfs;
   private readonly table: ProcessTable;
   private readonly ports: PortRegistry;
+  /** Names registered via registerProgram — reported as capabilities.interpreters. */
+  private readonly programNames = new Set<string>();
 
   constructor(options: BrowserRuntimeOptions = {}) {
     this.clock = options.clock ?? (() => Date.now());
@@ -90,15 +92,25 @@ export class BrowserRuntime implements Runtime {
       env: options?.env ? { ...options.env } : {},
     });
     const result = shell.execute(commandLine);
+    // The command line gets a real pid: visible in getProcesses(), waitable
+    // and killable through the runtime — the contract's exec semantics.
+    const proc = this.table.adopt({
+      cmd: "sh",
+      args: ["-c", commandLine],
+      cwd: options?.cwd ?? "/",
+      env: options?.env,
+    });
+    proc.onKill((signal) => result.kill(signal));
+    void result.wait().then((code) => proc.exited(code));
     const stdin = new PipeStream();
     stdin.end();
     return {
-      pid: 0,
+      pid: proc.record.pid,
       stdout: result.stdout,
       stderr: result.stderr,
       stdin,
-      wait: async (): Promise<ExitStatus> => ({ code: await result.wait(), signal: null }),
-      kill: async (signal?: Signal) => result.kill(signal),
+      wait: () => proc.record.wait(),
+      kill: async (signal?: Signal) => proc.record.kill(signal),
     };
   }
 
@@ -126,6 +138,7 @@ export class BrowserRuntime implements Runtime {
    */
   registerProgram(name: string, executor: Executor): void {
     this.table.register(name, executor);
+    this.programNames.add(name);
   }
 
   /** The runtime's synchronous filesystem — for in-process tools like the bundler. */
@@ -181,9 +194,8 @@ export class BrowserRuntime implements Runtime {
     return this.ports.dispatch(port, req);
   }
 
-  /** Stop serving `port` (emits `port.closed`). Concrete-runtime-only: the
-   *  contract has no notion of closing a served port, only opening one. */
-  closePort(port: number): void {
+  /** Stop serving `port` (emits `port.closed`). Idempotent — see the contract. */
+  async closePort(port: number): Promise<void> {
     this.ports.close(port);
   }
 
@@ -192,9 +204,14 @@ export class BrowserRuntime implements Runtime {
       nativeProcesses: true,
       virtualPorts: true,
       persistentStorage: true,
-      network: true,
       threads: false,
       nativeAddons: false,
+      realOs: false,
+      interpreters: [...this.programNames],
+      packageManagers: [],
+      networkEgress: "cors-only",
+      memoryLimitMB: null,
+      snapshotCost: "cheap",
     };
   }
 

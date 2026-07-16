@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { type MakeRuntime, booted } from "../types.js";
+import { type MakeRuntime, booted, until } from "../types.js";
 
 const decode = (b: Uint8Array): string => new TextDecoder().decode(b);
 
@@ -37,6 +37,20 @@ export function filesystemSuite(make: MakeRuntime): void {
       await rt.writeFile("/from", "data");
       await rt.rename("/from", "/to");
       expect(decode(await rt.readFile("/to"))).toBe("data");
+    });
+
+    it("emits file.changed (create/modify/delete) for fs mutations — delivery may be async", async () => {
+      const rt = await booted(make);
+      const seen: { path: string; kind: string }[] = [];
+      rt.subscribe((e) => {
+        if (e.type === "file.changed") seen.push({ path: e.path, kind: e.kind });
+      });
+      await rt.writeFile("/ev.txt", "a");
+      await until(() => seen.some((e) => e.path === "/ev.txt" && e.kind === "create"));
+      await rt.writeFile("/ev.txt", "b");
+      await until(() => seen.some((e) => e.path === "/ev.txt" && e.kind === "modify"));
+      await rt.rm("/ev.txt");
+      await until(() => seen.some((e) => e.path === "/ev.txt" && e.kind === "delete"));
     });
   });
 }

@@ -26,9 +26,14 @@ describe("contract surface", () => {
         nativeProcesses: true,
         virtualPorts: true,
         persistentStorage: true,
-        network: true,
         threads: false,
         nativeAddons: false,
+        realOs: false,
+        interpreters: [],
+        packageManagers: [],
+        networkEgress: "cors-only",
+        memoryLimitMB: null,
+        snapshotCost: "cheap",
       }),
     };
     expect(typeof partial.getCapabilities).toBe("function");
