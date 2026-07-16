@@ -2,7 +2,16 @@ import type { Snapshot, SnapshotFsNode } from "@erdou/runtime-contract";
 import { Fs9pBridge, WORKSPACE, SKELETON_DIRS, type Fs9p } from "./fs-bridge.js";
 
 const S_IFMT = 0o170000, S_IFDIR = 0o040000, S_IFLNK = 0o120000;
-const toB64 = (b: Uint8Array): string => Buffer.from(b).toString("base64");
+
+// Portable base64 (browser + Node) — avoids a Node-only symbol that would
+// ReferenceError in the browser, where this module is reachable from the
+// default entry.
+const toB64 = (b: Uint8Array): string => {
+  let s = "";
+  for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode(...b.subarray(i, i + 0x8000));
+  return btoa(s);
+};
+const fromB64 = (s: string): Uint8Array => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
 /** Serialize the /workspace subtree (minus skeleton mount points) to a contract Snapshot. */
 export async function snapshotWorkspace(fs9p: Fs9p, clock: () => number): Promise<Snapshot> {
@@ -60,7 +69,7 @@ export async function restoreWorkspace(fs9p: Fs9p, bridge: Fs9pBridge, snap: Sna
       if (prefix !== "") { await bridge.mkdir(prefix, { recursive: true }); bridge.chmod(prefix, node.mode); }
       for (const [name, child] of Object.entries(node.children)) await write(child, prefix + "/" + name);
     } else if (node.type === "file") {
-      await bridge.writeFile(prefix, Uint8Array.from(Buffer.from(node.data, "base64")));
+      await bridge.writeFile(prefix, fromB64(node.data));
       bridge.chmod(prefix, node.mode);
     } else if (node.type === "symlink") {
       bridge.symlink(node.target, prefix);

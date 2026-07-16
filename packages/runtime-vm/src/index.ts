@@ -4,9 +4,6 @@ export { vmCapabilities } from "./capabilities.js";
 export { V86Host, assertFs9pSymbols } from "./v86-host.js";
 export type { V86BootInputs } from "./v86-host.js";
 
-export { loadNodeInputs, defaultAssets, assetsPresent } from "./assets.js";
-export type { V86Assets } from "./assets.js";
-
 export { loadBrowserInputs, openIdbBlobStore, decompressGzip } from "./browser-assets.js";
 export type { BrowserAssetOptions, IdbBlobStore } from "./browser-assets.js";
 

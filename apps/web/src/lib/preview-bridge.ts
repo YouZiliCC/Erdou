@@ -102,6 +102,13 @@ interface DispatchRuntime {
 }
 
 let bridgeInstalled = false;
+let currentRuntime: DispatchRuntime | null = null;
+
+/** Re-aim the installed preview bridge at a new runtime (e.g. after a kernel
+ *  switch). The listener is installed once (below) and reads this holder. */
+export function setPreviewRuntime(runtime: DispatchRuntime): void {
+  currentRuntime = runtime;
+}
 
 /**
  * Listen for proxied requests from the preview SW and answer them by dispatching
@@ -109,7 +116,8 @@ let bridgeInstalled = false;
  * (SSR, tests, unsupported browsers).
  */
 export function installPreviewBridge(runtime: DispatchRuntime): void {
-  if (bridgeInstalled) return;
+  currentRuntime = runtime; // always update the target…
+  if (bridgeInstalled) return; // …but install the listener only once
   if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) {
     return;
   }
@@ -118,7 +126,9 @@ export function installPreviewBridge(runtime: DispatchRuntime): void {
     if (!isProxyRequest(event.data)) return;
     const replyPort = event.ports[0];
     if (!replyPort) return;
-    void answer(runtime, event.data, replyPort);
+    const rt = currentRuntime;
+    if (!rt) return;
+    void answer(rt, event.data, replyPort);
   });
 }
 

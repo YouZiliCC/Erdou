@@ -3,7 +3,13 @@ import { loadBrowserInputs, type IdbBlobStore } from "./browser-assets.js";
 
 function fakeIdb(): IdbBlobStore & { store: Map<string, Uint8Array> } {
   const store = new Map<string, Uint8Array>();
-  return { store, async get(k) { return store.get(k) ?? null; }, async put(k, d) { store.set(k, d); } };
+  return {
+    store,
+    async get(k) { return store.get(k) ?? null; },
+    async put(k, d) { store.set(k, d); },
+    async keys() { return [...store.keys()]; },
+    async delete(k) { store.delete(k); },
+  };
 }
 
 // A tiny gzip of "STATE" so DecompressionStream has something real to inflate.
@@ -54,5 +60,24 @@ describe("loadBrowserInputs", () => {
     expect(new Uint8Array(inputs.state!)).toEqual(STATE_RAW); // decompressed from cache, not the empty fetch
     const fetchedState = fetchSpy.mock.calls.some((c) => String(c[0]).endsWith("state.zst"));
     expect(fetchedState).toBe(false);
+  });
+
+  it("re-fetches when the cached blob is corrupt (decompress fails), then repairs the cache", async () => {
+    const idb = fakeIdb();
+    idb.store.set("state:v1", new Uint8Array([0, 1, 2, 3])); // not valid gzip
+    const inputs = await loadBrowserInputs({
+      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", version: "v1",
+      fetchImpl: fakeFetch(assets), idb, // fakeFetch returns the REAL gzip for state.zst
+    });
+    expect(new Uint8Array(inputs.state!)).toEqual(STATE_RAW); // recovered from the network
+    expect(idb.store.get("state:v1")).toEqual(STATE_GZ);      // cache repaired
+  });
+
+  it("evicts stale state:<version> keys on put", async () => {
+    const idb = fakeIdb();
+    idb.store.set("state:old", new Uint8Array([9]));
+    await loadBrowserInputs({ baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", version: "v1", fetchImpl: fakeFetch(assets), idb });
+    expect(idb.store.has("state:old")).toBe(false); // old version evicted
+    expect(idb.store.has("state:v1")).toBe(true);
   });
 });

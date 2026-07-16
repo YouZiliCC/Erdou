@@ -60,6 +60,35 @@ describe("local folder mount", () => {
     expect(fs.readFileText("/a.txt")).toBe("v2");
   });
 
+  it("saveVfsToFolder skips rootSkip entries only at the root — a same-named nested dir is a real project dir and is written", async () => {
+    // Final-review Fix 2: the VM kernel's readdir("/") exposes its skeleton
+    // bind-mount stub dirs (bin/lib/usr/proc/dev/tmp) alongside real project
+    // files. `rootSkip` lets a folder save omit them, but ONLY at the
+    // workspace root — a project that happens to have its own `/src/bin/`
+    // must still sync normally.
+    const fs = new Vfs({ clock: () => 0 });
+    fs.mkdir("/bin", { recursive: true });
+    fs.writeFile("/bin/skip-me.txt", "should not reach disk");
+    fs.mkdir("/src/bin", { recursive: true });
+    fs.writeFile("/src/bin/keep-me.txt", "nested bin is a real project dir");
+    fs.writeFile("/src/index.ts", "export {}");
+
+    const root = new MockDir("project");
+    await saveVfsToFolder(fs, root, "/", undefined, new Set(["bin"]));
+
+    expect(root.children.has("bin")).toBe(false); // top-level "bin" was skipped
+
+    const src = root.children.get("src") as MockDir;
+    expect(src).toBeDefined();
+    expect(src.children.has("index.ts")).toBe(true); // src/ itself was written
+
+    const nestedBin = src.children.get("bin") as MockDir;
+    expect(nestedBin).toBeDefined(); // src/bin/ was written (not root-level)
+    expect(dec.decode((nestedBin.children.get("keep-me.txt") as MockFile).data)).toBe(
+      "nested bin is a real project dir",
+    );
+  });
+
   it("rescanFolder does not re-pull a file the browser just wrote back", async () => {
     const fs = new Vfs({ clock: () => 0 });
     const mtimes: MountMtimes = new Map();

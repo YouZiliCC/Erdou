@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "node scripts/link-vm-assets.mjs",
     "dev": "vite",
+    "prebuild": "node scripts/link-vm-assets.mjs",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"
@@ -17,16 +19,20 @@
     "@erdou/model-gateway": "workspace:*",
     "@erdou/runtime-browser": "workspace:*",
     "@erdou/runtime-contract": "workspace:*",
+    "@erdou/runtime-vm": "workspace:*",
     "@erdou/runtime-wasi": "workspace:*",
     "@erdou/tool-git": "workspace:*",
+    "@xterm/xterm": "^6.0.0",
     "esbuild-wasm": "^0.23.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "v86": "^0.5.424"
   },
   "devDependencies": {
     "@types/react": "^18.3.5",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
+    "playwright-core": "^1.61.1",
     "vite": "^5.4.0"
   }
 }

@@ -3,6 +3,8 @@ import type { V86BootInputs } from "./v86-host.js";
 export interface IdbBlobStore {
   get(key: string): Promise<Uint8Array | null>;
   put(key: string, data: Uint8Array): Promise<void>;
+  keys(): Promise<string[]>;
+  delete(key: string): Promise<void>;
 }
 
 export interface BrowserAssetOptions {
@@ -34,18 +36,30 @@ export async function loadBrowserInputs(opts: BrowserAssetOptions): Promise<V86B
   const stateKey = `state:${opts.version}`;
 
   let stateGz = await idb.get(stateKey);
+  let state: Uint8Array | undefined;
+  if (stateGz) {
+    try {
+      state = await decompressGzip(stateGz);
+    } catch {
+      await idb.delete(stateKey).catch(() => {}); // poisoned cache — re-fetch
+      stateGz = null;
+    }
+  }
   if (!stateGz) {
     stateGz = await fetchBytes(f, `${opts.baseUrl}/state.zst`);
+    state = await decompressGzip(stateGz);
     await idb.put(stateKey, stateGz).catch(() => {}); // caching is best-effort
+    for (const k of await idb.keys().catch(() => [])) { // evict other versions
+      if (k.startsWith("state:") && k !== stateKey) await idb.delete(k).catch(() => {});
+    }
   }
-  const [bios, vga, kernel, state] = await Promise.all([
+  const [bios, vga, kernel] = await Promise.all([
     fetchBytes(f, `${opts.baseUrl}/seabios.bin`),
     fetchBytes(f, `${opts.baseUrl}/vgabios.bin`),
     fetchBytes(f, `${opts.baseUrl}/kernel.bin`),
-    decompressGzip(stateGz),
   ]);
   const ab = (u: Uint8Array): ArrayBuffer => u.buffer.slice(u.byteOffset, u.byteOffset + u.byteLength);
-  return { bios: ab(bios), vgaBios: ab(vga), kernel: ab(kernel), state: ab(state), wasmUrl: opts.wasmUrl, memoryMB: opts.memoryMB ?? 512 };
+  return { bios: ab(bios), vgaBios: ab(vga), kernel: ab(kernel), state: ab(state!), wasmUrl: opts.wasmUrl, memoryMB: opts.memoryMB ?? 512 };
 }
 
 /** A real IndexedDB-backed blob store (browser only). */
@@ -70,5 +84,7 @@ export function openIdbBlobStore(dbName = "erdou-vm-assets"): IdbBlobStore {
   return {
     async get(key) { const v = await tx<ArrayBuffer | undefined>("readonly", (s) => s.get(key)); return v ? new Uint8Array(v) : null; },
     async put(key, data) { await tx("readwrite", (s) => s.put(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength), key)); },
+    async keys() { return (await tx<IDBValidKey[]>("readonly", (s) => s.getAllKeys())) as string[]; },
+    async delete(key) { await tx("readwrite", (s) => s.delete(key)); },
   };
 }

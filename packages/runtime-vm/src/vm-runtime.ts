@@ -12,6 +12,7 @@ import { PortRegistry } from "./port-registry.js";
 import { snapshotWorkspace, restoreWorkspace } from "./workspace-snapshot.js";
 import { vmCapabilities } from "./capabilities.js";
 import { openPtySession, type PtySession } from "./pty.js";
+import { SyncFs9pFs } from "./sync-fs.js";
 
 const SIG = (s?: Signal): string => s ?? "SIGTERM";
 
@@ -151,6 +152,18 @@ export class VmRuntime implements Runtime {
   rm(p: string, o?: RmOptions): Promise<void> { return this.bridge.rm(p, o); }
   rename(f: string, t: string): Promise<void> { return this.bridge.rename(f, t); }
   stat(p: string): Promise<Stat> { return this.bridge.stat(p); }
+
+  /** A synchronous FileSystemApi over the guest workspace, sharing this runtime's
+   *  event bus. Page-side creates, deletes, and directory-creates can double with
+   *  the async bridge's coalesced event (Fs9pBridge.attach wraps CreateFile,
+   *  CreateDirectory, and Unlink — both observe the same fs9p mutation). Harmless for
+   *  the app: its file.changed handler only bumps an fsVersion counter + debounces
+   *  saves (idempotent under a duplicate), and the turn-scoped diff capture keys by
+   *  path. A consumer that COUNTS events would over-count. Available after boot(). */
+  syncFs(): SyncFs9pFs {
+    if (!this.booted) throw new Error("VmRuntime.syncFs(): not booted");
+    return new SyncFs9pFs(this.host.fs9p, (e) => this.emit(e));
+  }
 
   // ---- snapshot (workspace-scoped) ----
   async createSnapshot(): Promise<Snapshot> { this.bridge.flush(); return snapshotWorkspace(this.host.fs9p, this.clock); }

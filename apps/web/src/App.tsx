@@ -4,6 +4,7 @@ import { useStudio } from "./lib/use-studio.js";
 import { loadModel, saveModel, loadApprovalMode, saveApprovalMode, type ApprovalMode } from "./lib/model-config.js";
 import { SettingsDialog } from "./components/SettingsDialog.js";
 import { TitleBar } from "./components/TitleBar.js";
+import { KernelToggle } from "./components/KernelToggle.js";
 import { TaskSidebar } from "./components/TaskSidebar.js";
 import { Conversation } from "./components/Conversation.js";
 import { Composer } from "./components/Composer.js";
@@ -86,7 +87,9 @@ export function App() {
         onSettings={() => setSettingsOpen(true)}
         onReset={() => void studio.resetProject()}
         onThemeChange={() => studio.saveConfigToFolder()}
-      />
+      >
+        <KernelToggle studio={studio} />
+      </TitleBar>
       <div className="shell">
         <TaskSidebar studio={studio} onNew={() => studio.newDraft()} onOpenFolder={() => void openFolder()} />
         <section className="center">
@@ -96,7 +99,7 @@ export function App() {
           </div>
           <Conversation studio={studio} />
           <Composer
-            running={studio.running || studio.activeRun?.status === "running"}
+            running={studio.running || studio.activeRun?.status === "running" || !!studio.switchingKernel}
             replying={studio.activeRun !== undefined}
             mode={mode}
             onModeChange={changeMode}
