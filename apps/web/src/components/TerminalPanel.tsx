@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import type { KeyboardEvent } from "react";
 import type { Studio } from "../lib/studio.js";
+import { PtyTerminal } from "./PtyTerminal.js";
 
 interface Block {
   cwd: string;
@@ -10,8 +11,18 @@ interface Block {
   code: number;
 }
 
-/** Interactive terminal over a persistent `ShellSession` — cwd/env survive across commands. */
+/** Dispatches to the VM kernel's streaming PTY terminal or the browser kernel's
+ *  block terminal — hookless so the two branches don't fight React's rules of
+ *  hooks (each render path owns its own component + hook set). */
 export function TerminalPanel({ studio }: { studio: Studio }) {
+  if (studio.kernelKind === "vm" && studio.kernel.openPty) {
+    return <PtyTerminal studio={studio} />;
+  }
+  return <BlockTerminal studio={studio} />;
+}
+
+/** Interactive terminal over a persistent `ShellSession` — cwd/env survive across commands. */
+function BlockTerminal({ studio }: { studio: Studio }) {
   const shell = studio.shell;
   const workspace = studio.mountName ?? "erdou";
 
