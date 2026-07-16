@@ -97,7 +97,7 @@ const removePath: ToolDef = {
 const runShell: ToolDef = {
   name: "run_shell",
   description:
-    "Run a shell command line (supports pipes, redirection, && and $VARS). Available commands: ls cat grep find head tail mkdir rm cp mv touch echo pwd env which ps kill. Returns stdout, stderr and the exit code.",
+    "Run a shell command line (supports pipes, redirection, && and $VARS). Returns stdout, stderr and the exit code. The commands available in this environment are listed in your environment brief.",
   parameters: {
     type: "object",
     properties: { command: { type: "string", description: "The command line to run." } },
