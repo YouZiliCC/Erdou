@@ -167,6 +167,15 @@ export class Fs9pBridge {
     return "/" + path.split("/").filter(Boolean).join("/");
   }
 
+  /** Basename (last path segment). v86's SearchPath only fills `name` when the
+   *  final component is MISSING (id === -1); for an EXISTING path it leaves
+   *  `name` undefined (its loop index runs off the end). So for Unlink/Rename of
+   *  an existing entry we must derive the name from the path, not trust w.name. */
+  private base(path: string): string {
+    const parts = path.split("/").filter(Boolean);
+    return parts[parts.length - 1] ?? "";
+  }
+
   // ---- async workspace FS (contract "/x" <-> fs9p "workspace/x") ----
   private ws(path: string): string {
     const norm = "/" + path.split("/").filter(Boolean).join("/");
@@ -248,7 +257,7 @@ export class Fs9pBridge {
         if (kids.length && !opts?.recursive) throw new ErrnoError("ENOTEMPTY", { path, syscall: "rmdir" });
         for (const k of kids) await this.rm(path.replace(/\/$/, "") + "/" + k, { recursive: true, force: true });
       }
-      const ret = this.fs.Unlink(w.parentid, w.name);
+      const ret = this.fs.Unlink(w.parentid, this.base(path));
       if (ret < 0 && !opts?.force) throw new ErrnoError("ENOENT", { path, syscall: "unlink" });
       this.paths.delete(w.id);
       this.emitChange(this.cpath(path), "delete");
@@ -261,7 +270,7 @@ export class Fs9pBridge {
       const src = this.fs.SearchPath(this.ws(from));
       if (src.id === -1) throw new ErrnoError("ENOENT", { path: from, syscall: "rename" });
       const dst = this.fs.SearchPath(this.ws(to));
-      const ret = await this.fs.Rename(src.parentid, src.name, dst.parentid, dst.name);
+      const ret = await this.fs.Rename(src.parentid, this.base(from), dst.parentid, this.base(to));
       if (ret < 0) throw new ErrnoError("ENOENT", { path: to, syscall: "rename" });
       this.rebuildIndex();
       this.emitChange(this.cpath(from), "delete");

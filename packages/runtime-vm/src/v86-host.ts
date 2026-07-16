@@ -1,7 +1,16 @@
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { V86 } from "v86";
 import type { GuestChannel } from "./guestd-client.js";
 import type { Fs9p } from "./fs-bridge.js";
+
+// v86's ESM build has no CommonJS __dirname, so its default wasm lookup falls
+// back to a CWD-relative "build/v86.wasm" — wrong under vitest/monorepo (cwd is
+// the repo root). Point it at the installed package's own build/ dir. (Same
+// adaptation the bake script makes; without it boot() hangs forever because the
+// wasm load throws ENOENT asynchronously and `emulator-ready` never fires.)
+const V86_WASM_PATH = join(dirname(createRequire(import.meta.url).resolve("v86")), "v86.wasm");
 
 export interface V86Assets {
   biosPath: string;
@@ -44,6 +53,7 @@ export class V86Host {
     // a fresh 0-offset buffer.
     const ab = (b: Buffer): ArrayBuffer => new Uint8Array(b).buffer;
     const opts: Record<string, unknown> = {
+      wasm_path: V86_WASM_PATH,
       bios: { buffer: ab(bios) },
       vga_bios: { buffer: ab(vga) },
       bzimage: { buffer: ab(kernel) },
