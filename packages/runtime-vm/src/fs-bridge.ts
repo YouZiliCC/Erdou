@@ -24,7 +24,7 @@ export interface Fs9p {
   Unlink(parentid: number, name: string): number;
   Rename(olddir: number, oldname: string, newdir: number, newname: string): Promise<number>;
   Search(parentid: number, name: string): number;
-  SearchPath(path: string): { id: number; parentid: number; name: string };
+  SearchPath(path: string): { id: number; parentid: number; name: string | undefined };
   GetFullPath(idx: number): string;
   read_file(path: string): Promise<Uint8Array | null>;
 }
@@ -200,7 +200,7 @@ export class Fs9pBridge {
       let kind: ChangeKind;
       if (w.id === -1) {
         if (w.parentid === -1) throw new ErrnoError("ENOENT", { path, syscall: "open" });
-        idx = await this.fs.CreateBinaryFile(w.name, w.parentid, buf);
+        idx = await this.fs.CreateBinaryFile(this.base(path), w.parentid, buf);
         kind = "create";
       } else {
         await this.fs.ChangeSize(w.id, buf.length);

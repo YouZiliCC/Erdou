@@ -63,7 +63,7 @@ export class SyncFs9pFs implements FileSystemApi {
     let idx: number; let kind: ChangeKind;
     if (w.id === -1) {
       if (w.parentid === -1) throw new ErrnoError("ENOENT", { path, syscall: "open" });
-      idx = this.fs9p.CreateFile(w.name, w.parentid);         // sync (goes through the bridge wrapper if attached → create event)
+      idx = this.fs9p.CreateFile(this.base(path), w.parentid);         // sync (goes through the bridge wrapper if attached → create event)
       kind = "create";
     } else {
       const inode = this.fs9p.GetInode(w.id);
