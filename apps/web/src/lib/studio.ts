@@ -74,9 +74,10 @@ export function runTitle(task: string): string {
   return base.length > 48 ? base.slice(0, 47).trimEnd() + "…" : base;
 }
 
-/** One macrotask — lets asynchronously-delivered runtime events land before a
- *  turn's changes are read (the contract allows delivery after the triggering
- *  call resolves; see runtime-contract/src/events.ts). */
+/** One macrotask — the contract guarantees events caused by a runtime call
+ *  are delivered no later than one macrotask after the call resolves
+ *  (runtime-contract/src/events.ts), so awaiting this after `agent.run`
+ *  makes every file.changed from the turn visible. */
 export const eventsSettled = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
 /**

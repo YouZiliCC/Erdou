@@ -5,8 +5,11 @@
  *
  * Delivery timing is NOT guaranteed to be synchronous with the operation that
  * caused an event: a runtime may deliver on a later tick (e.g. a VM-backed
- * runtime forwarding guest activity). Consumers must not assume an event has
- * landed by the time the triggering call resolves — subscribe and wait.
+ * runtime forwarding guest activity). The bound: events caused by a runtime
+ * API call are delivered no later than ONE MACROTASK after that call's
+ * promise resolves — an implementation that forwards events asynchronously
+ * must flush them before or within one macrotask of responding. Consumers
+ * that need a barrier: await the call, then one macrotask (setTimeout 0).
  */
 export type RuntimeEvent =
   | { type: "process.started"; pid: number; cmd: string }
