@@ -95,6 +95,9 @@ export class GuestdClient {
    *  `deadlineMs`, if given, rejects the promise if the guest never answers —
    *  otherwise a dead/corrupt baked state hangs boot() forever. */
   ready(opts: { deadlineMs?: number } = {}): Promise<{ pid: number }> {
+    // Already-settled (rejected by dispose()) — return it as-is; don't restart
+    // pinging or send to a channel that may back a destroyed emulator.
+    if (this.disposed) return this.readyPromise;
     if (!this.pingTimer) {
       const ping = () => this.channel.send(encodeJsonFrame(FrameType.PING, 0, {}));
       ping();
@@ -205,6 +208,7 @@ export class GuestdClient {
   }
 
   kill(pid: number, signal = "SIGTERM"): Promise<void> {
+    if (this.disposed) return Promise.resolve();
     const id = this.nextId++;
     return new Promise((resolve) => {
       this.killResolvers.set(id, resolve);
@@ -219,6 +223,7 @@ export class GuestdClient {
   }
 
   ptyOpen(port: number): Promise<{ pid: number; port: number }> {
+    if (this.disposed) return Promise.reject(new Error("GuestdClient disposed"));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       this.ptyOpenResolvers.set(id, reject);
@@ -233,6 +238,7 @@ export class GuestdClient {
   }
 
   ps(): Promise<ProcessInfo[]> {
+    if (this.disposed) return Promise.resolve([]);
     const id = this.nextId++;
     return new Promise((resolve) => {
       this.psResolvers.set(id, resolve);

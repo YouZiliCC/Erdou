@@ -131,4 +131,43 @@ describe("GuestdClient", () => {
       ])
     ).rejects.toThrow(/disposed/i);
   });
+
+  it("kill()/ps()/ptyOpen() called AFTER dispose() settle immediately (not hang)", async () => {
+    // fake channel that never replies to anything
+    const channel: GuestChannel = { send() {}, subscribe() {} };
+    const client = new GuestdClient(channel);
+    await client.ready({ deadlineMs: 50 }).catch(() => {});
+    client.dispose();
+
+    const killResult = await Promise.race([
+      client.kill(1),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error("kill() hung after dispose()")), 100)),
+    ]);
+    expect(killResult).toBeUndefined();
+
+    const psResult = await Promise.race([
+      client.ps(),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error("ps() hung after dispose()")), 100)),
+    ]);
+    expect(psResult).toEqual([]);
+
+    await expect(
+      Promise.race([
+        client.ptyOpen(1),
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error("ptyOpen() hung after dispose()")), 100)),
+      ])
+    ).rejects.toThrow(/disposed/i);
+  });
+
+  it("ready() called AFTER dispose() rejects immediately (not hang)", async () => {
+    const channel: GuestChannel = { send() {}, subscribe() {} };
+    const client = new GuestdClient(channel);
+    client.dispose(); // dispose before ready() was ever called
+    await expect(
+      Promise.race([
+        client.ready(),
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error("ready() hung after dispose()")), 100)),
+      ])
+    ).rejects.toThrow(/disposed/i);
+  });
 });

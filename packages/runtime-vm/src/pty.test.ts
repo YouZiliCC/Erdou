@@ -1,13 +1,16 @@
 import { describe, it, expect, vi } from "vitest";
 import { openPtySession, type PtyChannel } from "./pty.js";
 
-function fakeChannel(): PtyChannel & { sent: Uint8Array[]; emit: (b: Uint8Array) => void; resizes: [number, number][] } {
+function fakeChannel(): PtyChannel & { sent: Uint8Array[]; emit: (b: Uint8Array) => void; resizes: [number, number][]; unsub: ReturnType<typeof vi.fn> } {
   let cb: (b: Uint8Array) => void = () => {};
   const sent: Uint8Array[] = []; const resizes: [number, number][] = [];
+  // Models a real bus: unsubscribing detaches the listener, so a subsequent
+  // emit() (e.g. a reused port delivering a stale session's data) is a no-op.
+  const unsub = vi.fn(() => { cb = () => {}; });
   return {
-    sent, resizes,
+    sent, resizes, unsub,
     send: (b) => sent.push(b),
-    subscribe: (fn) => { cb = fn; },
+    subscribe: (fn) => { cb = fn; return unsub; },
     resize: (c, r) => resizes.push([c, r]),
     emit: (b) => cb(b),
   };
@@ -63,5 +66,30 @@ describe("openPtySession", () => {
       .rejects.toThrow(/PTYBRIDGE_READY/);
     // assert kill(42) was called to reap the orphaned bridge
     expect(kill).toHaveBeenCalledWith(42);
+  });
+
+  it("dispose() unsubscribes from the channel; no cross-talk on port reuse", async () => {
+    const ch = fakeChannel();
+    const kill = vi.fn(async () => {});
+    const launch = vi.fn(async () => ({ pid: 7 }));
+    const sessionP = openPtySession(ch, launch, kill, { deadlineMs: 10_000 });
+    ch.emit(enc.encode("PTYBRIDGE_READY\n"));
+    const session = await sessionP;
+    const got: Uint8Array[] = [];
+    session.onData((d) => got.push(d));
+
+    await session.dispose();
+    expect(ch.unsub).toHaveBeenCalledTimes(1);
+
+    // Simulates a reused port: a new emit must NOT reach this disposed session.
+    ch.emit(enc.encode("stale data from a new session"));
+    expect(got.length).toBe(0);
+  });
+
+  it("deadline-reject also unsubscribes from the channel", async () => {
+    const ch = fakeChannel();
+    await expect(openPtySession(ch, async () => ({ pid: 1 }), async () => {}, { deadlineMs: 30 }))
+      .rejects.toThrow(/PTYBRIDGE_READY/);
+    expect(ch.unsub).toHaveBeenCalledTimes(1);
   });
 });

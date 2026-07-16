@@ -85,10 +85,17 @@ export class V86Host {
     };
   }
 
-  terminal(port: 1 | 2 | 3): { send(b: Uint8Array): void; subscribe(cb: (b: Uint8Array) => void): void; resize(c: number, r: number): void } {
+  terminal(port: 1 | 2 | 3): { send(b: Uint8Array): void; subscribe(cb: (b: Uint8Array) => void): () => void; resize(c: number, r: number): void } {
+    const event = `virtio-console${port}-output-bytes`;
     return {
       send: (b) => this.emulator.bus.send(`virtio-console${port}-input-bytes`, b),
-      subscribe: (cb) => this.emulator.add_listener(`virtio-console${port}-output-bytes`, cb),
+      // Returns an unsubscribe fn — v86's bus pairs add_listener/remove_listener;
+      // callers MUST detach so a reused port (1-3) doesn't deliver a disposed
+      // session's data into a new one (I4).
+      subscribe: (cb) => {
+        this.emulator.add_listener(event, cb);
+        return () => this.emulator.remove_listener(event, cb);
+      },
       resize: (cols, rows) => this.emulator.bus.send(`virtio-console${port}-resize`, [cols, rows]),
     };
   }

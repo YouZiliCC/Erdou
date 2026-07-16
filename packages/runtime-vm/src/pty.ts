@@ -1,6 +1,8 @@
 export interface PtyChannel {
   send(bytes: Uint8Array): void;
-  subscribe(cb: (bytes: Uint8Array) => void): void;
+  /** Returns an unsubscribe function — callers MUST detach on dispose/failure so a
+   *  reused port doesn't deliver a stale session's data to a new one (I4). */
+  subscribe(cb: (bytes: Uint8Array) => void): () => void;
   resize(cols: number, rows: number): void;
 }
 
@@ -35,9 +37,11 @@ export function openPtySession(
     const buffered: Uint8Array[] = [];     // data arriving before onData is registered
     let dataCb: ((d: Uint8Array) => void) | undefined;
     const deadlineMs = opts.deadlineMs ?? 15_000;
+    let unsubscribe: () => void = () => {}; // assigned synchronously below, before any async settle path can run
 
     const deadline = setTimeout(() => {
       if (settled) return; settled = true;
+      unsubscribe(); // detach — a failed/timed-out session must not keep receiving channel data
       // Reap the bridge process if launch() already resolved with a pid
       if (pid !== undefined) {
         void kill(pid).catch(() => {});
@@ -55,11 +59,14 @@ export function openPtySession(
       write: (d) => { if (ready) channel.send(d); else preReady.push(d); },
       onData: (cb) => { dataCb = cb; for (const b of buffered) cb(b); buffered.length = 0; }, // flush pre-onData buffer
       resize: (cols, rows) => channel.resize(cols, rows),
-      dispose: async () => { if (pid !== undefined) await kill(pid).catch(() => {}); },
+      dispose: async () => {
+        unsubscribe(); // detach so a reused port doesn't cross-talk into this disposed session
+        if (pid !== undefined) await kill(pid).catch(() => {});
+      },
     };
 
     // 1) SUBSCRIBE FIRST — before launch(), so we cannot miss the READY banner.
-    channel.subscribe((bytes) => {
+    unsubscribe = channel.subscribe((bytes) => {
       if (ready) { emitData(bytes); return; }
       const merged = new Uint8Array(banner.length + bytes.length);
       merged.set(banner, 0); merged.set(bytes, banner.length);
