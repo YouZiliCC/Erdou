@@ -1,0 +1,5 @@
+# esbuild bundle output goes to a system temp dir, not here — this covers any
+# accidental local build artifacts from ad-hoc runs of run.mjs.
+bundle.js
+bundle.js.map
+*.tmp
