@@ -213,6 +213,18 @@ export class GuestdClient {
     });
   }
 
+  ptyOpen(port: number): Promise<{ pid: number; port: number }> {
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      this.control.set(id, ({ type, body }) => {
+        this.control.delete(id);
+        if (type === FrameType.ERROR) reject(new Error((decodeJson(body) as { message: string }).message));
+        else resolve(decodeJson(body) as { pid: number; port: number });
+      });
+      this.channel.send(encodeJsonFrame(FrameType.PTY_OPEN, id, { port }));
+    });
+  }
+
   ps(): Promise<ProcessInfo[]> {
     const id = this.nextId++;
     return new Promise((resolve) => {

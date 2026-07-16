@@ -11,6 +11,7 @@ import { GuestdClient, type GuestProcess } from "./guestd-client.js";
 import { PortRegistry } from "./port-registry.js";
 import { snapshotWorkspace, restoreWorkspace } from "./workspace-snapshot.js";
 import { vmCapabilities } from "./capabilities.js";
+import { openPtySession, type PtySession } from "./pty.js";
 
 const SIG = (s?: Signal): string => s ?? "SIGTERM";
 
@@ -39,6 +40,7 @@ export class VmRuntime implements Runtime {
   private readonly clock: () => number;
   private readonly bootTimeoutMs: number | undefined;
   private booted = false;
+  private readonly ptyPorts = new Set<number>();
 
   constructor(
     private readonly loadInputs: () => Promise<import("./v86-host.js").V86BootInputs>,
@@ -114,6 +116,31 @@ export class VmRuntime implements Runtime {
       retained.push({ pid: rec.pid, ppid: 0, cmd: rec.cmd, args: rec.args, cwd: "/", state: rec.state, startTimeMs: 0, exitCode: rec.status?.code ?? null });
     }
     return [...live, ...retained];
+  }
+
+  // ---- pty ----
+  async openPty(opts: { cols?: number; rows?: number } = {}): Promise<PtySession> {
+    const port = [1, 2, 3].find((p) => !this.ptyPorts.has(p));
+    if (port === undefined) throw new Error("VmRuntime: all 3 PTY ports are in use");
+    this.ptyPorts.add(port);
+    try {
+      // Subscribe (inside openPtySession) BEFORE ptyOpen fires — see the ordering
+      // note in pty.ts. openPtySession calls launch() only after it has subscribed.
+      const channel = this.host.terminal(port as 1 | 2 | 3);
+      const session = await openPtySession(
+        channel,
+        () => this.guestd.ptyOpen(port),
+        (pid) => this.guestd.kill(pid, "SIGKILL"),
+        { deadlineMs: 15_000 },
+      );
+      session.resize(opts.cols ?? 80, opts.rows ?? 24); // hvc<port> starts 0×0 — send an initial size
+      const origDispose = session.dispose;
+      session.dispose = async () => { this.ptyPorts.delete(port); await origDispose(); };
+      return session;
+    } catch (e) {
+      this.ptyPorts.delete(port); // release the port if the bridge never came up
+      throw e;
+    }
   }
 
   // ---- filesystem (bridge) ----

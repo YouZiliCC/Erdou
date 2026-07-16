@@ -85,6 +85,14 @@ export class V86Host {
     };
   }
 
+  terminal(port: 1 | 2 | 3): { send(b: Uint8Array): void; subscribe(cb: (b: Uint8Array) => void): void; resize(c: number, r: number): void } {
+    return {
+      send: (b) => this.emulator.bus.send(`virtio-console${port}-input-bytes`, b),
+      subscribe: (cb) => this.emulator.add_listener(`virtio-console${port}-output-bytes`, cb),
+      resize: (cols, rows) => this.emulator.bus.send(`virtio-console${port}-resize`, [cols, rows]),
+    };
+  }
+
   serial(): { send(s: string): void; onByte(cb: (b: number) => void): void } {
     return {
       send: (s: string) => this.emulator.serial0_send(s),
