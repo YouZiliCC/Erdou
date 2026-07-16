@@ -4,7 +4,7 @@
 # subprocess (no per-command chroot). Speaks the length-prefixed binary frame
 # protocol (see guestd-protocol.ts) over /dev/hvc0. Verified by the gated
 # conformance run (packages/runtime-vm/src/vm-runtime.conformance.test.ts).
-import os, json, struct, subprocess, threading, signal, shutil
+import os, json, struct, subprocess, threading, signal, shutil, time
 
 fd = os.open("/dev/hvc0", os.O_RDWR)
 import tty
@@ -54,6 +54,28 @@ def run_command(ident, argv, cwd, env, shell):
         sig = next((n for n, v in SIGNALS.items() if v == -code), None)
     send_json("X", ident, {"code": code if code >= 0 else 128 - code, "signal": sig})
 
+def pty_open(ident, req):
+    port = int(req.get("port", 1))
+    pidfile = "/tmp/erdou-pty-%d.pid" % port
+    try:
+        os.remove(pidfile)
+    except OSError:
+        pass
+    p = subprocess.Popen(["/usr/bin/python3", "/usr/lib/erdou/ptybridge.py", str(port)],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    p.wait()                        # reap the intermediate — ptybridge double-forks the daemon away, so this returns fast
+    pid = None
+    for _ in range(200):            # up to ~2s for the daemon to write its pid (after a successful forkpty)
+        try:
+            with open(pidfile) as f:
+                pid = int(f.read().strip()); break
+        except (OSError, ValueError):
+            time.sleep(0.01)
+    if pid is None:
+        send_json("!", ident, {"code": "EIO", "message": "pty bridge did not start (forkpty/devpts?)"})
+    else:
+        send_json("T", ident, {"pid": pid, "port": port})
+
 def handle(type_char, ident, body):
     if type_char == "x":            # EXEC: sh -c cmd
         req = json.loads(body or b"{}")
@@ -76,6 +98,8 @@ def handle(type_char, ident, body):
         send_json("P", ident, {"procs": list_procs()})
     elif type_char == "i":          # PING → the client's post-restore kick; re-announce READY
         send_json("R", 0, {"pid": os.getpid()})
+    elif type_char == "t":          # PTY_OPEN {port} — launch ptybridge, reply {pid}
+        threading.Thread(target=pty_open, args=(ident, json.loads(body or b"{}")), daemon=True).start()
 
 def list_procs():
     out = []

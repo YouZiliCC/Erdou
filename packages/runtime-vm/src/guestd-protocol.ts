@@ -1,7 +1,7 @@
 /** Frame types (single ASCII byte). Requests are lowercase, responses uppercase/symbol. */
 export const FrameType = {
   READY: "R", STARTED: "S", STDOUT: "O", STDERR: "E", EXIT: "X", PROCS: "P", ERROR: "!",
-  EXEC: "x", SPAWN: "s", KILL: "k", PS: "p", PING: "i",
+  EXEC: "x", SPAWN: "s", KILL: "k", PS: "p", PING: "i", PTY_OPEN: "t", PTY_OPENED: "T",
 } as const;
 
 export interface Frame {
