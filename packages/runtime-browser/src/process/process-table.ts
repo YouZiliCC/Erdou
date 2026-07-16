@@ -240,6 +240,7 @@ export class ProcessTable {
       stderr,
       wait: () => waitPromise,
       kill: (signal: Signal = "SIGTERM") => {
+        if (settled) return; // kill after exit is a no-op, like exit after kill
         killCb?.(signal);
         finish("killed", 128 + SIGNAL_NUMBERS[signal], signal);
       },

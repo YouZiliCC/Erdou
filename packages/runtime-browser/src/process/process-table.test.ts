@@ -3,7 +3,7 @@ import { ProcessTable } from "./process-table.js";
 import type { Program, ProgramRegistry } from "./program.js";
 import { Vfs } from "../vfs/vfs.js";
 import { EventBus } from "../core/event-bus.js";
-import type { HttpHandler, RuntimeEvent } from "@erdou/runtime-contract";
+import type { HttpHandler, RuntimeEvent, Signal } from "@erdou/runtime-contract";
 
 function make(programs: Record<string, Program>) {
   const registry: ProgramRegistry = new Map(Object.entries(programs));
@@ -108,12 +108,24 @@ describe("ProcessTable", () => {
   it("adopt: killing the pid fires onKill and settles as killed", async () => {
     const { table } = make({});
     const adopted = table.adopt({ cmd: "sh" });
-    let killed: string | null = null;
+    let killed: Signal | null = null;
     adopted.onKill((sig) => (killed = sig));
     table.kill(adopted.record.pid, "SIGTERM");
     expect(killed).toBe("SIGTERM");
     expect((await table.wait(adopted.record.pid)).signal).toBe("SIGTERM");
     adopted.exited(0); // late exit after kill is a no-op
     expect(table.list().find((p) => p.pid === adopted.record.pid)?.state).toBe("killed");
+  });
+
+  it("adopt: kill after the process already exited is a no-op (onKill not fired)", async () => {
+    const { table } = make({});
+    const adopted = table.adopt({ cmd: "sh" });
+    let killed = false;
+    adopted.onKill(() => (killed = true));
+    adopted.exited(0);
+    table.kill(adopted.record.pid, "SIGTERM");
+    expect(killed).toBe(false);
+    expect((await table.wait(adopted.record.pid)).code).toBe(0);
+    expect(table.list().find((p) => p.pid === adopted.record.pid)?.state).toBe("exited");
   });
 });
