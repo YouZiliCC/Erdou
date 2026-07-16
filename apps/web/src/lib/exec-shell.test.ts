@@ -14,10 +14,20 @@ function fakeRuntime(stdoutFor: (wrapped: string) => { code?: number; stdout?: s
     calls,
     exec: async (wrapped: string): Promise<ProcessHandle> => {
       calls.push(wrapped);
+      // Model shell cwd with SUBSHELL semantics: a `cd` inside a ( … ) subshell
+      // runs in a child and does NOT change the parent cwd. Split on parens,
+      // track depth, and honor `cd` only at depth 0 — so if the impl ever wrapped
+      // the user line in a subshell, cwd would stop advancing and this test fails.
       let cwd = "/";
-      for (const m of wrapped.matchAll(/cd\s+(?:'([^']*)'|([^\s;]+))/g)) {
-        const t = (m[1] ?? m[2])!;
-        cwd = t.startsWith("/") ? t : cwd.replace(/\/$/, "") + "/" + t;
+      let depth = 0;
+      for (const seg of wrapped.split(/([()])/)) {
+        if (seg === "(") { depth++; continue; }
+        if (seg === ")") { depth = Math.max(0, depth - 1); continue; }
+        if (depth !== 0) continue;
+        for (const m of seg.matchAll(/cd\s+(?:'([^']*)'|([^\s;]+))/g)) {
+          const t = (m[1] ?? m[2])!;
+          cwd = t.startsWith("/") ? t : cwd.replace(/\/$/, "") + "/" + t;
+        }
       }
       const mark = /printf '([^']+)%s/.exec(wrapped)?.[1] ?? "";
       const r = stdoutFor(wrapped);
