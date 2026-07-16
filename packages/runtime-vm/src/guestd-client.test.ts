@@ -67,4 +67,22 @@ describe("GuestdClient", () => {
     const procs = await client.ps();
     expect(procs[0]!.pid).toBe(1);
   });
+
+  it("ready() rejects after the deadline if the guest never answers", async () => {
+    // a channel that swallows PINGs and never emits READY
+    const channel: GuestChannel = { send() {}, subscribe() {} };
+    const client = new GuestdClient(channel);
+    await expect(client.ready({ deadlineMs: 50 })).rejects.toThrow(/guest.*not.*respond|ready|timeout/i);
+  });
+
+  it("dispose() stops the ping interval and rejects pending processes", async () => {
+    let pings = 0;
+    const channel: GuestChannel = { send: () => { pings++; }, subscribe() {} };
+    const client = new GuestdClient(channel);
+    void client.ready({ deadlineMs: 10_000 }).catch(() => {}); // start pinging
+    const before = pings;
+    client.dispose();
+    await new Promise((r) => setTimeout(r, 260)); // > one ping interval
+    expect(pings).toBe(before); // no further pings after dispose
+  });
 });

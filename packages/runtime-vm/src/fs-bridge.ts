@@ -156,6 +156,13 @@ export class Fs9pBridge {
     for (const [path, kind] of batch) this.emit({ type: "file.changed", path, kind });
   }
 
+  /** Tear down: stop the coalesce timer without flushing (shutdown discards
+   *  in-flight change notifications — there's no listener left to receive them). */
+  dispose(): void {
+    if (this.flushTimer) { clearTimeout(this.flushTimer); this.flushTimer = undefined; }
+    this.pendingChanges.clear();
+  }
+
   /** Emit a page-side (contract-API) file.changed SYNCHRONOUSLY — NOT through
    *  the coalesce timer — so it lands within the caller's call (honors the
    *  contract's one-macrotask delivery bound; conformance's file.changed test

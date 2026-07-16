@@ -64,31 +64,68 @@ export class GuestdClient {
   private readonly pending = new Map<number, Pending>();
   private readonly control = new Map<number, (frame: { type: string; body: Uint8Array }) => void>();
   private readyResolve?: (v: { pid: number }) => void;
+  private readyReject?: (e: Error) => void;
   private readonly readyPromise: Promise<{ pid: number }>;
   private pingTimer: ReturnType<typeof setInterval> | undefined;
+  private deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  private disposed = false;
 
   constructor(private readonly channel: GuestChannel) {
-    this.readyPromise = new Promise((res) => { this.readyResolve = res; });
+    this.readyPromise = new Promise((res, rej) => { this.readyResolve = res; this.readyReject = rej; });
+    // swallow unhandled rejections when nobody awaits ready() before dispose/deadline
+    this.readyPromise.catch(() => {});
     this.channel.subscribe((bytes) => {
+      if (this.disposed) return;
       for (const f of this.reader.push(bytes)) this.onFrame(f.type, f.id, f.body);
     });
+  }
+
+  private clearReadyTimers(): void {
+    if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = undefined; }
+    if (this.deadlineTimer) { clearTimeout(this.deadlineTimer); this.deadlineTimer = undefined; }
   }
 
   /** Resolve when guestd is reachable. After a state RESTORE the guest sits idle
    *  and its one-time startup READY already fired (pre-snapshot) — so we KICK:
    *  send PING repeatedly until guestd replies READY. (Spike C: the first hvc0
-   *  frame is the kick; without it boot() can hang forever.) */
-  ready(): Promise<{ pid: number }> {
+   *  frame is the kick; without it boot() can hang forever.)
+   *  `deadlineMs`, if given, rejects the promise if the guest never answers —
+   *  otherwise a dead/corrupt baked state hangs boot() forever. */
+  ready(opts: { deadlineMs?: number } = {}): Promise<{ pid: number }> {
     if (!this.pingTimer) {
       const ping = () => this.channel.send(encodeJsonFrame(FrameType.PING, 0, {}));
       ping();
       this.pingTimer = setInterval(ping, 200);
-      void this.readyPromise.then(() => { if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = undefined; } });
+      void this.readyPromise.then(() => this.clearReadyTimers(), () => this.clearReadyTimers());
+      if (opts.deadlineMs !== undefined) {
+        const ms = opts.deadlineMs;
+        this.deadlineTimer = setTimeout(() => {
+          this.readyReject?.(new Error(`guestd did not respond (READY) within ${ms}ms — the baked state may be stale/corrupt`));
+        }, ms);
+      }
     }
     return this.readyPromise;
   }
 
+  /** Tear down: stop pinging, reject a still-pending ready(), and settle every
+   *  in-flight process (reject its start / end its streams) so no awaiter hangs. */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.clearReadyTimers();
+    this.readyReject?.(new Error("GuestdClient disposed before guestd became ready"));
+    for (const [id, p] of this.pending) {
+      p.stdout.end();
+      p.stderr.end();
+      p.onError?.(new Error("GuestdClient disposed"));
+      p.onExit?.({ code: -1, signal: "SIGKILL" });
+      this.pending.delete(id);
+    }
+    this.control.clear();
+  }
+
   private onFrame(type: string, id: number, body: Uint8Array): void {
+    if (this.disposed) return;
     if (type === FrameType.READY) { this.readyResolve?.(decodeJson(body) as { pid: number }); return; }
     const ctl = this.control.get(id);
     if (ctl) { ctl({ type, body }); return; }
@@ -115,6 +152,7 @@ export class GuestdClient {
   }
 
   private run(op: string, payload: Record<string, unknown>): Promise<GuestProcess> {
+    if (this.disposed) return Promise.reject(new Error("GuestdClient disposed"));
     const id = this.nextId++;
     const stdout = new ChunkStream();
     const stderr = new ChunkStream();

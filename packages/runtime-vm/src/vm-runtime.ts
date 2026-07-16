@@ -64,7 +64,13 @@ export class VmRuntime implements Runtime {
     this.booted = true;
   }
 
-  async shutdown(): Promise<void> { await this.host.destroy(); }
+  async shutdown(): Promise<void> {
+    if (!this.booted) { if (this.host) await this.host.destroy().catch(() => {}); return; }
+    this.booted = false;
+    this.guestd?.dispose();   // ends open ChunkStreams + rejects pending (via its own `pending` map)
+    this.bridge?.dispose();
+    await this.host.destroy().catch(() => {});
+  }
 
   // ---- process (guestd) ----
   private track(p: GuestProcess, cmd: string, args: string[]): ProcessHandle {
