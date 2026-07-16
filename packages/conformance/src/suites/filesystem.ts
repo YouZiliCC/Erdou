@@ -52,5 +52,18 @@ export function filesystemSuite(make: MakeRuntime): void {
       await rt.rm("/ev.txt");
       await until(() => seen.some((e) => e.path === "/ev.txt" && e.kind === "delete"));
     });
+
+    it("delivers a mutation's file.changed within one macrotask of the call resolving", async () => {
+      const rt = await booted(make);
+      let seen = false;
+      rt.subscribe((e) => {
+        if (e.type === "file.changed" && e.path === "/bound.txt") seen = true;
+      });
+      await rt.writeFile("/bound.txt", "x");
+      // The contract bounds delivery to <= one macrotask after the call resolves
+      // (runtime-contract/src/events.ts). NOT until() — this asserts the bound.
+      await new Promise((r) => setTimeout(r, 0));
+      expect(seen).toBe(true);
+    });
   });
 }
