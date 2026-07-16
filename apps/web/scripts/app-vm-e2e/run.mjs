@@ -17,6 +17,51 @@ const repoRoot = join(webRoot, "..", ".."); // repo root
 const require = createRequire(join(webRoot, "package.json"));
 const { chromium } = require("playwright-core");
 
+// Hoisted so a signal handler (below) can reach them: the vitest wrapper's
+// execFileSync timeout sends SIGTERM directly to this process, and with no
+// handler Node would terminate immediately, skipping main()'s `finally` and
+// leaking the detached dev-server process group (port 5173) + headless
+// Chromium. Both get assigned inside main() once they exist.
+let devServer;
+let browser;
+let cleanedUp = false;
+
+function killDevServerGroup(signal) {
+  if (!devServer) return;
+  try {
+    if (devServer.pid) process.kill(-devServer.pid, signal);
+    else devServer.kill(signal);
+  } catch {
+    try {
+      devServer.kill(signal);
+    } catch {
+      // already gone
+    }
+  }
+}
+
+// Idempotent: safe to call from both a signal handler and main()'s `finally`
+// without double-killing. Kills the dev-server process group synchronously
+// (before any `await`) so the signal is sent even if a concurrent caller
+// returns early on the `cleanedUp` guard and exits the process right after.
+async function cleanup() {
+  if (cleanedUp) return;
+  cleanedUp = true;
+  killDevServerGroup("SIGTERM");
+  const killTimer = setTimeout(() => killDevServerGroup("SIGKILL"), 2000);
+  devServer?.once("exit", () => clearTimeout(killTimer));
+  if (browser) await browser.close().catch(() => {});
+  clearTimeout(killTimer);
+}
+
+for (const sig of ["SIGTERM", "SIGINT"]) {
+  process.on(sig, async () => {
+    console.log(`[app-vm-e2e] received ${sig}; cleaning up dev server + browser before exit`);
+    await cleanup();
+    process.exit(1);
+  });
+}
+
 const results = [];
 const pass = (name, ok, detail = "") => {
   results.push({ name, ok });
@@ -46,7 +91,7 @@ async function main() {
 
   // Start the real dev server as its own process group, so cleanup can kill
   // vite + any of its children even though pnpm forks it.
-  const devServer = spawn("pnpm", ["--filter", "@erdou/web", "dev"], {
+  devServer = spawn("pnpm", ["--filter", "@erdou/web", "dev"], {
     cwd: repoRoot,
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
@@ -71,7 +116,6 @@ async function main() {
   });
   const urlTimer = setTimeout(() => rejectUrl(new Error(`timeout waiting for dev server URL\n${devLog}`)), 30_000);
 
-  let browser;
   try {
     baseUrl = await urlWait;
     clearTimeout(urlTimer);
@@ -141,15 +185,22 @@ async function main() {
     pass("terminal-xterm-present", hasXterm);
 
     const xtermText = () => page.evaluate(() => document.querySelector(".xterm-rows")?.textContent ?? "");
-    const waitForXterm = async (needle, timeoutMs) => {
+    // `sinceLen` scopes the match to the delta that arrived after that
+    // offset into the buffer, rather than the whole accumulated scrollback —
+    // otherwise a needle already present in earlier output (e.g. a stray
+    // "bin" from an earlier command) could produce a false PASS. Returns the
+    // delta substring (not the full buffer) so callers that further
+    // pattern-match the result (e.g. the ls / check below) stay scoped too.
+    const waitForXterm = async (needle, timeoutMs, sinceLen = 0) => {
       const t1 = Date.now();
       let buf = "";
       while (Date.now() - t1 < timeoutMs) {
         buf = await xtermText();
-        if (buf.includes(needle)) return buf;
+        const delta = buf.slice(sinceLen);
+        if (delta.includes(needle)) return delta;
         await new Promise((r) => setTimeout(r, 200));
       }
-      throw new Error(`timeout waiting for "${needle}" in .xterm-rows:\n${buf}`);
+      throw new Error(`timeout waiting for "${needle}" in .xterm-rows delta (since offset ${sinceLen}):\n${buf}`);
     };
     const typeCmd = async (cmd) => {
       await page.keyboard.type(cmd, { delay: 15 });
@@ -163,9 +214,13 @@ async function main() {
     const typeAndWaitFor = async (cmd, needle, { attempts = 3, timeoutMs = 8_000 } = {}) => {
       let lastErr;
       for (let i = 0; i < attempts; i++) {
+        if (i > 0) {
+          console.warn(`[app-vm-e2e] PTY retry: attempt ${i + 1} for ${cmd} (guest dropped/garbled leading bytes)`);
+        }
+        const baseline = (await xtermText()).length;
         await typeCmd(cmd);
         try {
-          return await waitForXterm(needle, timeoutMs);
+          return await waitForXterm(needle, timeoutMs, baseline);
         } catch (e) {
           lastErr = e;
         }
@@ -209,6 +264,12 @@ async function main() {
       pass("pty-ls-root", false, "no .xterm element to type into");
     }
 
+    // Snapshot the xterm tail now, before switching back — that switch
+    // unmounts PtyTerminal (and with it .xterm-rows), so capturing this
+    // after the switch would print blank output in exactly the failure
+    // case where the tail is most useful for debugging.
+    const finalXtermTail = (await xtermText()).trimEnd().split("\n").slice(-20).join("\n");
+
     // 6) Switch back to the browser kernel.
     await page.click(kernelBtnSel);
     await page.locator(".ui-select-pop .ui-select-opt", { hasText: "Browser kernel" }).click();
@@ -224,14 +285,9 @@ async function main() {
     }
 
     console.log("---- final .xterm-rows tail ----");
-    console.log((await xtermText()).trimEnd().split("\n").slice(-20).join("\n"));
+    console.log(finalXtermTail);
   } finally {
-    if (browser) await browser.close().catch(() => {});
-    try {
-      if (devServer.pid) process.kill(-devServer.pid, "SIGTERM");
-    } catch {
-      devServer.kill("SIGTERM");
-    }
+    await cleanup();
   }
 
   const allOk = results.length > 0 && results.every((r) => r.ok);
