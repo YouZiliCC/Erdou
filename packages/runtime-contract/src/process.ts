@@ -13,7 +13,10 @@ export interface SpawnOptions {
   cwd?: string;
   env?: Record<string, string>;
   stdin?: Uint8Array | string;
-  /** Run in the background — the caller does not block on it. */
+  /** Run in the background — the caller does not block on it. A serving
+   *  program (a real server blocks forever) is spawned detached; its
+   *  readiness is observed via the `port.opened` event, never by waiting
+   *  for the process to exit. */
   detached?: boolean;
 }
 

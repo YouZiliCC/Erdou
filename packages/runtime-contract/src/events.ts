@@ -2,6 +2,11 @@
  * Generic runtime events. These carry facts about the execution environment
  * only — never agent-business meaning. The Runtime reports "process 4 exited
  * with code 1"; deciding what that means is the Agent layer's job.
+ *
+ * Delivery timing is NOT guaranteed to be synchronous with the operation that
+ * caused an event: a runtime may deliver on a later tick (e.g. a VM-backed
+ * runtime forwarding guest activity). Consumers must not assume an event has
+ * landed by the time the triggering call resolves — subscribe and wait.
  */
 export type RuntimeEvent =
   | { type: "process.started"; pid: number; cmd: string }
