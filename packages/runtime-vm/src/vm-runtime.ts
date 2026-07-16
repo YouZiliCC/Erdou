@@ -5,12 +5,13 @@ import type {
   RuntimeCapabilities, RuntimeEvent, RuntimeEventListener, Unsubscribe, Snapshot,
   VirtualPort, HttpRequest, HttpResponse,
 } from "@erdou/runtime-contract";
-import { V86Host, type V86Assets } from "./v86-host.js";
+import { V86Host } from "./v86-host.js";
 import { Fs9pBridge } from "./fs-bridge.js";
 import { GuestdClient, type GuestProcess } from "./guestd-client.js";
 import { PortRegistry } from "./port-registry.js";
 import { snapshotWorkspace, restoreWorkspace } from "./workspace-snapshot.js";
 import { vmCapabilities } from "./capabilities.js";
+import { openPtySession, type PtySession } from "./pty.js";
 
 const SIG = (s?: Signal): string => s ?? "SIGTERM";
 
@@ -37,28 +38,41 @@ export class VmRuntime implements Runtime {
   // records either; VmRuntime must match.
   private readonly procs = new Map<number, ProcRecord>();
   private readonly clock: () => number;
+  private readonly bootTimeoutMs: number | undefined;
   private booted = false;
+  private readonly ptyPorts = new Set<number>();
 
-  constructor(assets: V86Assets, opts: { clock?: () => number } = {}) {
-    this.host = new V86Host(assets);
+  constructor(
+    private readonly loadInputs: () => Promise<import("./v86-host.js").V86BootInputs>,
+    opts: { clock?: () => number; bootTimeoutMs?: number } = {},
+  ) {
+    this.host = new V86Host();
     this.clock = opts.clock ?? (() => Date.now());
+    this.bootTimeoutMs = opts.bootTimeoutMs;
   }
 
   private emit(e: RuntimeEvent): void { for (const l of this.listeners) { try { l(e); } catch (err) { console.error("VmRuntime listener threw:", err); } } }
 
   async boot(): Promise<void> {
     if (this.booted) return;
-    await this.host.boot();
+    const inputs = await this.loadInputs();
+    await this.host.boot(inputs, this.bootTimeoutMs ? { bootTimeoutMs: this.bootTimeoutMs } : {});
     this.ports = new PortRegistry((e) => this.emit(e));
     this.bridge = new Fs9pBridge(this.host.fs9p, (e) => this.emit(e));
     this.bridge.attach();          // wraps fs9p + builds the workspace path index from the restored state
     this.host.run();               // resume the CPU from the baked state (guestd is already resident)
     this.guestd = new GuestdClient(this.host.channel());
-    await this.guestd.ready();      // first hvc0 frame is the kick; guestd replies READY
+    await this.guestd.ready({ deadlineMs: this.bootTimeoutMs ?? 60_000 });      // first hvc0 frame is the kick; guestd replies READY
     this.booted = true;
   }
 
-  async shutdown(): Promise<void> { await this.host.destroy(); }
+  async shutdown(): Promise<void> {
+    if (!this.booted) { if (this.host) await this.host.destroy().catch(() => {}); return; }
+    this.booted = false;
+    this.guestd?.dispose();   // ends open ChunkStreams + rejects pending (via its own `pending` map)
+    this.bridge?.dispose();
+    await this.host.destroy().catch(() => {});
+  }
 
   // ---- process (guestd) ----
   private track(p: GuestProcess, cmd: string, args: string[]): ProcessHandle {
@@ -104,6 +118,31 @@ export class VmRuntime implements Runtime {
     return [...live, ...retained];
   }
 
+  // ---- pty ----
+  async openPty(opts: { cols?: number; rows?: number } = {}): Promise<PtySession> {
+    const port = [1, 2, 3].find((p) => !this.ptyPorts.has(p));
+    if (port === undefined) throw new Error("VmRuntime: all 3 PTY ports are in use");
+    this.ptyPorts.add(port);
+    try {
+      // Subscribe (inside openPtySession) BEFORE ptyOpen fires — see the ordering
+      // note in pty.ts. openPtySession calls launch() only after it has subscribed.
+      const channel = this.host.terminal(port as 1 | 2 | 3);
+      const session = await openPtySession(
+        channel,
+        () => this.guestd.ptyOpen(port),
+        (pid) => this.guestd.kill(pid, "SIGKILL"),
+        { deadlineMs: 15_000 },
+      );
+      session.resize(opts.cols ?? 80, opts.rows ?? 24); // hvc<port> starts 0×0 — send an initial size
+      const origDispose = session.dispose;
+      session.dispose = async () => { this.ptyPorts.delete(port); await origDispose(); };
+      return session;
+    } catch (e) {
+      this.ptyPorts.delete(port); // release the port if the bridge never came up
+      throw e;
+    }
+  }
+
   // ---- filesystem (bridge) ----
   readFile(p: string): Promise<Uint8Array> { return this.bridge.readFile(p); }
   writeFile(p: string, d: Uint8Array | string, o?: WriteFileOptions): Promise<void> { return this.bridge.writeFile(p, d, o); }
@@ -129,5 +168,3 @@ export class VmRuntime implements Runtime {
   async getCapabilities(): Promise<RuntimeCapabilities> { return vmCapabilities(["python3"]); }
   subscribe(l: RuntimeEventListener): Unsubscribe { this.listeners.add(l); return () => this.listeners.delete(l); }
 }
-
-export type { V86Assets };

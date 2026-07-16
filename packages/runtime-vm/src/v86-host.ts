@@ -1,22 +1,17 @@
-import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
 import { V86 } from "v86";
 import type { GuestChannel } from "./guestd-client.js";
 import type { Fs9p } from "./fs-bridge.js";
 
-// v86's ESM build has no CommonJS __dirname, so its default wasm lookup falls
-// back to a CWD-relative "build/v86.wasm" — wrong under vitest/monorepo (cwd is
-// the repo root). Point it at the installed package's own build/ dir. (Same
-// adaptation the bake script makes; without it boot() hangs forever because the
-// wasm load throws ENOENT asynchronously and `emulator-ready` never fires.)
-const V86_WASM_PATH = join(dirname(createRequire(import.meta.url).resolve("v86")), "v86.wasm");
-
-export interface V86Assets {
-  biosPath: string;
-  vgaBiosPath: string;
-  kernelPath: string;
-  statePath?: string;
+/** Pre-loaded boot assets — produced by a Node or browser loader, consumed by V86Host.
+ *  Separating loading from construction lets one host boot in either environment. */
+export interface V86BootInputs {
+  bios: ArrayBuffer;
+  vgaBios: ArrayBuffer;
+  kernel: ArrayBuffer;
+  state?: ArrayBuffer;
+  /** Where v86.wasm is fetched from — a file URL/path (Node) or a served URL (browser).
+   *  Passed to v86 verbatim; a wrong value hangs boot silently, hence the timeout. */
+  wasmUrl: string;
   memoryMB: number;
 }
 
@@ -35,41 +30,48 @@ export function assertFs9pSymbols(fs9p: unknown): void {
   if (missing.length) throw new Error(`v86 fs9p missing required method(s): ${missing.join(", ")} — v86 upgrade may have renamed them`);
 }
 
+const DEFAULT_BOOT_TIMEOUT_MS = 60_000;
+
 export class V86Host {
-  // v86 ships a .d.ts, but it's incomplete/inaccurate (e.g. restore_state is
-  // typed as ArrayBuffer when the runtime actually wants a typed-array view)
-  // — `any` is the honest boundary here rather than fighting stale types.
+  // v86 ships a .d.ts, but it's incomplete/inaccurate (e.g. restore_state is typed
+  // ArrayBuffer when the runtime wants a typed-array view) — `any` is the honest boundary.
   private emulator: any;
   readonly fs9p!: Fs9p; // set after boot (declared for the type; assigned in boot)
 
-  constructor(private readonly assets: V86Assets) {}
+  /** Seam for tests — override to inject a fake emulator. */
+  protected makeEmulator(opts: Record<string, unknown>): any {
+    return new V86(opts);
+  }
 
-  async boot(): Promise<void> {
-    const [bios, vga, kernel, state] = await Promise.all([
-      readFile(this.assets.biosPath),
-      readFile(this.assets.vgaBiosPath),
-      readFile(this.assets.kernelPath),
-      this.assets.statePath ? readFile(this.assets.statePath) : Promise.resolve(undefined),
-    ]);
-    // EXACT ArrayBuffer — a Node Buffer may be a view into a pooled ArrayBuffer
-    // at a non-zero byteOffset; `.buffer` would hand v86 wrong bytes. Copy into
-    // a fresh 0-offset buffer.
-    const ab = (b: Buffer): ArrayBuffer => new Uint8Array(b).buffer;
-    const opts: Record<string, unknown> = {
-      wasm_path: V86_WASM_PATH,
-      bios: { buffer: ab(bios) },
-      vga_bios: { buffer: ab(vga) },
-      bzimage: { buffer: ab(kernel) },
-      memory_size: this.assets.memoryMB * 1024 * 1024,
+  async boot(inputs: V86BootInputs, opts: { bootTimeoutMs?: number } = {}): Promise<void> {
+    const opt: Record<string, unknown> = {
+      wasm_path: inputs.wasmUrl,
+      bios: { buffer: inputs.bios },
+      vga_bios: { buffer: inputs.vgaBios },
+      bzimage: { buffer: inputs.kernel },
+      memory_size: inputs.memoryMB * 1024 * 1024,
       filesystem: {},
       virtio_console: true,
       autostart: false,
       disable_keyboard: true,
+      disable_speaker: true,
+      disable_mouse: true,
       cmdline: "console=ttyS0 tsc=reliable mitigations=off random.trust_cpu=on",
     };
-    if (state) opts.initial_state = { buffer: ab(state) };
-    this.emulator = new V86(opts);
-    await new Promise<void>((resolve) => this.emulator.add_listener("emulator-ready", () => resolve()));
+    if (inputs.state) opt.initial_state = { buffer: inputs.state };
+    this.emulator = this.makeEmulator(opt);
+
+    const timeoutMs = opts.bootTimeoutMs ?? DEFAULT_BOOT_TIMEOUT_MS;
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(
+          `v86 did not become ready in ${timeoutMs}ms — the wasm/asset load likely failed silently ` +
+          `(check wasmUrl=${inputs.wasmUrl}); v86 retries a bad wasm URL forever without throwing.`,
+        )),
+        timeoutMs,
+      );
+      this.emulator.add_listener("emulator-ready", () => { clearTimeout(timer); resolve(); });
+    });
     assertFs9pSymbols(this.emulator.fs9p);
     (this as { fs9p: Fs9p }).fs9p = this.emulator.fs9p as Fs9p;
   }
@@ -80,6 +82,21 @@ export class V86Host {
     return {
       send: (bytes: Uint8Array) => this.emulator.bus.send("virtio-console0-input-bytes", bytes),
       subscribe: (cb: (bytes: Uint8Array) => void) => this.emulator.add_listener("virtio-console0-output-bytes", cb),
+    };
+  }
+
+  terminal(port: 1 | 2 | 3): { send(b: Uint8Array): void; subscribe(cb: (b: Uint8Array) => void): () => void; resize(c: number, r: number): void } {
+    const event = `virtio-console${port}-output-bytes`;
+    return {
+      send: (b) => this.emulator.bus.send(`virtio-console${port}-input-bytes`, b),
+      // Returns an unsubscribe fn — v86's bus pairs add_listener/remove_listener;
+      // callers MUST detach so a reused port (1-3) doesn't deliver a disposed
+      // session's data into a new one (I4).
+      subscribe: (cb) => {
+        this.emulator.add_listener(event, cb);
+        return () => this.emulator.remove_listener(event, cb);
+      },
+      resize: (cols, rows) => this.emulator.bus.send(`virtio-console${port}-resize`, [cols, rows]),
     };
   }
 
@@ -101,6 +118,6 @@ export class V86Host {
   }
 
   async destroy(): Promise<void> {
-    await this.emulator.destroy();
+    if (this.emulator) await this.emulator.destroy();
   }
 }

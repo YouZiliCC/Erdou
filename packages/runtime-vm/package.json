@@ -19,7 +19,9 @@
   },
   "devDependencies": {
     "@erdou/conformance": "workspace:*",
-    "@erdou/runtime-browser": "workspace:*"
+    "@erdou/runtime-browser": "workspace:*",
+    "esbuild": "^0.27.7",
+    "playwright-core": "^1.61.1"
   },
   "publishConfig": {
     "main": "./dist/index.js",

@@ -14,7 +14,8 @@ export type Errno =
   | "ELOOP"
   | "EBADF"
   | "ESRCH"
-  | "EADDRINUSE";
+  | "EADDRINUSE"
+  | "EIO";
 
 const DESCRIPTIONS: Record<Errno, string> = {
   ENOENT: "no such file or directory",
@@ -28,6 +29,7 @@ const DESCRIPTIONS: Record<Errno, string> = {
   EBADF: "bad file descriptor",
   ESRCH: "no such process",
   EADDRINUSE: "address already in use",
+  EIO: "input/output error",
 };
 
 export interface ErrnoOptions {

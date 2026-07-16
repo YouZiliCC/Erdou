@@ -11,6 +11,9 @@ const S_IFMT = 0o170000, S_IFDIR = 0o040000, S_IFREG = 0o100000, S_IFLNK = 0o120
 export interface Fs9pInode { mode: number; size: number; direntries?: Map<string, number>; symlink?: string; mtime: number; qid: { version: number }; }
 export interface Fs9p {
   inodes: Fs9pInode[];
+  /** idx -> file bytes (real v86 has this field; Write over-allocates ~3/2× while
+   *  inode.size holds the exact length — readers must clamp to inode.size). */
+  inodedata: Record<number, Uint8Array | undefined>;
   GetInode(idx: number): Fs9pInode;
   CreateFile(name: string, parentid: number): number;
   CreateDirectory(name: string, parentid: number): number;
@@ -21,7 +24,7 @@ export interface Fs9p {
   Unlink(parentid: number, name: string): number;
   Rename(olddir: number, oldname: string, newdir: number, newname: string): Promise<number>;
   Search(parentid: number, name: string): number;
-  SearchPath(path: string): { id: number; parentid: number; name: string };
+  SearchPath(path: string): { id: number; parentid: number; name: string | undefined };
   GetFullPath(idx: number): string;
   read_file(path: string): Promise<Uint8Array | null>;
 }
@@ -153,6 +156,13 @@ export class Fs9pBridge {
     for (const [path, kind] of batch) this.emit({ type: "file.changed", path, kind });
   }
 
+  /** Tear down: stop the coalesce timer without flushing (shutdown discards
+   *  in-flight change notifications — there's no listener left to receive them). */
+  dispose(): void {
+    if (this.flushTimer) { clearTimeout(this.flushTimer); this.flushTimer = undefined; }
+    this.pendingChanges.clear();
+  }
+
   /** Emit a page-side (contract-API) file.changed SYNCHRONOUSLY — NOT through
    *  the coalesce timer — so it lands within the caller's call (honors the
    *  contract's one-macrotask delivery bound; conformance's file.changed test
@@ -176,6 +186,14 @@ export class Fs9pBridge {
     return parts[parts.length - 1] ?? "";
   }
 
+  /** Reject mutations under an image-owned mount point (bin/lib/usr/proc/dev/tmp). */
+  private guardSkeleton(path: string, syscall: string): void {
+    const first = path.split("/").filter(Boolean)[0];
+    if (first !== undefined && SKELETON_DIRS.includes(first)) {
+      throw new ErrnoError("EACCES", { path, syscall });
+    }
+  }
+
   // ---- async workspace FS (contract "/x" <-> fs9p "workspace/x") ----
   private ws(path: string): string {
     const norm = "/" + path.split("/").filter(Boolean).join("/");
@@ -183,12 +201,14 @@ export class Fs9pBridge {
   }
 
   async readFile(path: string): Promise<Uint8Array> {
+    const w = this.fs.SearchPath(this.ws(path));
+    if (w.id === -1) throw new ErrnoError("ENOENT", { path, syscall: "open" });
     const data = await this.fs.read_file(this.ws(path));
-    if (data === null) throw new ErrnoError("ENOENT", { path, syscall: "open" });
-    return data;
+    return data ?? new Uint8Array(0); // empty/never-written file: inode exists, no inodedata
   }
 
   async writeFile(path: string, data: Uint8Array | string, _opts?: WriteFileOptions): Promise<void> {
+    this.guardSkeleton(path, "open");
     const buf = typeof data === "string" ? new TextEncoder().encode(data) : data;
     this.suppress++;
     try {
@@ -197,7 +217,7 @@ export class Fs9pBridge {
       let kind: ChangeKind;
       if (w.id === -1) {
         if (w.parentid === -1) throw new ErrnoError("ENOENT", { path, syscall: "open" });
-        idx = await this.fs.CreateBinaryFile(w.name, w.parentid, buf);
+        idx = await this.fs.CreateBinaryFile(this.base(path), w.parentid, buf);
         kind = "create";
       } else {
         await this.fs.ChangeSize(w.id, buf.length);
@@ -226,6 +246,7 @@ export class Fs9pBridge {
   }
 
   async mkdir(path: string, opts?: MkdirOptions): Promise<void> {
+    this.guardSkeleton(path, "mkdir");
     this.suppress++;
     try {
       const parts = ("/" + path.split("/").filter(Boolean).join("/")).split("/").filter(Boolean);
@@ -247,6 +268,7 @@ export class Fs9pBridge {
   }
 
   async rm(path: string, opts?: RmOptions): Promise<void> {
+    this.guardSkeleton(path, "unlink");
     this.suppress++;
     try {
       const w = this.fs.SearchPath(this.ws(path));
@@ -265,6 +287,8 @@ export class Fs9pBridge {
   }
 
   async rename(from: string, to: string): Promise<void> {
+    this.guardSkeleton(from, "rename");
+    this.guardSkeleton(to, "rename");
     this.suppress++;
     try {
       const src = this.fs.SearchPath(this.ws(from));
@@ -276,6 +300,26 @@ export class Fs9pBridge {
       this.emitChange(this.cpath(from), "delete");
       this.emitChange(this.cpath(to), "create");
     } finally { this.suppress--; }
+  }
+
+  symlink(target: string, linkPath: string): void {
+    this.suppress++;
+    try {
+      const w = this.fs.SearchPath(this.ws(linkPath));
+      if (w.id !== -1) throw new ErrnoError("EEXIST", { path: linkPath, syscall: "symlink" });
+      const id = this.fs.CreateSymlink(this.base(linkPath), w.parentid, target);
+      this.paths.set(id, this.ws(linkPath));
+    } finally { this.suppress--; }
+    this.emitChange(this.cpath(linkPath), "create");
+  }
+
+  chmod(path: string, mode: number): void {
+    const w = this.fs.SearchPath(this.ws(path));
+    if (w.id === -1) throw new ErrnoError("ENOENT", { path, syscall: "chmod" });
+    const inode = this.fs.GetInode(w.id);
+    inode.mode = (inode.mode & ~0o7777) | (mode & 0o7777);
+    inode.qid.version++;
+    this.emitChange(this.cpath(path), "modify");
   }
 
   async stat(path: string): Promise<Stat> {

@@ -25,4 +25,22 @@ describe("workspace snapshot", () => {
     await expect(bridge.readFile("/added.txt")).rejects.toThrow(/ENOENT/);
     expect(new TextDecoder().decode(await bridge.readFile("/sub/b.txt"))).toBe("two");
   });
+
+  it("restores file modes and symlinks", async () => {
+    const fs = makeFakeFs9p(); bootWorkspace(fs);
+    const bridge = new Fs9pBridge(fs, () => {}); bridge.attach();
+    await bridge.writeFile("/run.sh", "#!/bin/sh\necho hi");
+    // mark it executable + add a symlink (via the new bridge methods)
+    bridge.chmod("/run.sh", 0o755);
+    bridge.symlink("run.sh", "/link.sh");
+
+    const snap = await snapshotWorkspace(fs, () => 0);
+    await bridge.rm("/run.sh", { force: true });
+    await bridge.rm("/link.sh", { force: true });
+    await restoreWorkspace(fs, bridge, snap);
+
+    expect((await bridge.stat("/run.sh")).mode & 0o777).toBe(0o755);
+    const link = fs.SearchPath("workspace/link.sh");
+    expect(fs.GetInode(link.id).symlink).toBe("run.sh");
+  });
 });

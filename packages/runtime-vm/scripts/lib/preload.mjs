@@ -23,18 +23,21 @@ async function walk(fs9p, localDir, parentId, stats) {
   }
 }
 
-/** Build sys-root (from rootfsDir) + workspace + skeleton; copy guestd.py into sys-root. */
-export async function setupSplitFs(fs9p, rootfsDir, guestdSrcPath) {
+/** Build sys-root (from rootfsDir) + workspace + skeleton; copy guestd.py + ptybridge.py into sys-root. */
+export async function setupSplitFs(fs9p, rootfsDir, guestdSrcPath, ptybridgeSrcPath) {
   const stats = { dirs: 0, files: 0, symlinks: 0, bytes: 0 };
   const sysId = fs9p.CreateDirectory("sys-root", 0); fs9p.inodes[sysId].mode = 0o040755;
   await walk(fs9p, rootfsDir, sysId, stats);
-  // guestd at sys-root/usr/lib/erdou/guestd.py (visible via the /usr bind, no workspace pollution)
+  // guestd + ptybridge at sys-root/usr/lib/erdou/ (visible via the /usr bind, no workspace pollution)
   const usrId = fs9p.Search(sysId, "usr");
   const libId = fs9p.Search(usrId, "lib");
   const erdouId = fs9p.CreateDirectory("erdou", libId); fs9p.inodes[erdouId].mode = 0o040755;
   const gd = fs.readFileSync(guestdSrcPath);
   const gid = await fs9p.CreateBinaryFile("guestd.py", erdouId, new Uint8Array(gd));
   fs9p.inodes[gid].mode = 0o100755;
+  const pb = fs.readFileSync(ptybridgeSrcPath);
+  const pid = await fs9p.CreateBinaryFile("ptybridge.py", erdouId, new Uint8Array(pb));
+  fs9p.inodes[pid].mode = 0o100755;
   const wsId = fs9p.CreateDirectory("workspace", 0); fs9p.inodes[wsId].mode = 0o040755;
   for (const d of SKELETON_DIRS) { const id = fs9p.CreateDirectory(d, wsId); fs9p.inodes[id].mode = 0o040755; }
   return stats;
@@ -51,9 +54,10 @@ export async function setupSplitFs(fs9p, rootfsDir, guestdSrcPath) {
 export const GUEST_SETUP_CMD =
   "for d in bin lib usr; do mount -o bind /mnt/sys-root/$d /mnt/workspace/$d || echo BINDF''AIL_$d; done; " +
   "mount -t proc proc /mnt/workspace/proc; mount -o bind /dev /mnt/workspace/dev; mount -t tmpfs tmpfs /mnt/workspace/tmp; " +
+  "mkdir -p /mnt/workspace/dev/pts; mount -t devpts devpts /mnt/workspace/dev/pts; " +
   "echo SETUPD''ONE";
 export const PYCACHE_WARMUP_CMD =
-  "chroot /mnt/workspace /usr/bin/python3 -c 'import subprocess, tty, termios, json, struct, threading, signal, shutil' 2>/dev/null; echo WAR''MED";
+  "chroot /mnt/workspace /usr/bin/python3 -c 'import subprocess, tty, termios, json, struct, threading, signal, shutil, pty, fcntl, select' 2>/dev/null; echo WAR''MED";
 export const REMOUNT_RO_CMD =
   "for d in bin lib usr; do mount -o remount,ro,bind /mnt/workspace/$d || echo ROF''AIL_$d; done; echo ROREAD''Y";
 export const LAUNCH_GUESTD_CMD =

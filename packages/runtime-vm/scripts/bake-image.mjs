@@ -58,7 +58,7 @@ const emulator = new V86({
   cmdline: "console=ttyS0 tsc=reliable mitigations=off random.trust_cpu=on",
 });
 await new Promise((r) => emulator.add_listener("emulator-ready", r));
-await setupSplitFs(emulator.fs9p, rootfs, path.join(here, "..", "src", "guest", "guestd.py"));
+await setupSplitFs(emulator.fs9p, rootfs, path.join(here, "..", "src", "guest", "guestd.py"), path.join(here, "..", "src", "guest", "ptybridge.py"));
 emulator.run();
 
 console.log("4/6 drive guest chroot/bind setup over serial");

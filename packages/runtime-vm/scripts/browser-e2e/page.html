@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>runtime-vm browser e2e</title>
+<script type="importmap">{"imports":{"v86":"./v86/libv86.mjs"}}</script>
+</head>
+<body>
+<pre id="log">booting…</pre>
+<script type="module">
+  import { bootAndSelfTest } from "./bundle.js";
+
+  const logEl = document.getElementById("log");
+  const log = (line) => { console.log(line); logEl.textContent += "\n" + line; };
+
+  const baseUrl = new URL("./assets", location.href).href.replace(/\/$/, "");
+  const wasmUrl = new URL("./v86/v86.wasm", location.href).href;
+
+  bootAndSelfTest(baseUrl, wasmUrl)
+    .then((result) => { console.log("RESULT " + result); document.title = "DONE"; })
+    .catch((e) => { console.log("HARNESS_ERROR " + (e?.stack || e)); document.title = "DONE"; });
+</script>
+</body>
+</html>

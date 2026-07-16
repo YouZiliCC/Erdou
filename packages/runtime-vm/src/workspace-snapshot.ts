@@ -57,12 +57,14 @@ export async function restoreWorkspace(fs9p: Fs9p, bridge: Fs9pBridge, snap: Sna
   if (snap.fs.type !== "directory") return;
   const write = async (node: SnapshotFsNode, prefix: string): Promise<void> => {
     if (node.type === "directory") {
-      if (prefix !== "") await bridge.mkdir(prefix, { recursive: true });
+      if (prefix !== "") { await bridge.mkdir(prefix, { recursive: true }); bridge.chmod(prefix, node.mode); }
       for (const [name, child] of Object.entries(node.children)) await write(child, prefix + "/" + name);
     } else if (node.type === "file") {
       await bridge.writeFile(prefix, Uint8Array.from(Buffer.from(node.data, "base64")));
+      bridge.chmod(prefix, node.mode);
+    } else if (node.type === "symlink") {
+      bridge.symlink(node.target, prefix);
     }
-    // symlinks in the workspace snapshot are rare; skip for the MVP (bridge has no symlink write yet).
   };
   await write(snap.fs, "");
 }
