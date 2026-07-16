@@ -92,15 +92,25 @@ export class BrowserRuntime implements Runtime {
       env: options?.env ? { ...options.env } : {},
     });
     const result = shell.execute(commandLine);
+    // The command line gets a real pid: visible in getProcesses(), waitable
+    // and killable through the runtime — the contract's exec semantics.
+    const proc = this.table.adopt({
+      cmd: "sh",
+      args: ["-c", commandLine],
+      cwd: options?.cwd ?? "/",
+      env: options?.env,
+    });
+    proc.onKill((signal) => result.kill(signal));
+    void result.wait().then((code) => proc.exited(code));
     const stdin = new PipeStream();
     stdin.end();
     return {
-      pid: 0,
+      pid: proc.record.pid,
       stdout: result.stdout,
       stderr: result.stderr,
       stdin,
-      wait: async (): Promise<ExitStatus> => ({ code: await result.wait(), signal: null }),
-      kill: async (signal?: Signal) => result.kill(signal),
+      wait: () => proc.record.wait(),
+      kill: async (signal?: Signal) => proc.record.kill(signal),
     };
   }
 

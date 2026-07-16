@@ -94,4 +94,26 @@ describe("ProcessTable", () => {
     expect(events).toContainEqual({ type: "process.started", pid: rec.pid, cmd: "done" });
     expect(events).toContainEqual({ type: "process.exited", pid: rec.pid, code: 0, signal: null });
   });
+
+  it("adopt allocates a real pid, tracks state, and settles via exited()", async () => {
+    const { table, events } = make({});
+    const adopted = table.adopt({ cmd: "sh", args: ["-c", "echo hi"] });
+    expect(adopted.record.pid).toBeGreaterThan(0);
+    expect(table.list().find((p) => p.pid === adopted.record.pid)?.state).toBe("running");
+    adopted.exited(0);
+    expect((await table.wait(adopted.record.pid)).code).toBe(0);
+    expect(events).toContainEqual({ type: "process.exited", pid: adopted.record.pid, code: 0, signal: null });
+  });
+
+  it("adopt: killing the pid fires onKill and settles as killed", async () => {
+    const { table } = make({});
+    const adopted = table.adopt({ cmd: "sh" });
+    let killed: string | null = null;
+    adopted.onKill((sig) => (killed = sig));
+    table.kill(adopted.record.pid, "SIGTERM");
+    expect(killed).toBe("SIGTERM");
+    expect((await table.wait(adopted.record.pid)).signal).toBe("SIGTERM");
+    adopted.exited(0); // late exit after kill is a no-op
+    expect(table.list().find((p) => p.pid === adopted.record.pid)?.state).toBe("killed");
+  });
 });

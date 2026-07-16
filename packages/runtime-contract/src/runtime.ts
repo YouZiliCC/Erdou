@@ -28,6 +28,8 @@ export interface Runtime {
   shutdown(): Promise<void>;
 
   spawn(options: SpawnOptions): Promise<ProcessHandle>;
+  /** Run a shell command line. The handle carries a REAL pid: the command
+   *  appears in getProcesses() and can be awaited/killed via wait()/kill(). */
   exec(
     commandLine: string,
     options?: Omit<SpawnOptions, "cmd" | "args">,

@@ -45,6 +45,16 @@ export interface InternalSpawnOptions extends SpawnOptions {
   pipeStdin?: boolean;
 }
 
+/** Controls for an externally-driven table entry (see {@link ProcessTable.adopt}). */
+export interface AdoptedProcess {
+  record: ProcessRecord;
+  /** Settle as a normal exit with `code` (no-op if already settled). */
+  exited(code: number): void;
+  /** Invoked when someone kills the pid, before the record settles — the
+   *  caller stops whatever is actually running (e.g. the shell pipeline). */
+  onKill(cb: (signal: Signal) => void): void;
+}
+
 export interface ProcessTableDeps {
   vfs: Vfs;
   bus: EventBus;
@@ -179,6 +189,72 @@ export class ProcessTable {
       records.push(record);
     }
     return records;
+  }
+
+  /**
+   * Allocate a real pid for an externally-driven composite process — e.g. the
+   * shell command line behind `Runtime.exec`, whose streams and lifecycle the
+   * caller owns. The table tracks it for getProcesses/wait/kill; the caller
+   * settles it via the returned controls. The record's own stdio streams are
+   * closed placeholders (the composite's real streams live on its handle).
+   */
+  adopt(opts: { cmd: string; args?: string[]; cwd?: string; env?: Record<string, string> }): AdoptedProcess {
+    const pid = this.nextPid++;
+    const stdin = new PipeStream();
+    const stdout = new PipeStream();
+    const stderr = new PipeStream();
+    stdin.end();
+    stdout.end();
+    stderr.end();
+
+    let resolveWait!: (status: ExitStatus) => void;
+    const waitPromise = new Promise<ExitStatus>((resolve) => {
+      resolveWait = resolve;
+    });
+    let settled = false;
+    let killCb: ((signal: Signal) => void) | undefined;
+
+    const finish = (state: "exited" | "killed", code: number, signal: Signal | null): void => {
+      if (settled) return;
+      settled = true;
+      record.state = state;
+      record.exitCode = code;
+      record.signal = signal;
+      resolveWait({ code, signal });
+      this.deps.bus.emit({ type: "process.exited", pid, code, signal });
+    };
+
+    const record: ProcessRecord = {
+      pid,
+      ppid: 0,
+      cmd: opts.cmd,
+      args: opts.args ?? [],
+      cwd: opts.cwd ?? "/",
+      env: opts.env ? { ...opts.env } : {},
+      state: "running",
+      exitCode: null,
+      signal: null,
+      startTimeMs: this.deps.clock(),
+      stdin,
+      stdout,
+      stderr,
+      wait: () => waitPromise,
+      kill: (signal: Signal = "SIGTERM") => {
+        killCb?.(signal);
+        finish("killed", 128 + SIGNAL_NUMBERS[signal], signal);
+      },
+    };
+
+    this.procs.set(pid, record);
+    this.deps.bus.emit({ type: "process.started", pid, cmd: opts.cmd });
+
+    return {
+      record,
+      exited: (code: number) => finish("exited", code, null),
+      onKill: (cb) => {
+        killCb = cb;
+      },
+    };
   }
 
   /** Register a program / language runtime under a command name. */
