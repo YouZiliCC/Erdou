@@ -24,7 +24,7 @@ import { Toggle } from "./ui/Toggle.js";
  *  themselves forever — only a real external edit after the run settled
  *  schedules another one. */
 export function PreviewPanel({ studio }: { studio: Studio }) {
-  const [cmd, setCmd] = useState(() => detectRunCommand(studio.runtime.fs) ?? "");
+  const [cmd, setCmd] = useState(() => detectRunCommand(studio.fs) ?? "");
   const [running, setRunning] = useState(false);
   const [building, setBuilding] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
@@ -58,7 +58,7 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
   const viewedPort = selectedPort !== null && openPorts.some((p) => p.port === selectedPort) ? selectedPort : null;
   // Recomputed every render (cheap VFS walk) so it tracks live agent edits,
   // unlike `cmd`'s one-time initializer.
-  const bundleEntry = hasBundleEntry(studio.runtime.fs);
+  const bundleEntry = hasBundleEntry(studio.fs);
   const showBundlePrompt = bundleEntry && !cmd.trim();
 
   /** Runs `commandLine` in the persistent shell. Returns whether it succeeded
@@ -100,7 +100,7 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
     setErrors([]);
     setOutput(null);
     try {
-      const result = await bundleProject(studio.runtime.fs);
+      const result = await bundleProject(studio.fs);
       if (!result.ok) {
         setErrors(result.errors);
         return false;

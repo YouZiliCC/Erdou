@@ -1,10 +1,11 @@
-import { BrowserRuntime, IndexedDbSnapshotStore, type ShellSession } from "@erdou/runtime-browser";
+import { IndexedDbSnapshotStore } from "@erdou/runtime-browser";
 import { ModelGateway, type ModelConfig, type ChatMessage } from "@erdou/model-gateway";
 import { CodingAgent, type AgentEvent, type ApprovalRequest } from "@erdou/agent-core";
 import { loadApprovalMode, saveApprovalMode, loadModel, saveModel, type ApprovalMode } from "./model-config.js";
 import { getTheme, applyTheme } from "./theme.js";
-import type { RuntimeEvent, ProcessInfo, Snapshot } from "@erdou/runtime-contract";
-import { registerLanguages, AGENT_LANGUAGES, AGENT_COMMANDS } from "./languages.js";
+import type { RuntimeEvent, ProcessInfo, Snapshot, Runtime, FileSystemApi } from "@erdou/runtime-contract";
+import { AGENT_LANGUAGES, AGENT_COMMANDS } from "./languages.js";
+import { createBrowserKernel, type Kernel, type RpcShellSession } from "./kernel.js";
 import { loadRuns, saveRuns, clearRuns } from "./runs-store.js";
 import { SnapshotReader, buildFileChanges } from "./snapshot-read.js";
 import { startPreviewProxy } from "./preview-bridge.js";
@@ -78,13 +79,24 @@ export function runTitle(task: string): string {
  * React subscribes for re-render; all Erdou logic lives here, not in components.
  */
 export class Studio {
-  readonly runtime = new BrowserRuntime();
+  /** The active kernel — the seam a second runtime implementation plugs into. */
+  readonly kernel: Kernel = createBrowserKernel();
   private readonly gateway = new ModelGateway();
   private readonly store = new IndexedDbSnapshotStore();
   private booted = false;
   private nextId = 1;
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
-  private _shell?: ShellSession;
+  private _shell?: RpcShellSession;
+
+  /** The contract-typed runtime of the active kernel. */
+  get runtime(): Runtime {
+    return this.kernel.runtime;
+  }
+
+  /** Host-side synchronous view of the workspace (see Kernel.fs). */
+  get fs(): FileSystemApi {
+    return this.kernel.fs;
+  }
 
   /** Agent run history, most-recent first (persisted in IndexedDB). */
   runs: Run[] = [];
@@ -140,8 +152,8 @@ export class Studio {
   }
 
   /** A persistent shell session (cwd/env survive across commands), for the terminal. */
-  get shell(): ShellSession {
-    return (this._shell ??= this.runtime.openShell());
+  get shell(): RpcShellSession {
+    return (this._shell ??= this.kernel.openShell());
   }
 
   private readonly listeners = new Set<() => void>();
@@ -158,7 +170,6 @@ export class Studio {
     if (this.booted) return;
     this.booted = true;
     await this.runtime.boot();
-    registerLanguages(this.runtime);
     // Preview reverse-proxy: SW intercepts /__preview__/<port>/ iframe requests
     // and forwards them here to `runtime.dispatch`. Fire-and-forget: SW
     // registration must not block boot, and it self-guards for no-SW envs.
@@ -209,7 +220,7 @@ export class Studio {
   }
 
   async mountFolder(handle: DirHandleLike): Promise<void> {
-    const count = await loadFolderIntoVfs(handle, this.runtime.fs, "/", this.mountMtimes);
+    const count = await loadFolderIntoVfs(handle, this.fs, "/", this.mountMtimes);
     this.mount = handle;
     this.mountName = handle.name;
     this.pendingMount = null;
@@ -303,7 +314,7 @@ export class Studio {
     const tick = async () => {
       if (!this.mount || document.hidden) return;
       try {
-        const pulled = await rescanFolder(this.mount, this.runtime.fs, this.mountMtimes, "/");
+        const pulled = await rescanFolder(this.mount, this.fs, this.mountMtimes, "/");
         this.mountRescanFailed = false;
         if (pulled.length) {
           this.fsVersion++;
@@ -337,7 +348,7 @@ export class Studio {
   async saveToFolder(): Promise<void> {
     if (!this.mount) return;
     try {
-      await saveVfsToFolder(this.runtime.fs, this.mount, "/", this.mountMtimes);
+      await saveVfsToFolder(this.fs, this.mount, "/", this.mountMtimes);
     } catch (err) {
       this.logSystem("error", "Failed to sync to local folder", asMessage(err));
     }
@@ -506,7 +517,7 @@ export class Studio {
     if (changed.size === 0) return [];
     const before = await SnapshotReader.open(startSnap);
     const after = (path: string): string | null =>
-      this.runtime.fs.exists(path) ? new TextDecoder().decode(this.runtime.fs.readFile(path)) : null;
+      this.fs.exists(path) ? new TextDecoder().decode(this.fs.readFile(path)) : null;
     return buildFileChanges(changed, (p) => before.read(p), after);
   }
 
