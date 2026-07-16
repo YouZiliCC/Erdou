@@ -59,6 +59,9 @@ importers:
       '@erdou/tool-git':
         specifier: workspace:*
         version: link:../../packages/tool-git
+      '@xterm/xterm':
+        specifier: ^6.0.0
+        version: 6.0.0
       esbuild-wasm:
         specifier: ^0.23.0
         version: 0.23.0
@@ -68,6 +71,9 @@ importers:
       react-dom:
         specifier: ^18.3.1
         version: 18.3.1(react@18.3.1)
+      v86:
+        specifier: ^0.5.424
+        version: 0.5.424
     devDependencies:
       '@types/react':
         specifier: ^18.3.5
@@ -988,6 +994,9 @@ packages:
 
   '@vitest/utils@4.1.10':
     resolution: {integrity: sha512-fy9am/HWxbaGt/Sawrp90vt6Y6jQwf1RX77cz3uwoJwJVMli/e1IEwRPnMNJ7vKfPTwo0diXifkpPvwH9v7nGA==}
+
+  '@xterm/xterm@6.0.0':
+    resolution: {integrity: sha512-TQwDdQGtwwDt+2cgKDLn0IRaSxYu1tSUjgKarSDkUM0ZNiSRXFpjxEsvc/Zgc5kq5omJ+V0a8/kIM2WD3sMOYg==}
 
   abort-controller@3.0.0:
     resolution: {integrity: sha512-h8lQ8tacZYnR3vNQTgibj+tODHI5/+l06Au2Pcriv/Gmet0eaj4TwWH41sO9wnHDiQsEj19q0drzdWdeAHtweg==}
@@ -2482,6 +2491,8 @@ snapshots:
       '@vitest/pretty-format': 4.1.10
       convert-source-map: 2.0.0
       tinyrainbow: 3.1.0
+
+  '@xterm/xterm@6.0.0': {}
 
   abort-controller@3.0.0:
     dependencies:

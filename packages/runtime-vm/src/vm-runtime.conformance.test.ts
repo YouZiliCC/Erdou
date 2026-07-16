@@ -41,4 +41,13 @@ describe.skipIf(!RUN)("VmRuntime (gated e2e)", () => {
     expect(status.signal ?? status.code).toBeTruthy();
     await rt.shutdown();
   });
+
+  it("syncFs() and the async bridge share one fs9p (a syncFs write is readable via readFile)", async () => {
+    const rt = new VmRuntime(makeInputs);
+    await rt.boot();
+    rt.syncFs().writeFile("/sf.txt", "x");
+    const data = await rt.readFile("/sf.txt");
+    expect(new TextDecoder().decode(data)).toBe("x");
+    await rt.shutdown();
+  });
 });
