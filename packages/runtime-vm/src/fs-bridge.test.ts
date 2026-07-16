@@ -73,4 +73,18 @@ describe("Fs9pBridge", () => {
     expect((await bridge.stat("/d")).type).toBe("directory");
     await expect(bridge.stat("/nope")).rejects.toThrow(/ENOENT/);
   });
+
+  it("rejects page writes under a skeleton dir with EACCES", async () => {
+    const fs = makeFakeFs9p(); bootWorkspace(fs);
+    const bridge = new Fs9pBridge(fs, () => {}); bridge.attach();
+    await expect(bridge.writeFile("/usr/x", "no")).rejects.toThrow(/EACCES/);
+    await expect(bridge.mkdir("/tmp/y", { recursive: true })).rejects.toThrow(/EACCES/);
+  });
+
+  it("readFile of an empty (never-written) file returns 0 bytes, not ENOENT", async () => {
+    const fs = makeFakeFs9p(); bootWorkspace(fs);
+    const bridge = new Fs9pBridge(fs, () => {}); bridge.attach();
+    fs.CreateFile("empty.txt", fs.SearchPath("workspace").id); // inode, no inodedata, size 0
+    expect((await bridge.readFile("/empty.txt")).length).toBe(0);
+  });
 });

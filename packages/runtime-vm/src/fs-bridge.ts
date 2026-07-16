@@ -186,6 +186,14 @@ export class Fs9pBridge {
     return parts[parts.length - 1] ?? "";
   }
 
+  /** Reject mutations under an image-owned mount point (bin/lib/usr/proc/dev/tmp). */
+  private guardSkeleton(path: string, syscall: string): void {
+    const first = path.split("/").filter(Boolean)[0];
+    if (first !== undefined && SKELETON_DIRS.includes(first)) {
+      throw new ErrnoError("EACCES", { path, syscall });
+    }
+  }
+
   // ---- async workspace FS (contract "/x" <-> fs9p "workspace/x") ----
   private ws(path: string): string {
     const norm = "/" + path.split("/").filter(Boolean).join("/");
@@ -193,12 +201,14 @@ export class Fs9pBridge {
   }
 
   async readFile(path: string): Promise<Uint8Array> {
+    const w = this.fs.SearchPath(this.ws(path));
+    if (w.id === -1) throw new ErrnoError("ENOENT", { path, syscall: "open" });
     const data = await this.fs.read_file(this.ws(path));
-    if (data === null) throw new ErrnoError("ENOENT", { path, syscall: "open" });
-    return data;
+    return data ?? new Uint8Array(0); // empty/never-written file: inode exists, no inodedata
   }
 
   async writeFile(path: string, data: Uint8Array | string, _opts?: WriteFileOptions): Promise<void> {
+    this.guardSkeleton(path, "open");
     const buf = typeof data === "string" ? new TextEncoder().encode(data) : data;
     this.suppress++;
     try {
@@ -236,6 +246,7 @@ export class Fs9pBridge {
   }
 
   async mkdir(path: string, opts?: MkdirOptions): Promise<void> {
+    this.guardSkeleton(path, "mkdir");
     this.suppress++;
     try {
       const parts = ("/" + path.split("/").filter(Boolean).join("/")).split("/").filter(Boolean);
@@ -257,6 +268,7 @@ export class Fs9pBridge {
   }
 
   async rm(path: string, opts?: RmOptions): Promise<void> {
+    this.guardSkeleton(path, "unlink");
     this.suppress++;
     try {
       const w = this.fs.SearchPath(this.ws(path));
@@ -275,6 +287,8 @@ export class Fs9pBridge {
   }
 
   async rename(from: string, to: string): Promise<void> {
+    this.guardSkeleton(from, "rename");
+    this.guardSkeleton(to, "rename");
     this.suppress++;
     try {
       const src = this.fs.SearchPath(this.ws(from));
