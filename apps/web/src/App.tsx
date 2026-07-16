@@ -99,7 +99,7 @@ export function App() {
           </div>
           <Conversation studio={studio} />
           <Composer
-            running={studio.running || studio.activeRun?.status === "running"}
+            running={studio.running || studio.activeRun?.status === "running" || !!studio.switchingKernel}
             replying={studio.activeRun !== undefined}
             mode={mode}
             onModeChange={changeMode}

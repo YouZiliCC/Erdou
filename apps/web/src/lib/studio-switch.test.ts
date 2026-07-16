@@ -2,6 +2,7 @@ import "fake-indexeddb/auto";
 import { describe, it, expect, vi } from "vitest";
 import { Studio } from "./studio.js";
 import { Vfs } from "@erdou/runtime-browser";
+import { DEFAULT_MODEL } from "./model-config.js";
 
 vi.mock("./local-mount.js", async (o) => ({
   ...(await o<typeof import("./local-mount.js")>()),
@@ -83,5 +84,75 @@ describe("Studio.switchKernel", () => {
     await studio.switchKernel("vm", { makeKernel: async () => ({ kind: "vm" as const, runtime: studio.runtime, fs: new Vfs(), openShell: () => studio.shell }) });
     expect(studio.kernelKind).toBe("browser"); // guarded: no switch while running
     (studio as unknown as { running: boolean }).running = false;
+  });
+
+  // Final-review Fix 1: the boot-await window (~40 MB fetch + boot) is long
+  // enough for a run to start on the OLD kernel while switchKernel is still
+  // awaiting the new one — the entry guard above only catches a run already in
+  // progress at the moment the switch was requested. Close that window three
+  // ways; these two tests cover the Studio-level halves (startRun/replyToRun
+  // refusing to start, and switchKernel aborting the swap).
+  it("startRun and replyToRun are no-ops while a kernel switch is mid-boot", async () => {
+    const studio = new Studio();
+    await studio.boot();
+
+    let resolveMake: (k: unknown) => void = () => {};
+    const pending = new Promise((res) => {
+      resolveMake = res;
+    });
+    const vmFs = new Vfs();
+
+    const switchPromise = studio.switchKernel("vm", { makeKernel: async () => pending as any });
+    // switchKernel sets `switchingKernel` synchronously, before awaiting the boot.
+    expect(studio.switchingKernel).not.toBeNull();
+
+    await studio.startRun("write a file", DEFAULT_MODEL, "auto");
+    expect(studio.running).toBe(false);
+    expect(studio.runs.length).toBe(0); // no run was created
+    expect(studio.activeRun).toBeUndefined();
+
+    // replyToRun's guard fires before it even looks up the run.
+    await studio.replyToRun("does-not-exist", "reply", DEFAULT_MODEL, "auto");
+    expect(studio.running).toBe(false);
+
+    // Resolve the switch so it finishes cleanly (no dangling promise/timer).
+    resolveMake({ kind: "vm" as const, runtime: studio.runtime, fs: vmFs, openShell: () => studio.shell });
+    await switchPromise;
+    expect(studio.kernelKind).toBe("vm");
+    expect(studio.switchingKernel).toBeNull();
+  });
+
+  it("switchKernel aborts the swap if a run starts during the boot-await window (stays on the old kernel; the booted vm is still cached for next time)", async () => {
+    const studio = new Studio();
+    await studio.boot();
+    studio.fs.writeFile("/keep.txt", "original");
+    const browserFs = studio.fs;
+
+    let resolveMake: (k: unknown) => void = () => {};
+    const pending = new Promise((res) => {
+      resolveMake = res;
+    });
+    const vmFs = new Vfs();
+    const fakeVm = { kind: "vm" as const, runtime: studio.runtime, fs: vmFs, openShell: () => studio.shell };
+
+    const switchPromise = studio.switchKernel("vm", { makeKernel: async () => pending as any });
+    // Simulate a run starting during the cold-boot await window (the race this fix closes).
+    (studio as unknown as { running: boolean }).running = true;
+    resolveMake(fakeVm);
+    await switchPromise;
+
+    expect(studio.kernelKind).toBe("browser"); // aborted — never swapped to the vm kernel
+    expect(studio.fs).toBe(browserFs);
+    expect(studio.switchingKernel).toBeNull(); // cleared by the `finally`
+
+    // The freshly-booted vm kernel stays cached even though the swap was
+    // aborted: a later switch (once the run has ended) reuses it instead of
+    // booting a second one.
+    (studio as unknown as { running: boolean }).running = false;
+    const makeKernel = vi.fn(async () => fakeVm);
+    await studio.switchKernel("vm", { makeKernel });
+    expect(makeKernel).not.toHaveBeenCalled();
+    expect(studio.kernelKind).toBe("vm");
+    expect(studio.fs).toBe(vmFs);
   });
 });

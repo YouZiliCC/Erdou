@@ -5,7 +5,7 @@ import { loadApprovalMode, saveApprovalMode, loadModel, saveModel, type Approval
 import { getTheme, applyTheme } from "./theme.js";
 import type { RuntimeEvent, ProcessInfo, Snapshot, Runtime, FileSystemApi, Unsubscribe } from "@erdou/runtime-contract";
 import { AGENT_LANGUAGES, AGENT_COMMANDS } from "./languages.js";
-import { createBrowserKernel, type Kernel, type RpcShellSession } from "./kernel.js";
+import { createBrowserKernel, SKELETON_DIRS, type Kernel, type RpcShellSession } from "./kernel.js";
 import { loadRuns, saveRuns, clearRuns } from "./runs-store.js";
 import { SnapshotReader, buildFileChanges } from "./snapshot-read.js";
 import { startPreviewProxy, setPreviewRuntime } from "./preview-bridge.js";
@@ -289,6 +289,16 @@ export class Studio {
       if (kind === "browser" && !this._browserBooted) {
         await next.runtime.boot(); // (browser boots once; see note)
       }
+      // Final-review Fix 1: re-check AFTER the boot/cache-resolution await window —
+      // the entry guard above only catches a run already in progress when the
+      // switch was requested; a run can still START while we were awaiting the
+      // cold VM boot (the Composer stays enabled during that window). If so,
+      // cancel the swap instead of copying the workspace mid-run; `next` (e.g. a
+      // freshly booted VM) stays cached in `this.vmKernel` so the boot isn't wasted.
+      if (this.running) {
+        this.logSystem("system", "Kernel switch cancelled — a run started during boot.");
+        return;
+      }
       // copy the current workspace into the target kernel so the project follows
       copyWorkspace(this.kernel.fs, next.fs);
       // swap: unsubscribe old runtime events, point at the new kernel, re-subscribe
@@ -440,7 +450,15 @@ export class Studio {
   async saveToFolder(): Promise<void> {
     if (!this.mount) return;
     try {
-      await saveVfsToFolder(this.fs, this.mount, "/", this.mountMtimes);
+      // The VM kernel's readdir("/") exposes its skeleton bind-mount stub dirs
+      // (bin/lib/usr/proc/dev/tmp) — never write those into the user's real folder.
+      await saveVfsToFolder(
+        this.fs,
+        this.mount,
+        "/",
+        this.mountMtimes,
+        this.kernelKind === "vm" ? new Set(SKELETON_DIRS) : undefined,
+      );
     } catch (err) {
       this.logSystem("error", "Failed to sync to local folder", asMessage(err));
     }
@@ -506,7 +524,10 @@ export class Studio {
 
   /** Start a new agent run: create the thread, drive the agent, persist. */
   async startRun(task: string, model: ModelConfig, approvalMode: ApprovalMode): Promise<void> {
-    if (this.running) return;
+    if (this.running || this.switchingKernel) {
+      this.logSystem("system", "Please wait for the kernel switch to finish before starting a task.");
+      return;
+    }
     const run: Run = {
       id: crypto.randomUUID(),
       title: runTitle(task),
@@ -530,7 +551,10 @@ export class Studio {
    * something is already running or the run doesn't exist.
    */
   async replyToRun(runId: string, task: string, model: ModelConfig, approvalMode: ApprovalMode): Promise<void> {
-    if (this.running) return;
+    if (this.running || this.switchingKernel) {
+      this.logSystem("system", "Please wait for the kernel switch to finish before starting a task.");
+      return;
+    }
     const run = this.runs.find((r) => r.id === runId);
     if (!run || run.status === "running") return;
     run.status = "running";

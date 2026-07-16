@@ -47,16 +47,17 @@ function localGraph(entry: string): string[] {
 }
 
 describe("runtime-vm default entry is browser-clean", () => {
-  it("index.ts does not (transitively, one hop) re-export a node:* module", () => {
+  it("index.ts does not (transitively, at any depth) re-export a node:* module", () => {
     const idxImports = topLevelImports(join(here, "index.ts"));
     // index.ts should not import assets.ts (the node:fs module)
     expect(idxImports.some((i) => /\.\/assets(\.js)?$/.test(i))).toBe(false);
-    // and its direct local imports must themselves be node-free at the top level
-    for (const imp of idxImports) {
-      if (!imp.startsWith("./")) continue;
-      const f = join(here, imp.replace(/\.js$/, ".ts"));
+    // and EVERY module reachable from the default entry — not just index.ts's
+    // direct imports — must be node-free at the top level. A depth-≥2 import
+    // (e.g. a node:fs import reintroduced in port-registry.ts or
+    // workspace-snapshot.ts) would otherwise go undetected.
+    for (const f of localGraph(join(here, "index.ts"))) {
       const nested = topLevelImports(f).filter((n) => NODE_BUILTINS.test(n));
-      expect(nested, `${imp} pulls node builtins: ${nested}`).toEqual([]);
+      expect(nested, `${f} pulls node builtins: ${nested}`).toEqual([]);
     }
   });
 

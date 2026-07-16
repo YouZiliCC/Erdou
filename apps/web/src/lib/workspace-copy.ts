@@ -1,5 +1,11 @@
 import type { FileSystemApi } from "@erdou/runtime-contract";
-import { SKELETON_DIRS } from "@erdou/runtime-vm";
+// Final-review (Round 11c) Fix 2: `SKELETON_DIRS` used to be imported from
+// `@erdou/runtime-vm` directly, but that package's barrel re-exports the "v86"
+// package, which has real top-level side effects Rollup can't tree-shake —
+// build measurement showed this import alone pulled the ~700 KB v86 library
+// into the main bundle instead of the lazily-loaded vm-kernel chunk. `./kernel.js`
+// now holds the single browser-side copy of this constant; see its doc comment.
+import { SKELETON_DIRS } from "./kernel.js";
 
 /** Mirror the workspace from one sync FS to another so the destination becomes a
  *  copy of the source, NOT a union with its old contents. Skips the VM skeleton

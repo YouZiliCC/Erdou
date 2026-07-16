@@ -49,15 +49,23 @@ export async function loadFolderIntoVfs(
 }
 
 /** Write the VFS subtree at `vfsPath` back into the local directory (create/overwrite;
- *  does not delete files that exist only in the folder). */
+ *  does not delete files that exist only in the folder). `rootSkip` — additional
+ *  entry names to skip, but ONLY at the workspace root (`vfsPath === "/"`): the VM
+ *  kernel's six empty bind-mount stub dirs (bin/lib/usr/proc/dev/tmp) show up in
+ *  `readdir("/")` but are image-owned, not project files, so a folder save must not
+ *  write them to the user's disk (they'd falsely look like real project dirs and
+ *  desync a `.git`-tracked folder). A same-named directory nested deeper in the
+ *  project (e.g. `/src/bin/`) is a real project dir and is never skipped. */
 export async function saveVfsToFolder(
   fs: FileSystemApi,
   dir: DirHandleLike,
   vfsPath: string,
   mtimes?: MountMtimes,
+  rootSkip?: ReadonlySet<string>,
 ): Promise<void> {
   for (const entry of fs.readdir(vfsPath)) {
     if (SKIP.has(entry.name)) continue;
+    if (vfsPath === "/" && rootSkip?.has(entry.name)) continue;
     const child = joinP(vfsPath, entry.name);
     if (entry.type === "directory") {
       const sub = await dir.getDirectoryHandle(entry.name, { create: true });
