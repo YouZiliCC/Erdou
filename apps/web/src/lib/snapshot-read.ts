@@ -1,29 +1,31 @@
-import { BrowserRuntime } from "@erdou/runtime-browser";
-import type { Snapshot } from "@erdou/runtime-contract";
+import type { Snapshot, SnapshotFsNode } from "@erdou/runtime-contract";
 import type { FileChange } from "./studio.js";
 
 /** Reads a path's text at some point in time. Absent file -> null. */
 export type ReadText = (path: string) => string | null;
 
+const b64ToBytes = (b64: string): Uint8Array => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+
 /**
- * Reads file contents out of a {@link Snapshot} by restoring it into a
- * throwaway runtime. Open ONCE per computation and reuse across paths —
- * restoring deserializes the whole tree, so per-file restores would be wasteful.
+ * Reads file contents straight out of a {@link Snapshot}'s JSON tree — no
+ * runtime, no restore. Symlinks are not followed (diffs read workspace text
+ * files by their own paths).
  */
 export class SnapshotReader {
-  private constructor(private readonly runtime: BrowserRuntime) {}
+  private constructor(private readonly root: SnapshotFsNode) {}
 
-  static async open(snapshot: Snapshot): Promise<SnapshotReader> {
-    const runtime = new BrowserRuntime();
-    await runtime.boot();
-    await runtime.restoreSnapshot(snapshot);
-    return new SnapshotReader(runtime);
+  static open(snapshot: Snapshot): SnapshotReader {
+    return new SnapshotReader(snapshot.fs);
   }
 
   read(path: string): string | null {
-    return this.runtime.fs.exists(path)
-      ? new TextDecoder().decode(this.runtime.fs.readFile(path))
-      : null;
+    let node: SnapshotFsNode | undefined = this.root;
+    for (const part of path.split("/").filter(Boolean)) {
+      if (!node || node.type !== "directory") return null;
+      node = node.children[part];
+    }
+    if (!node || node.type !== "file") return null;
+    return new TextDecoder().decode(b64ToBytes(node.data));
   }
 }
 

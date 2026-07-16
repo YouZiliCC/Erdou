@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { buildFileChanges } from "./snapshot-read.js";
+import { buildFileChanges, SnapshotReader } from "./snapshot-read.js";
+import type { Snapshot } from "@erdou/runtime-contract";
 
 describe("buildFileChanges", () => {
   it("classifies create/modify/delete, skips net-unchanged, sorts by path", () => {
@@ -28,5 +29,39 @@ describe("buildFileChanges", () => {
     expect(changes.find((c) => c.path === "/a.txt")).toMatchObject({ before: "", after: "new" });
     expect(changes.find((c) => c.path === "/b.txt")).toMatchObject({ before: "old", after: "changed" });
     expect(changes.find((c) => c.path === "/d.txt")).toMatchObject({ before: "gone", after: "" });
+  });
+});
+
+describe("SnapshotReader", () => {
+  const b64 = (s: string): string => btoa(s);
+  const snap: Snapshot = {
+    version: 1,
+    createdAtMs: 0,
+    fs: {
+      type: "directory",
+      mode: 0o755,
+      children: {
+        "a.txt": { type: "file", mode: 0o644, data: b64("hello") },
+        sub: {
+          type: "directory",
+          mode: 0o755,
+          children: { "b.txt": { type: "file", mode: 0o644, data: b64("nested") } },
+        },
+        link: { type: "symlink", mode: 0o777, target: "/a.txt" },
+      },
+    },
+  };
+
+  it("reads files at any depth straight from the tree, without a runtime", () => {
+    const reader = SnapshotReader.open(snap);
+    expect(reader.read("/a.txt")).toBe("hello");
+    expect(reader.read("/sub/b.txt")).toBe("nested");
+  });
+
+  it("returns null for missing paths, directories, and symlinks", () => {
+    const reader = SnapshotReader.open(snap);
+    expect(reader.read("/missing")).toBeNull();
+    expect(reader.read("/sub")).toBeNull();
+    expect(reader.read("/link")).toBeNull();
   });
 });

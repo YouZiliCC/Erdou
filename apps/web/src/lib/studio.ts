@@ -515,7 +515,7 @@ export class Studio {
   /** Diff the paths touched during a turn against the snapshot taken at its start. */
   private async computeRunChanges(startSnap: Snapshot, changed: Set<string>): Promise<FileChange[]> {
     if (changed.size === 0) return [];
-    const before = await SnapshotReader.open(startSnap);
+    const before = SnapshotReader.open(startSnap);
     const after = (path: string): string | null =>
       this.fs.exists(path) ? new TextDecoder().decode(this.fs.readFile(path)) : null;
     return buildFileChanges(changed, (p) => before.read(p), after);
