@@ -11,6 +11,9 @@ const S_IFMT = 0o170000, S_IFDIR = 0o040000, S_IFREG = 0o100000, S_IFLNK = 0o120
 export interface Fs9pInode { mode: number; size: number; direntries?: Map<string, number>; symlink?: string; mtime: number; qid: { version: number }; }
 export interface Fs9p {
   inodes: Fs9pInode[];
+  /** idx -> file bytes (real v86 has this field; Write over-allocates ~3/2× while
+   *  inode.size holds the exact length — readers must clamp to inode.size). */
+  inodedata: Record<number, Uint8Array | undefined>;
   GetInode(idx: number): Fs9pInode;
   CreateFile(name: string, parentid: number): number;
   CreateDirectory(name: string, parentid: number): number;
