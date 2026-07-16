@@ -16,7 +16,7 @@ module.exports = {
       comment: "runtime-contract is the frozen boundary; it depends on no other @erdou package.",
       severity: "error",
       from: { path: "^packages/runtime-contract/src" },
-      to: { path: "^packages/(runtime-browser|conformance|model-gateway|agent-tools|agent-core|lang-python|runtime-wasi|bundler|tool-git)/src" },
+      to: { path: "^packages/(runtime-browser|runtime-vm|conformance|model-gateway|agent-tools|agent-core|lang-python|runtime-wasi|bundler|tool-git)/src" },
     },
     {
       name: "adapters-are-lean",
@@ -48,10 +48,17 @@ module.exports = {
       to: { path: "^packages/(conformance|model-gateway)/src" },
     },
     {
+      name: "runtime-vm-only-contract",
+      comment: "runtime-vm is a Runtime implementation; it may import only @erdou/runtime-contract (+ the v86 npm dep). Tests may import conformance and runtime-browser.",
+      severity: "error",
+      from: { path: "^packages/runtime-vm/src", pathNot: "\\.test\\.ts$" },
+      to: { path: "^packages/(runtime-browser|conformance|model-gateway|agent-tools|agent-core)/src" },
+    },
+    {
       name: "runtime-never-imports-model-or-agent",
       comment: "Runtime layers must never depend on the model gateway or any agent layer.",
       severity: "error",
-      from: { path: "^packages/runtime-(contract|browser)/src" },
+      from: { path: "^packages/runtime-(contract|browser|vm)/src" },
       to: { path: "(model-gateway|agent-)" },
     },
     {

@@ -155,6 +155,22 @@ importers:
 
   packages/runtime-contract: {}
 
+  packages/runtime-vm:
+    dependencies:
+      '@erdou/runtime-contract':
+        specifier: workspace:*
+        version: link:../runtime-contract
+      v86:
+        specifier: ^0.5.424
+        version: 0.5.424
+    devDependencies:
+      '@erdou/conformance':
+        specifier: workspace:*
+        version: link:../conformance
+      '@erdou/runtime-browser':
+        specifier: workspace:*
+        version: link:../runtime-browser
+
   packages/runtime-wasi:
     dependencies:
       '@erdou/runtime-contract':
@@ -1722,6 +1738,9 @@ packages:
     peerDependencies:
       browserslist: '>= 4.21.0'
 
+  v86@0.5.424:
+    resolution: {integrity: sha512-YEFGBGKVjipcUIQskAXzC9992guXg39r3Fst3rn/jNA9kiHnu5Q/dNQxXYPk6ZlWXcqxMNDaUkdEBsNY1AIYBg==}
+
   vite-node@2.1.0:
     resolution: {integrity: sha512-+ybYqBVUjYyIscoLzMWodus2enQDZOpGhcU6HdOVD6n8WZdk12w1GFL3mbnxLs7hPtRtqs1Wo5YF6/Tsr6fmhg==}
     engines: {node: ^18.0.0 || >=20.0.0}
@@ -3215,6 +3234,8 @@ snapshots:
       browserslist: 4.28.6
       escalade: 3.2.0
       picocolors: 1.1.1
+
+  v86@0.5.424: {}
 
   vite-node@2.1.0(@types/node@22.20.1):
     dependencies:
