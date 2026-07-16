@@ -288,6 +288,26 @@ export class Fs9pBridge {
     } finally { this.suppress--; }
   }
 
+  symlink(target: string, linkPath: string): void {
+    this.suppress++;
+    try {
+      const w = this.fs.SearchPath(this.ws(linkPath));
+      if (w.id !== -1) throw new ErrnoError("EEXIST", { path: linkPath, syscall: "symlink" });
+      const id = this.fs.CreateSymlink(this.base(linkPath), w.parentid, target);
+      this.paths.set(id, this.ws(linkPath));
+    } finally { this.suppress--; }
+    this.emitChange(this.cpath(linkPath), "create");
+  }
+
+  chmod(path: string, mode: number): void {
+    const w = this.fs.SearchPath(this.ws(path));
+    if (w.id === -1) throw new ErrnoError("ENOENT", { path, syscall: "chmod" });
+    const inode = this.fs.GetInode(w.id);
+    inode.mode = (inode.mode & ~0o7777) | (mode & 0o7777);
+    inode.qid.version++;
+    this.emitChange(this.cpath(path), "modify");
+  }
+
   async stat(path: string): Promise<Stat> {
     const w = this.fs.SearchPath(this.ws(path));
     if (w.id === -1) throw new ErrnoError("ENOENT", { path, syscall: "stat" });
