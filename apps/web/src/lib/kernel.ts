@@ -1,5 +1,6 @@
 import { BrowserRuntime } from "@erdou/runtime-browser";
 import type { FileSystemApi, Runtime } from "@erdou/runtime-contract";
+import type { PtySession } from "@erdou/runtime-vm";
 import { registerLanguages } from "./languages.js";
 
 /** Request/response shell session — the browser kernel's shape. Round 11's VM
@@ -17,10 +18,12 @@ export interface RpcShellSession {
  * synchronous workspace view (both kernels keep workspace truth host-side).
  */
 export interface Kernel {
-  readonly kind: "browser";
+  readonly kind: "browser" | "vm";
   readonly runtime: Runtime;
   readonly fs: FileSystemApi;
   openShell(): RpcShellSession;
+  /** Streaming interactive terminal — the VM kernel provides it; the browser kernel does not. */
+  openPty?(opts?: { cols?: number; rows?: number }): Promise<PtySession>;
 }
 
 export function createBrowserKernel(): Kernel {
