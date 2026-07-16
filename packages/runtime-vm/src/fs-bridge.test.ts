@@ -23,8 +23,18 @@ function makeFakeFs9p(): Fs9p & { root: number } {
     Search(parent: number, name: string) { const d = inodes[parent].direntries; return d && d.has(name) ? d.get(name) : -1; },
     SearchPath(path: string) {
       const parts = path.split("/").filter(Boolean);
-      let id = 0, parentid = -1, name = "";
-      for (const p of parts) { const nx = this.Search(id, p); parentid = id; name = p; if (nx === -1) return { id: -1, parentid, name }; id = nx; }
+      let id = 0, parentid = 0;
+      for (let i = 0; i < parts.length; i++) {
+        const p = parts[i]!;
+        const nx = this.Search(id, p);
+        if (nx === -1) {
+          // real v86: interior segment missing → parentid -1; leaf missing → real parent id
+          const isLeaf = i === parts.length - 1;
+          return { id: -1, parentid: isLeaf ? id : -1, name: p };
+        }
+        parentid = id; // parent of the segment just resolved
+        id = nx;
+      }
       return { id, parentid, name: parts[parts.length - 1] ?? "" };
     },
     GetFullPath(_i: number) { return ""; }, // dir-only in v86; the bridge maintains its own map
@@ -92,5 +102,32 @@ describe("Fs9pBridge", () => {
     await bridge.mkdir("/d", { recursive: true });
     await bridge.writeFile("/d/x", "1");
     expect((await bridge.readdir("/d")).map((e) => e.name)).toEqual(["x"]);
+  });
+
+  it("writeFile into a missing intermediate directory throws ENOENT (does not silently create)", async () => {
+    const fs = makeFakeFs9p(); bootWorkspace(fs);
+    const bridge = new Fs9pBridge(fs, () => {}); bridge.attach();
+    await expect(bridge.writeFile("/missing-dir/file.txt", "x")).rejects.toThrow(/ENOENT/);
+    // and the bogus "missing-dir" file was NOT created
+    await expect(bridge.readFile("/missing-dir")).rejects.toThrow(/ENOENT/);
+  });
+
+  it("rename moves a workspace file's content", async () => {
+    const fs = makeFakeFs9p(); bootWorkspace(fs);
+    const bridge = new Fs9pBridge(fs, () => {}); bridge.attach();
+    await bridge.writeFile("/from.txt", "data");
+    await bridge.rename("/from.txt", "/to.txt");
+    expect(new TextDecoder().decode(await bridge.readFile("/to.txt"))).toBe("data");
+    await expect(bridge.readFile("/from.txt")).rejects.toThrow(/ENOENT/);
+  });
+
+  it("stat reports type and rejects a missing path", async () => {
+    const fs = makeFakeFs9p(); bootWorkspace(fs);
+    const bridge = new Fs9pBridge(fs, () => {}); bridge.attach();
+    await bridge.writeFile("/f.txt", "hi");
+    expect((await bridge.stat("/f.txt")).type).toBe("file");
+    await bridge.mkdir("/d", { recursive: true });
+    expect((await bridge.stat("/d")).type).toBe("directory");
+    await expect(bridge.stat("/nope")).rejects.toThrow(/ENOENT/);
   });
 });
