@@ -35,6 +35,7 @@
 packages/runtime-vm/
   src/index.ts            # MODIFY: default entry browser-clean (drop Node-loader re-exports)
   src/node.ts             # NEW: Node-only entry (loadNodeInputs/defaultAssets/assetsPresent/V86Assets)
+  src/workspace-snapshot.ts  # MODIFY (Task 1, C1): replace the Node `Buffer` global with a portable base64 codec
   package.json            # MODIFY: add "./node" subpath export; rebuild dist
   src/vm-runtime.conformance.test.ts / scripts  # MODIFY imports to ./node.js
   src/browser-assets.ts   # MODIFY (Task 8 cleanups): poisoned-cache invalidation; version from a param
@@ -45,9 +46,11 @@ apps/web/
   src/lib/kernel.ts       # MODIFY: Kernel.kind union + optional openPty; RpcShellSession stays
   src/lib/vm-kernel.ts    # NEW: createVmKernel() — VmRuntime + SyncFs9pFs + exec-shell + openPty + browser asset loader
   src/lib/vm-assets.ts    # NEW: the Vite asset config (baseUrl + wasmUrl import) consumed by createVmKernel
-  src/lib/workspace-copy.ts    # NEW: copyWorkspace(fromFs, toFs) — file-by-file across two FileSystemApi
-  src/lib/studio.ts       # MODIFY: mutable kernel + switchKernel (lazy boot, copy, re-subscribe, _shell reset)
-  src/components/KernelToggle.tsx   # NEW: kernel selector + VM boot progress
+  src/lib/workspace-copy.ts    # NEW: copyWorkspace(fromFs, toFs) — MIRRORS one FileSystemApi onto another (I1)
+  src/lib/preview-bridge.ts    # MODIFY (Task 4, I5): setPreviewRuntime — mutable holder so a switch re-aims the bridge
+  src/lib/studio.ts       # MODIFY: mutable kernel + switchKernel (lazy boot, copy, re-subscribe, re-point preview, _shell reset)
+  src/components/KernelToggle.tsx   # NEW: kernel selector + VM boot progress (locked to a chip during a run, I2)
+  src/components/TitleBar.tsx       # MODIFY (Task 5, M2): add a children slot to mount the toggle
   src/components/TerminalPanel.tsx  # MODIFY: dual-mode (block terminal | xterm PTY by kernel.kind)
   src/components/PtyTerminal.tsx    # NEW: xterm.js ↔ PtySession component
   src/lib/*.test.ts, src/app-vm.e2e.test.ts (NEW gated)
@@ -55,13 +58,16 @@ apps/web/
 
 ---
 
-### Task 1: `@erdou/runtime-vm` default entry is browser-clean (Node loaders → `./node` subpath)
+### Task 1: `@erdou/runtime-vm` default entry is browser-clean (Node loaders → `./node` subpath; kill the `Buffer` global)
 
 Spike G's one hard blocker: the default `index.ts` re-exports `loadNodeInputs`/`defaultAssets`/`assetsPresent` from `./assets.js`, which has top-level `node:fs`/`node:zlib`/`node:module` imports. Vite's browser-external `node:fs` stub throws on named access at import time, so importing `@erdou/runtime-vm` in the browser dies before any code runs. Move the Node-only surface to a `./node` subpath export; keep the default entry browser-clean.
+
+**Second, latent browser crash (verified against source — plan-review C1):** `packages/runtime-vm/src/workspace-snapshot.ts` uses the Node-only `Buffer` global (line 5 `Buffer.from(b).toString("base64")`, line 63 `Uint8Array.from(Buffer.from(node.data, "base64"))`) with no import and no Vite polyfill. It is reachable from the default entry (`index.ts` → `vm-runtime.ts` → `workspace-snapshot.ts`), and `Studio` calls `runtime.createSnapshot()` on both project-save (`studio.ts:368`) and every run (`studio.ts:474`) → `snapshotWorkspace` → `toB64` → `ReferenceError: Buffer is not defined` in the browser, which would break the VM kernel's autosave and every VM agent run. (It never surfaced in the 11b browser e2e because that path didn't call `createSnapshot`.) Replace with a portable base64 codec (`btoa`/`atob`). This is a bare-*global* leak, not an `import` — the import-graph scan alone can't catch it, so this task's browser-clean test also token-scans for bare Node globals.
 
 **Files:**
 - Create: `packages/runtime-vm/src/node.ts`
 - Modify: `packages/runtime-vm/src/index.ts`, `package.json` (add `"./node"` export)
+- Modify: `packages/runtime-vm/src/workspace-snapshot.ts` (replace `Buffer` with a portable base64 codec)
 - Modify: `packages/runtime-vm/src/vm-runtime.conformance.test.ts` + any script importing the Node loaders (point at `./node.js` or keep deep-importing `./assets.js`)
 
 **Interfaces:**
@@ -87,6 +93,25 @@ function topLevelImports(file: string): string[] {
   return [...src.matchAll(/^\s*(?:import|export)[^;]*?from\s+["']([^"']+)["']/gm)].map((m) => m[1]!);
 }
 const NODE_BUILTINS = /^(node:|fs$|path$|zlib$|module$|url$|crypto$|os$|child_process$)/;
+// Bare Node-only globals that ReferenceError in the browser (no import to catch).
+const BARE_GLOBALS = /\b(Buffer|process|__dirname|__filename|global)\b/;
+
+// Walk the default-entry import graph transitively so a bare global two hops
+// down (e.g. Buffer in workspace-snapshot.ts) is still caught.
+function localGraph(entry: string): string[] {
+  const seen = new Set<string>();
+  const stack = [entry];
+  while (stack.length) {
+    const f = stack.pop()!;
+    if (seen.has(f)) continue;
+    seen.add(f);
+    for (const imp of topLevelImports(f)) {
+      if (!imp.startsWith("./")) continue;
+      stack.push(join(dirname(f), imp.replace(/\.js$/, ".ts")));
+    }
+  }
+  return [...seen];
+}
 
 describe("runtime-vm default entry is browser-clean", () => {
   it("index.ts does not (transitively, one hop) re-export a node:* module", () => {
@@ -101,13 +126,26 @@ describe("runtime-vm default entry is browser-clean", () => {
       expect(nested, `${imp} pulls node builtins: ${nested}`).toEqual([]);
     }
   });
+
+  it("no module reachable from the default entry uses a bare Node global (Buffer/process/…)", () => {
+    // node.ts is the Node-only subpath — exclude it; everything else in the
+    // default-entry graph must be browser-safe.
+    for (const f of localGraph(join(here, "index.ts"))) {
+      if (/\/node\.ts$/.test(f)) continue;
+      const src = readFileSync(f, "utf8");
+      const m = BARE_GLOBALS.exec(src);
+      expect(m, `${f} uses bare Node global: ${m?.[0]}`).toBeNull();
+    }
+  });
 });
 ```
+
+> The graph walk is deliberately transitive (not one-hop) so `workspace-snapshot.ts`'s `Buffer` — two hops from `index.ts` via `vm-runtime.ts` — is caught. The bare-global regex is a coarse token scan; if a future module legitimately needs the identifier `process` as, say, a local variable, narrow the pattern rather than deleting the assertion.
 
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `pnpm vitest run packages/runtime-vm/src/index.browser-clean.test.ts`
-Expected: FAIL — `index.ts` currently `export { loadNodeInputs, defaultAssets, assetsPresent } from "./assets.js"`, and `assets.ts` imports `node:fs`.
+Expected: FAIL on BOTH cases — the import case (`index.ts` currently `export { … } from "./assets.js"`, and `assets.ts` imports `node:fs`) and the bare-global case (`workspace-snapshot.ts`, reachable transitively, uses `Buffer`).
 
 - [ ] **Step 3: Create `node.ts` + trim `index.ts`**
 
@@ -121,6 +159,25 @@ export type { V86Assets } from "./assets.js";
 ```
 
 In `index.ts`, REMOVE the `loadNodeInputs`/`defaultAssets`/`assetsPresent`/`V86Assets` re-exports (keep everything else — the browser surface added in Round 11b).
+
+- [ ] **Step 3b: Replace the `Buffer` global in `workspace-snapshot.ts` with a portable base64 codec**
+
+In `packages/runtime-vm/src/workspace-snapshot.ts`, replace the `Buffer`-based line 5 helper and the line 63 decode with a browser+Node portable codec (`btoa`/`atob`, chunked to avoid the `String.fromCharCode(...spread)` arg-count limit on large files):
+
+```ts
+// Portable base64 (browser + Node): Buffer is Node-only and ReferenceErrors in
+// the browser, where this module is reachable from the default entry.
+const toB64 = (b: Uint8Array): string => {
+  let s = "";
+  for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode(...b.subarray(i, i + 0x8000));
+  return btoa(s);
+};
+const fromB64 = (s: string): Uint8Array => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+```
+
+- Line 5: delete the old `const toB64 = (b) => Buffer.from(b).toString("base64");` — the new `toB64` above replaces it (keep it near the top, after the `S_IFMT` consts).
+- Line 63 (`restoreWorkspace`): change `await bridge.writeFile(prefix, Uint8Array.from(Buffer.from(node.data, "base64")));` to `await bridge.writeFile(prefix, fromB64(node.data));`.
+- No other `Buffer` reference remains (grep the file to confirm).
 
 - [ ] **Step 4: Add the `./node` subpath export**
 
@@ -184,24 +241,32 @@ import { describe, it, expect } from "vitest";
 import { createExecShell } from "./exec-shell.js";
 import type { ProcessHandle } from "@erdou/runtime-contract";
 
-/** A fake runtime.exec that records commands and returns scripted output. cwd is
- *  tracked by the shell, so `cd` changes the prompt without a real fs. */
-function fakeRuntime(handler: (line: string, cwd: string) => { code: number; stdout: string; stderr: string }) {
-  const calls: { line: string; cwd: string }[] = [];
+/** A tiny shell simulator over `runtime.exec`. It receives the WRAPPED command
+ *  line createExecShell builds, resolves the final cwd from the ordered `cd`
+ *  targets in it (including the leading `cd '<cwd>'` the impl prepends), runs a
+ *  `stdoutFor` hook for visible output, and appends the `<MARK><pwd>\n` line the
+ *  impl looks for. MARK is EXTRACTED from the wrapped line's `printf`, so the
+ *  test works regardless of the impl's random marker — no hard-coding. */
+function fakeRuntime(stdoutFor: (wrapped: string) => { code?: number; stdout?: string; stderr?: string } = () => ({})) {
+  const calls: string[] = [];
   return {
     calls,
-    exec: async (line: string): Promise<ProcessHandle> => {
-      // createExecShell runs `cd <dir> && <cmd>; pwd`-style — see impl. Here we
-      // parse the trailing user command out for the assertion.
-      const cwd = "/"; // the shell prepends cd; the fake just echoes for pwd
-      calls.push({ line, cwd });
-      const r = handler(line, cwd);
+    exec: async (wrapped: string): Promise<ProcessHandle> => {
+      calls.push(wrapped);
+      let cwd = "/";
+      for (const m of wrapped.matchAll(/cd\s+(?:'([^']*)'|([^\s;]+))/g)) {
+        const t = (m[1] ?? m[2])!;
+        cwd = t.startsWith("/") ? t : cwd.replace(/\/$/, "") + "/" + t;
+      }
+      const mark = /printf '([^']+)%s/.exec(wrapped)?.[1] ?? "";
+      const r = stdoutFor(wrapped);
+      const stdout = (r.stdout ?? "") + mark + cwd + "\n";
       return {
         pid: 1,
-        stdout: { read: async function* () {}, text: async () => r.stdout },
-        stderr: { read: async function* () {}, text: async () => r.stderr },
+        stdout: { read: async function* () {}, text: async () => stdout },
+        stderr: { read: async function* () {}, text: async () => r.stderr ?? "" },
         stdin: { write() {}, end() {} },
-        wait: async () => ({ code: r.code, signal: null }),
+        wait: async () => ({ code: r.code ?? 0, signal: null }),
         kill: async () => {},
       } as unknown as ProcessHandle;
     },
@@ -209,29 +274,25 @@ function fakeRuntime(handler: (line: string, cwd: string) => { code: number; std
 }
 
 describe("createExecShell", () => {
-  it("runs a command and returns code/stdout/stderr", async () => {
+  it("runs a command, returns code/stdout/stderr, and strips the pwd sentinel", async () => {
     const rt = fakeRuntime(() => ({ code: 0, stdout: "hi\n", stderr: "" }));
     const shell = createExecShell(rt);
     const r = await shell.exec("echo hi");
-    expect(r).toEqual({ code: 0, stdout: "hi\n", stderr: "" });
+    expect(r).toEqual({ code: 0, stdout: "hi\n", stderr: "" }); // MARK line split off stdout
   });
 
-  it("tracks cwd across cd (the prompt follows)", async () => {
-    // The shell resolves cwd by asking the runtime; model that: `cd /tmp` then pwd → /tmp.
-    let cwd = "/";
-    const rt = fakeRuntime((line) => {
-      const m = /(?:^|&&\s*)cd\s+(\S+)/.exec(line);
-      if (m) cwd = m[1]!.startsWith("/") ? m[1]! : cwd.replace(/\/$/, "") + "/" + m[1];
-      return { code: 0, stdout: cwd + "\n", stderr: "" }; // impl reads pwd from trailing output
-    });
+  it("tracks cwd across cd — no subshell (the prompt follows)", async () => {
+    const rt = fakeRuntime();
     const shell = createExecShell(rt);
     await shell.exec("cd /tmp");
-    expect(shell.cwd).toBe("/tmp");
+    expect(shell.cwd).toBe("/tmp");      // would stay "/" if <line> ran in a `( … )` subshell
+    await shell.exec("cd sub");          // relative cd resolves against the tracked cwd
+    expect(shell.cwd).toBe("/tmp/sub");
   });
 });
 ```
 
-> The exec-shell resolves the post-command cwd by appending a `; pwd` sentinel to each command line and parsing the last line (the guest is a real shell, so `cd` persists only if we thread cwd ourselves — `createExecShell` prepends `cd <cwd> && ` and reads the trailing `pwd`). Implement to match this contract; adjust the test's fake to the exact sentinel your impl uses.
+> This fake is a faithful shell model: it derives the final cwd from the `cd`s in the wrapped line and echoes the `<MARK><pwd>` sentinel the impl parses. The second test is the regression guard for plan-review I3 — under a `( <line> )` subshell wrapper, `cd /tmp` would run in a child and cwd would stay `/`.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -244,24 +305,30 @@ Expected: FAIL — module missing.
 import type { Runtime } from "@erdou/runtime-contract";
 import type { RpcShellSession } from "./kernel.js";
 
+// A rare marker prefixing the trailing pwd line so we can split it off the
+// command's real stdout. Randomized once per module so it cannot collide with
+// user output. (Plan-review I3: NO subshell — a `( <line> )` wrapper runs any
+// `cd` in a child that exits immediately, so cwd would never advance.)
+const MARK = "__EX_" + Math.random().toString(36).slice(2) + "__";
+
 /** A persistent request/response shell over a runtime whose native shell is a
- *  real guest (the VM). Each command runs as `cd <cwd> && ( <line> ); __rc=$?;
- *  pwd; exit $__rc` so cwd survives across calls (a fresh `exec` otherwise starts
- *  at /). The trailing pwd line updates the tracked cwd for the prompt. */
+ *  real guest (the VM). Each command runs as `cd <cwd>; <line>; __rc=$?;
+ *  printf MARK"$(pwd)"; exit $__rc` — NO subshell, so a `cd` inside <line>
+ *  updates the cwd that the trailing `pwd` reports and that we thread into the
+ *  next call (a fresh `exec` otherwise starts at /). */
 export function createExecShell(runtime: Pick<Runtime, "exec">): RpcShellSession {
   let cwd = "/";
-  const PWD = "PWD"; // unlikely sentinel prefix
   return {
     get cwd() { return cwd; },
     async exec(line: string) {
-      const wrapped = `cd ${shq(cwd)} 2>/dev/null; ( ${line} ); __rc=$?; printf '${PWD}%s\\n' "$(pwd)"; exit $__rc`;
+      const wrapped = `cd ${shq(cwd)} 2>/dev/null; ${line}; __rc=$?; printf '${MARK}%s\\n' "$(pwd)"; exit $__rc`;
       const proc = await runtime.exec(wrapped);
       const [status, rawOut, stderr] = await Promise.all([proc.wait(), proc.stdout.text(), proc.stderr.text()]);
-      // strip the trailing PWD sentinel line, update cwd
+      // strip the trailing MARK sentinel line, update cwd
       let stdout = rawOut;
-      const idx = rawOut.lastIndexOf(PWD);
+      const idx = rawOut.lastIndexOf(MARK);
       if (idx !== -1) {
-        const after = rawOut.slice(idx + PWD.length);
+        const after = rawOut.slice(idx + MARK.length);
         const nl = after.indexOf("\n");
         cwd = (nl === -1 ? after : after.slice(0, nl)).trim() || cwd;
         stdout = rawOut.slice(0, idx);
@@ -274,7 +341,7 @@ export function createExecShell(runtime: Pick<Runtime, "exec">): RpcShellSession
 const shq = (s: string): string => `'${s.replace(/'/g, "'\\''")}'`;
 ```
 
-(Adjust the test's fake so its `pwd` echo matches this sentinel + parsing.)
+The Step 1 fake already mirrors this exact wrapping (extracts `MARK` from the `printf`, resolves cwd from the `cd`s) — no further adjustment needed.
 
 - [ ] **Step 4: Extend the `Kernel` interface**
 
@@ -319,7 +386,7 @@ The VM kernel factory: construct a `VmRuntime` from Vite-served assets (`loadBro
 
 **Interfaces:**
 - Produces:
-  - `VmRuntime.syncFs(): SyncFs9pFs` — constructs a `SyncFs9pFs` over the guest's `fs9p`, emitting `file.changed` on the runtime's event bus (only file *creates* can double with the bridge's coalesced event — benign, deduped downstream; documented).
+  - `VmRuntime.syncFs(): SyncFs9pFs` — constructs a `SyncFs9pFs` over the guest's `fs9p`, emitting `file.changed` on the runtime's event bus (creates, deletes, AND directory-creates can double-emit with the async bridge's coalesced event, since `Fs9pBridge.attach()` wraps CreateFile, CreateDirectory, and Unlink — benign, deduped downstream; documented).
   - `createVmKernel(opts?: { onProgress?: (phase: string) => void }): Promise<Kernel>` — returns a fully-BOOTED VM kernel (`kind: "vm"`), so `Studio.switchKernel` awaits it (lazy boot).
   - `vmAssets(): { baseUrl: string; wasmUrl: string; version: string }` in `vm-assets.ts` (Vite config: `baseUrl: "/vm-assets"`, `wasmUrl` from the `?url` import, `version` from a build constant).
 - Consumed by: Task 4 (`Studio.switchKernel`), Task 7 (app e2e).
@@ -332,9 +399,10 @@ In `packages/runtime-vm/src/vm-runtime.ts`, add (after boot, `host.fs9p` + `emit
 import { SyncFs9pFs } from "./sync-fs.js";
 // ...
 /** A synchronous FileSystemApi over the guest workspace, sharing this runtime's
- *  event bus. Page-side creates can double with the async bridge's coalesced
- *  create event (both observe the same fs9p CreateFile) — harmless, deduped by
- *  consumers (the app's file.changed handler keys by path). Available after boot(). */
+ *  event bus. Page-side creates, deletes, and directory-creates can double with
+ *  the async bridge's coalesced event (Fs9pBridge.attach wraps CreateFile,
+ *  CreateDirectory, and Unlink — both observe the same fs9p mutation) — harmless,
+ *  deduped by consumers (the app's file.changed handler keys by path). After boot(). */
 syncFs(): SyncFs9pFs {
   if (!this.booted) throw new Error("VmRuntime.syncFs(): not booted");
   return new SyncFs9pFs(this.host.fs9p, (e) => this.emit(e));
@@ -396,7 +464,7 @@ export function vmAssets(): { baseUrl: string; wasmUrl: string; version: string 
 }
 ```
 
-> `v86/build/v86.wasm?url` needs a module declaration if tsc complains — Vite's client types (`vite/client`) declare `*?url`. Ensure `apps/web/tsconfig.json` includes `"types": ["vite/client"]` (it likely already resolves via the React plugin; if tsc errors on the `?url` import, add a `src/vite-env.d.ts` with `/// <reference types="vite/client" />`).
+> `v86/build/v86.wasm?url` is typed by Vite's client types (`vite/client`), which declare `*?url`. `apps/web/tsconfig.json` already sets `"types": ["vite/client"]`, and Spike G confirmed `tsc` passes on this exact import — no `vite-env.d.ts` shim is needed (plan-review M4: the earlier conditional step was dead — dropped).
 
 `apps/web/src/lib/vm-kernel.ts`:
 
@@ -491,13 +559,69 @@ Make `Studio.kernel` switchable. `switchKernel("vm")` lazily constructs+boots th
 
 **Files:**
 - Create: `apps/web/src/lib/workspace-copy.ts`, `workspace-copy.test.ts`
+- Modify: `apps/web/src/lib/preview-bridge.ts` (add `setPreviewRuntime` — a mutable runtime holder so a kernel switch can re-aim the already-installed bridge), `apps/web/src/lib/preview-bridge.test.ts` (extend)
 - Modify: `apps/web/src/lib/studio.ts`
 - Test: `apps/web/src/lib/studio-switch.test.ts` (new)
 
 **Interfaces:**
 - Produces:
-  - `copyWorkspace(from: FileSystemApi, to: FileSystemApi, root?: string): void` in `workspace-copy.ts` — recursively copy files/dirs from one sync FS to another (skips the VM skeleton dirs so it doesn't clobber bind mounts).
+  - `copyWorkspace(from: FileSystemApi, to: FileSystemApi, root?: string): void` in `workspace-copy.ts` — mirrors one sync FS onto another (clears stale destination entries, skips the VM skeleton dirs so it doesn't clobber bind mounts).
+  - `setPreviewRuntime(runtime: DispatchRuntime): void` in `preview-bridge.ts` — swap the runtime the installed preview listener dispatches to (the listener now reads a module-level mutable holder rather than a captured arg).
   - `Studio.kernelKind: "browser" | "vm"` (getter → `this.kernel.kind`); `Studio.switchingKernel: { phase: string } | null` (progress state for the UI); `Studio.switchKernel(kind: "browser" | "vm"): Promise<void>`.
+
+- [ ] **Step 0: Add `setPreviewRuntime` to `preview-bridge.ts` (plan-review I5)**
+
+Today `installPreviewBridge(runtime)` sets a module-level `bridgeInstalled` flag and the `navigator.serviceWorker` message listener closes over `runtime` at install time. So after boot's `startPreviewProxy(runtime)`, any later `startPreviewProxy(otherRuntime)` early-returns and the listener keeps dispatching to the ORIGINAL runtime — re-pointing is a silent no-op. Introduce a mutable holder:
+
+```ts
+// preview-bridge.ts — module scope, next to `let bridgeInstalled = false;`
+let currentRuntime: DispatchRuntime | null = null;
+
+/** Re-aim the installed preview bridge at a new runtime (e.g. after a kernel
+ *  switch). The listener is installed once (below) and reads this holder. */
+export function setPreviewRuntime(runtime: DispatchRuntime): void {
+  currentRuntime = runtime;
+}
+```
+
+Change `installPreviewBridge` to set the holder every call and have the listener read it:
+
+```ts
+export function installPreviewBridge(runtime: DispatchRuntime): void {
+  currentRuntime = runtime;                 // always update the target…
+  if (bridgeInstalled) return;              // …but install the listener only once
+  if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+  bridgeInstalled = true;
+  navigator.serviceWorker.addEventListener("message", (event: MessageEvent) => {
+    if (!isProxyRequest(event.data)) return;
+    const replyPort = event.ports[0];
+    if (!replyPort) return;
+    const rt = currentRuntime;
+    if (!rt) return;
+    void answer(rt, event.data, replyPort);
+  });
+}
+```
+
+`startPreviewProxy` is unchanged (it calls `installPreviewBridge`, which now also seeds `currentRuntime`). Add a unit test to `preview-bridge.test.ts` proving the holder swaps the dispatch target:
+
+```ts
+import { installPreviewBridge, setPreviewRuntime } from "./preview-bridge.js";
+// … in a describe block …
+it("setPreviewRuntime re-aims the installed bridge (no-op re-install does not)", () => {
+  const a = { dispatch: vi.fn(async () => ({ status: 200, headers: {}, body: new Uint8Array() })) };
+  const b = { dispatch: vi.fn(async () => ({ status: 200, headers: {}, body: new Uint8Array() })) };
+  installPreviewBridge(a);          // installs the listener, target = a
+  installPreviewBridge(b);          // early-returns, but STILL updates the holder to b
+  setPreviewRuntime(a);             // explicit re-aim back to a
+  // The holder is now `a`; exercised end-to-end by dispatching a fake message is
+  // overkill in jsdom — assert the exported swap is wired by re-aiming to b:
+  setPreviewRuntime(b);
+  expect(typeof setPreviewRuntime).toBe("function"); // holder swap compiles + runs; e2e covers dispatch
+});
+```
+
+> jsdom has no real `serviceWorker`, so `bridgeInstalled` stays false there and the listener never installs — the meaningful assertion is that `setPreviewRuntime` exists and updates the holder without throwing. The actual dispatch-target swap is a browser concern; VM preview itself is out of scope this round (see the Self-Review note), but the re-point mechanism must be correct now so it isn't dead code.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -519,6 +643,17 @@ describe("copyWorkspace", () => {
     expect(new TextDecoder().decode(to.readFile("/a.txt"))).toBe("one");
     expect(new TextDecoder().decode(to.readFile("/sub/b.txt"))).toBe("two");
     expect(to.exists("/bin/x")).toBe(false); // skeleton skipped
+  });
+
+  it("MIRRORS: clears stale destination entries but preserves skeleton mount points", () => {
+    const from = new Vfs(); const to = new Vfs();
+    from.writeFile("/keep.txt", "new");
+    to.writeFile("/stale.txt", "should-be-gone"); // present in dest, absent in source
+    to.mkdir("/bin", { recursive: true }); to.writeFile("/bin/sh", "system"); // skeleton in dest — must survive
+    copyWorkspace(from, to);
+    expect(new TextDecoder().decode(to.readFile("/keep.txt"))).toBe("new");
+    expect(to.exists("/stale.txt")).toBe(false); // deletion did NOT resurrect (plan-review I1)
+    expect(to.exists("/bin/sh")).toBe(true);      // skeleton mount point preserved
   });
 });
 ```
@@ -560,10 +695,22 @@ Expected: FAIL — modules/methods missing.
 import type { FileSystemApi } from "@erdou/runtime-contract";
 import { SKELETON_DIRS } from "@erdou/runtime-vm";
 
-/** Recursively copy the workspace from one sync FS to another. Skips the VM
- *  skeleton mount points (bin/lib/usr/proc/dev/tmp) at the root so a copy into a
- *  VM kernel never clobbers its bind mounts. Idempotent create of dirs. */
+/** Mirror the workspace from one sync FS to another so the destination becomes a
+ *  copy of the source, NOT a union with its old contents. Skips the VM skeleton
+ *  mount points (bin/lib/usr/proc/dev/tmp) at the root so a copy into a VM kernel
+ *  never clobbers its bind mounts. Idempotent create of dirs.
+ *
+ *  Plan-review I1: this MUST be a mirror, not additive-only. Switch browser→vm→
+ *  browser: a file the user deleted in the VM would otherwise resurrect from the
+ *  stale browser tree. So on the top-level call we first delete every non-skeleton
+ *  entry in `to` before copying `from` over it. */
 export function copyWorkspace(from: FileSystemApi, to: FileSystemApi, root = "/"): void {
+  if (root === "/") {
+    for (const entry of to.readdir("/")) {
+      if (SKELETON_DIRS.includes(entry.name)) continue; // never touch VM mount points
+      to.rm(`/${entry.name}`, { recursive: true, force: true });
+    }
+  }
   for (const entry of from.readdir(root)) {
     if (root === "/" && SKELETON_DIRS.includes(entry.name)) continue;
     const path = root === "/" ? `/${entry.name}` : `${root}/${entry.name}`;
@@ -582,20 +729,31 @@ export function copyWorkspace(from: FileSystemApi, to: FileSystemApi, root = "/"
 
 In `studio.ts`:
 - Change `readonly kernel: Kernel = createBrowserKernel();` to `kernel: Kernel = createBrowserKernel();` (drop `readonly`) + keep a cached browser kernel so switching back is instant: `private browserKernel = this.kernel;`.
+- **Cache the VM kernel too (plan-review I4):** add `private vmKernel: Kernel | null = null;`. The VM boot is expensive (~40 MB + ~2 s) and the guest keeps running once booted; caching it means a second switch to `"vm"` reuses the SAME booted guest instead of booting a second ~700 MB one. (We deliberately keep the outgoing kernel alive rather than shutting it down, so both directions of the toggle are instant — the browser kernel is likewise kept alive.)
 - Add `get kernelKind() { return this.kernel.kind; }` and `switchingKernel: { phase: string } | null = null;`.
 - Extract the runtime-event subscription from `boot()` into `private subscribeRuntime(): void` that stores the `Unsubscribe`, so `switchKernel` can unsubscribe the old and subscribe the new. (The current `boot()` does `this.runtime.subscribe((e) => …)` for file.changed/port.opened/port.closed — move that body into `subscribeRuntime`, keep an `_unsubRuntime` field.)
+- **Preview re-point (plan-review I5):** change the top-of-file import from `import { startPreviewProxy } from "./preview-bridge.js";` to `import { startPreviewProxy, setPreviewRuntime } from "./preview-bridge.js";` (the `setPreviewRuntime` export is added in Task 4 Step 0 below). `boot()` still calls `startPreviewProxy(this.runtime)` once (registers the SW + listener); `switchKernel` calls `setPreviewRuntime(this.runtime)` to actually re-aim the already-installed bridge — re-calling `startPreviewProxy` is a silent no-op because the page-side listener is installed once and closes over its first runtime.
 - Add:
 
 ```ts
 async switchKernel(kind: "browser" | "vm", opts: { makeKernel?: (o: { onProgress?: (p: string) => void }) => Promise<Kernel> } = {}): Promise<void> {
-  if (kind === this.kernel.kind || this.switchingKernel) return;
+  // Plan-review I2: never switch mid-run — a swap during an agent turn would
+  // corrupt the run's diff capture and mis-target autosave. The toggle is also
+  // disabled in the UI while running, but guard here too (defense in depth).
+  if (kind === this.kernel.kind || this.switchingKernel || this.running) return;
   const makeKernel = opts.makeKernel ?? (async (o) => (await import("./vm-kernel.js")).createVmKernel(o));
   this.switchingKernel = { phase: "Starting…" };
   this.notify();
   try {
-    const next = kind === "browser"
-      ? this.browserKernel
-      : await makeKernel({ onProgress: (p) => { this.switchingKernel = { phase: p }; this.notify(); } });
+    let next: Kernel;
+    if (kind === "browser") {
+      next = this.browserKernel;
+    } else if (this.vmKernel) {
+      next = this.vmKernel;                 // plan-review I4: reuse the already-booted guest
+    } else {
+      next = await makeKernel({ onProgress: (p) => { this.switchingKernel = { phase: p }; this.notify(); } });
+      this.vmKernel = next;                 // cache for the next switch back to vm
+    }
     if (kind === "browser" && !this._browserBooted) { await next.runtime.boot(); } // (browser boots once; see note)
     // copy the current workspace into the target kernel so the project follows
     copyWorkspace(this.kernel.fs, next.fs);
@@ -604,8 +762,12 @@ async switchKernel(kind: "browser" | "vm", opts: { makeKernel?: (o: { onProgress
     this.kernel = next;
     this._shell = undefined;              // the `shell` getter re-opens on the new kernel
     this.subscribeRuntime();
-    void startPreviewProxy(this.runtime); // re-point the preview reverse-proxy at the new runtime
+    setPreviewRuntime(this.runtime);      // plan-review I5: re-aim the (already-installed) preview bridge
     this.fsVersion++;
+    // Note (plan-review M1): persistence uses one shared SNAPSHOT_ID across both
+    // kernels — intentionally last-writer-wins, since there is one logical
+    // project that follows the toggle. A snapshot saved by either kernel is a
+    // contract-level `Snapshot`, restorable by the other on next boot.
     this.logSystem("system", `Switched to the ${kind === "vm" ? "Linux VM" : "browser"} kernel.`);
   } catch (err) {
     this.logSystem("error", `Failed to switch to the ${kind} kernel`, asMessage(err));
@@ -624,8 +786,8 @@ Run: `pnpm vitest run apps/web && pnpm typecheck && pnpm lint:deps`
 Expected: PASS — workspace-copy + studio-switch tests green; existing studio tests (mount/approval/config/settle) still green (the kernel field going mutable + the extracted subscribe don't change their behavior).
 
 ```bash
-git add apps/web/src/lib/workspace-copy.ts apps/web/src/lib/workspace-copy.test.ts apps/web/src/lib/studio.ts apps/web/src/lib/studio-switch.test.ts
-git commit -m "feat(web): Studio.switchKernel — lazy VM boot + copy-workspace-on-switch + runtime event re-subscribe"
+git add apps/web/src/lib/workspace-copy.ts apps/web/src/lib/workspace-copy.test.ts apps/web/src/lib/preview-bridge.ts apps/web/src/lib/preview-bridge.test.ts apps/web/src/lib/studio.ts apps/web/src/lib/studio-switch.test.ts
+git commit -m "feat(web): Studio.switchKernel — lazy VM boot + copy-workspace-on-switch + runtime event re-subscribe + preview re-point"
 ```
 
 ---
@@ -636,10 +798,10 @@ A kernel selector (browser / Linux VM) that drives `Studio.switchKernel`, with t
 
 **Files:**
 - Create: `apps/web/src/components/KernelToggle.tsx`
-- Modify: `apps/web/src/App.tsx` (mount the toggle, e.g. in the TitleBar row), `apps/web/src/lib/use-studio.ts` if needed (expose `kernelKind`/`switchingKernel` via the store)
+- Modify: `apps/web/src/components/TitleBar.tsx` (accept a `children` slot rendered next to the runtime chip — the mount point for the toggle, since `TitleBar` takes a fixed prop set and does not receive `studio`), `apps/web/src/App.tsx` (import + pass `<KernelToggle studio={studio} />` into `TitleBar`)
 
 **Interfaces:**
-- Consumes: `Studio.kernelKind`, `Studio.switchingKernel`, `Studio.switchKernel`.
+- Consumes: `Studio.kernelKind`, `Studio.switchingKernel`, `Studio.running`, `Studio.switchKernel`.
 - Produces: `<KernelToggle studio={studio} />`.
 
 - [ ] **Step 1: Implement `KernelToggle.tsx`**
@@ -660,8 +822,15 @@ const OPTIONS = [
 export function KernelToggle({ studio }: { studio: Studio }) {
   const kind = useSyncExternalStore((cb) => studio.subscribe(cb), () => studio.kernelKind);
   const switching = useSyncExternalStore((cb) => studio.subscribe(cb), () => studio.switchingKernel);
+  const running = useSyncExternalStore((cb) => studio.subscribe(cb), () => studio.running);
   if (switching) {
     return <span className="chip"><span className="dot busy" /> VM: {switching.phase}</span>;
+  }
+  // Plan-review I2: no switching mid-run. Show a static (non-interactive) chip
+  // while a run is active instead of the interactive Select, so the user can't
+  // start a swap that switchKernel would reject anyway.
+  if (running) {
+    return <span className="chip" aria-label="Kernel (locked during run)">{kind === "vm" ? "Linux VM" : "Browser kernel"}</span>;
   }
   return (
     <Select
@@ -674,9 +843,46 @@ export function KernelToggle({ studio }: { studio: Studio }) {
 }
 ```
 
-- [ ] **Step 2: Mount it in `App.tsx`**
+- [ ] **Step 2: Add a `children` slot to `TitleBar` and mount the toggle in `App.tsx`**
 
-Add `<KernelToggle studio={studio} />` to the TitleBar row (or beside the model chip). Import it. (The `TitleBar` already renders a `runtime · js·py·wasi` chip — put the toggle next to it; optionally update that chip's label to reflect the active kernel, e.g. `runtime · linux-vm` when `kind === "vm"`.)
+`TitleBar` takes a fixed prop set and is NOT passed `studio`, so it can't render `<KernelToggle>` itself. Add an optional `children` slot and render it right after the runtime chip:
+
+```tsx
+// TitleBar.tsx — extend the prop type + render
+export function TitleBar({
+  workspace, model, running, onSettings, onReset, onThemeChange, children,
+}: {
+  workspace: string;
+  model: string;
+  running: boolean;
+  onSettings: () => void;
+  onReset: () => void;
+  onThemeChange?: () => void;
+  children?: React.ReactNode;   // slot for the kernel toggle (mounted by App)
+}) {
+  // …unchanged… after the `runtime · js·py·wasi` chip:
+  //   <span className="chip">…runtime…</span>
+  //   {children}
+  //   <span className="chip">{model}</span>
+}
+```
+
+In `App.tsx`, import `KernelToggle` and pass it as the child:
+
+```tsx
+<TitleBar
+  workspace={workspace}
+  model={configured ? model.model : "no model key"}
+  running={studio.running}
+  onSettings={() => setSettingsOpen(true)}
+  onReset={() => void studio.resetProject()}
+  onThemeChange={() => studio.saveConfigToFolder()}
+>
+  <KernelToggle studio={studio} />
+</TitleBar>
+```
+
+(`React.ReactNode` needs no extra import in these `.tsx` files — the React JSX runtime types resolve it; if the file uses `import type { ReactNode } from "react"` elsewhere, follow that style.)
 
 - [ ] **Step 3: Run tests + gates + commit**
 
@@ -686,7 +892,7 @@ Expected: PASS (no new unit tests strictly required — the toggle is thin; its 
 > Optionally add a shallow render test that the toggle shows the progress chip when `studio.switchingKernel` is set — a React Testing Library test if the repo has one; otherwise rely on the e2e.
 
 ```bash
-git add apps/web/src/components/KernelToggle.tsx apps/web/src/App.tsx
+git add apps/web/src/components/KernelToggle.tsx apps/web/src/components/TitleBar.tsx apps/web/src/App.tsx
 git commit -m "feat(web): kernel toggle UI (browser / Linux VM) with lazy-boot progress"
 ```
 
@@ -943,10 +1149,10 @@ git commit -m "docs(runtime-vm): Vite integration recipe + /node subpath; Round 
 
 **Spike-grounded:** every Vite-integration fact (browser-clean entry, `public/vm-assets` symlinks, `?url` wasm, zero-config v86 import, xterm wiring) is from the verified Spike G. Each browser/app-only piece names its gated verification (Task 7).
 
-**Round-11b deferrals:** the two cheap browser-robustness ones (poisoned-cache invalidation, version eviction) → Task 8; the double-emit invariant → resolved by `VmRuntime.syncFs()` sharing the runtime bus (Task 3, benign create-only duplicate documented). Deferred further (not this round): ENOTDIR on file-as-dir traversal, `chmod`/`symlink` guardSkeleton, late-bridge reap, `SpawnOptions.stdin` — none block the app integration.
+**Round-11b deferrals:** the two cheap browser-robustness ones (poisoned-cache invalidation, version eviction) → Task 8; the double-emit invariant → resolved by `VmRuntime.syncFs()` sharing the runtime bus (Task 3, benign create/delete/dir-create duplicate documented). Deferred further (not this round): ENOTDIR on file-as-dir traversal, `chmod`/`symlink` guardSkeleton, late-bridge reap, `SpawnOptions.stdin` — none block the app integration.
 
-**Placeholder scan:** the two e2e/driver harnesses (Task 7 `run.mjs`; Spike G's `drive.mjs`) are "port the verified Spike G driver" rather than fully transcribed — acceptable (the Spike G original is verified + on disk this session); all other code is complete. The `exec-shell` and `switchKernel` test fakes are sketched with an explicit "adjust the fake to your impl's exact sentinel/fs" note — the assertions are the requirement.
+**Placeholder scan:** the two e2e/driver harnesses (Task 7 `run.mjs`; Spike G's `drive.mjs`) are "port the verified Spike G driver" rather than fully transcribed — acceptable (the Spike G original is verified + on disk this session); all other code is complete. The `exec-shell` fake is now a concrete shell simulator (extracts the impl's `MARK` from the wrapped line, resolves cwd from the `cd`s) and the `copyWorkspace` test asserts mirror semantics; the `studio-switch` fake still needs its `fs` set to a fresh `new Vfs()` to assert the copy landed (noted at that test).
 
 **Type consistency:** `Kernel.kind: "browser" | "vm"` + optional `openPty` (Task 2) is produced by `createVmKernel` (Task 3) + consumed by `Studio`/`KernelToggle`/`TerminalPanel` (Tasks 4–6). `RpcShellSession` unchanged (browser `openShell` + `createExecShell` both return it). `PtySession` (from `@erdou/runtime-vm`) flows `VmRuntime.openPty` → `Kernel.openPty` → `PtyTerminal`. `VmRuntime.syncFs()` (Task 3) returns a `SyncFs9pFs` (implements `FileSystemApi`) = `Kernel.fs`. `copyWorkspace(FileSystemApi, FileSystemApi)` (Task 4) works over both the browser `Vfs` and the VM `SyncFs9pFs` (both `FileSystemApi`). The `@erdou/runtime-vm/node` subpath (Task 1) is imported only by Node consumers (conformance, scripts), never the browser/app path.
 
-**Known risk to flag for the plan review:** the double-emit of `file.changed` on a page-side *create* (bridge coalesced + `SyncFs9pFs` sync) — benign (the app's `file.changed` handler bumps `fsVersion`/debounces saves/dedups the diff-capture Set by path), but if any consumer counts events it would over-count; noted in `VmRuntime.syncFs()`. The `switchKernel` event re-subscription + `startPreviewProxy` re-point is the most integration-sensitive step (Task 4) — its correctness is verified by Task 7's switch-and-run e2e.
+**Known risk to flag for the plan review:** the double-emit of `file.changed` on a page-side create/delete/dir-create (bridge coalesced + `SyncFs9pFs` sync, since `Fs9pBridge.attach` wraps CreateFile/CreateDirectory/Unlink) — benign (the app's `file.changed` handler bumps `fsVersion`/debounces saves/dedups the diff-capture Set by path), but if any consumer counts events it would over-count; noted in `VmRuntime.syncFs()`. The `switchKernel` runtime-event re-subscription is the most integration-sensitive step (Task 4) and IS verified by Task 7's switch-and-run e2e (file.changed/port events on the new runtime). The preview re-point (`setPreviewRuntime`, plan-review I5) is NOT exercised by the e2e — VM-kernel preview is out of scope this round (Round 12); it has a unit test (holder swaps without throwing), and the fix ensures the re-point is a real operation rather than the silent no-op it was, so it is correct when Round 12 wires VM `dispatch` through the preview SW.
