@@ -1,5 +1,5 @@
 import { ErrnoError } from "@erdou/runtime-contract";
-import type { ByteStream, ExitStatus, ProcessInfo } from "@erdou/runtime-contract";
+import type { ByteStream, Errno, ExitStatus, ProcessInfo } from "@erdou/runtime-contract";
 import { encodeJsonFrame, FrameReader, decodeJson, FrameType } from "./guestd-protocol.js";
 
 export interface GuestChannel {
@@ -106,7 +106,8 @@ export class GuestdClient {
       }
       case FrameType.ERROR: {
         p.stdout.end(); p.stderr.end();
-        p.onError?.(new Error((decodeJson(body) as { message: string }).message));
+        const { code, message } = decodeJson(body) as { code: string; message: string };
+        p.onError?.(new ErrnoError(code as Errno, { path: message }));
         this.pending.delete(id);
         break;
       }
@@ -143,8 +144,8 @@ export class GuestdClient {
   }
 
   spawn(cmd: string, args: string[], opts: { cwd?: string; env?: Record<string, string> } = {}): Promise<GuestProcess> {
-    return this.run(FrameType.SPAWN, { cmd, args, cwd: opts.cwd, env: opts.env }).catch(() => {
-      throw new ErrnoError("ENOENT", { path: cmd, syscall: "spawn" });
+    return this.run(FrameType.SPAWN, { cmd, args, cwd: opts.cwd, env: opts.env }).catch((e) => {
+      throw e instanceof ErrnoError ? e : new ErrnoError("ENOENT", { path: cmd, syscall: "spawn" });
     });
   }
 

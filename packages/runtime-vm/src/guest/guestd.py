@@ -4,7 +4,7 @@
 # subprocess (no per-command chroot). Speaks the length-prefixed binary frame
 # protocol (see guestd-protocol.ts) over /dev/hvc0. Verified by the gated
 # conformance run (packages/runtime-vm/src/vm-runtime.conformance.test.ts).
-import os, sys, json, struct, subprocess, threading, signal, shutil
+import os, json, struct, subprocess, threading, signal, shutil
 
 fd = os.open("/dev/hvc0", os.O_RDWR)
 import tty
@@ -21,11 +21,10 @@ def send_json(type_char, ident, obj):
     send(type_char, ident, json.dumps(obj).encode())
 
 SIGNALS = {"SIGTERM": signal.SIGTERM, "SIGKILL": signal.SIGKILL, "SIGINT": signal.SIGINT, "SIGHUP": signal.SIGHUP}
-procs = {}   # id -> subprocess.Popen
 
 def pump(stream, type_char, ident):
     while True:
-        chunk = stream.read(4096)
+        chunk = stream.read1(4096)
         if not chunk:
             break
         send(type_char, ident, chunk)
@@ -37,17 +36,19 @@ def run_command(ident, argv, cwd, env, shell):
             full_env.update(env)
         p = subprocess.Popen(argv, cwd=cwd or "/", env=full_env, shell=shell,
                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except FileNotFoundError:
-        send_json("!", ident, {"code": "ENOENT", "message": " ".join(argv) if isinstance(argv, list) else str(argv)})
+    except OSError as e:
+        # FileNotFoundError (ENOENT) is the common case; other OSErrors (e.g.
+        # EACCES, ENOTDIR) are rare — ENOENT is an acceptable generic here.
+        # The point is no OSError may kill this thread silently, which would
+        # hang the host's exec/spawn promise forever.
+        send_json("!", ident, {"code": "ENOENT", "message": str(e)})
         return
-    procs[ident] = p
     send_json("S", ident, {"pid": p.pid})
     t_out = threading.Thread(target=pump, args=(p.stdout, "O", ident), daemon=True)
     t_err = threading.Thread(target=pump, args=(p.stderr, "E", ident), daemon=True)
     t_out.start(); t_err.start()
     code = p.wait()
     t_out.join(); t_err.join()
-    procs.pop(ident, None)
     sig = None
     if code < 0:
         sig = next((n for n, v in SIGNALS.items() if v == -code), None)
@@ -105,6 +106,11 @@ while True:
     buf += chunk
     while len(buf) >= 4:
         (plen,) = struct.unpack(">I", buf[:4])
+        if plen < 5 or plen > 16 * 1024 * 1024:
+            # implausible length — resync by dropping a byte, symmetric with
+            # the TS FrameReader's resync behavior on garbage input
+            buf = buf[1:]
+            continue
         if len(buf) - 4 < plen:
             break
         payload = buf[4:4 + plen]

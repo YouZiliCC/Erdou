@@ -36,6 +36,9 @@ export function assertFs9pSymbols(fs9p: unknown): void {
 }
 
 export class V86Host {
+  // v86 ships a .d.ts, but it's incomplete/inaccurate (e.g. restore_state is
+  // typed as ArrayBuffer when the runtime actually wants a typed-array view)
+  // — `any` is the honest boundary here rather than fighting stale types.
   private emulator: any;
   readonly fs9p!: Fs9p; // set after boot (declared for the type; assigned in boot)
 

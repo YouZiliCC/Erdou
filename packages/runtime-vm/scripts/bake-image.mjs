@@ -111,5 +111,9 @@ console.log("6/6 zstd-compress → assets/state.zst");
 const compressed = zlib.gzipSync(state, { level: 9 });
 fs.writeFileSync(path.join(assets, "state.zst"), compressed);
 fs.writeFileSync(path.join(assets, "state.meta.json"), JSON.stringify({ rawBytes: state.length, compressedBytes: compressed.length, alpine: ver, codec: "gzip" }, null, 2));
+// assets.ts decompresses state.zst -> state.bin and caches it (only writes if
+// absent). Drop the stale cache now so a rebake's new state.zst is the one
+// that actually gets loaded, not a leftover decompression of the old one.
+fs.rmSync(path.join(assets, "state.bin"), { force: true });
 console.log(`done: state ${state.length} -> ${compressed.length} bytes (assets/state.zst)`);
 process.exit(0);
