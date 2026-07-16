@@ -3,6 +3,7 @@ import type { Studio } from "../lib/studio.js";
 import { detectRunCommand } from "../lib/run-detect.js";
 import { bundleProject, hasBundleEntry } from "../lib/bundle-project.js";
 import { shouldRerun } from "../lib/live-rerun.js";
+import { runServeCommand } from "../lib/run-serve.js";
 import { Toggle } from "./ui/Toggle.js";
 
 /** Preview: type/detect a run command, execute it in the persistent shell, then
@@ -41,7 +42,7 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
    *  SAME action (re-serve a static dir, or re-bundle + re-serve) instead of
    *  a fixed raw command string. Returns whether the run succeeded (a served
    *  port / no errors), so `doRun` can gate the reload nonce on it. */
-  const lastAction = useRef<null | (() => Promise<boolean>)>(null);
+  const lastAction = useRef<null | (() => Promise<{ ok: boolean; opened: number[] }>)>(null);
   /** True while a `doRun` is in flight, so the live effect's debounce can't
    *  stack a second run on top of one still running. */
   const busy = useRef(false);
@@ -61,41 +62,36 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
   const bundleEntry = hasBundleEntry(studio.fs);
   const showBundlePrompt = bundleEntry && !cmd.trim();
 
-  /** Runs `commandLine` in the persistent shell. Returns whether it succeeded
-   *  (exit code 0), so `doRun` only reloads the iframe on success. */
-  async function runCommand(commandLine: string): Promise<boolean> {
-    if (!commandLine || running) return false;
+  /** Runs `commandLine` via the event-driven helper. Returns success + the
+   *  ports the run opened (captured from events — a serving command may still
+   *  be running when this resolves; that is the contract's serve idiom). */
+  async function runCommand(commandLine: string): Promise<{ ok: boolean; opened: number[] }> {
+    if (!commandLine || running) return { ok: false, opened: [] };
     setRunning(true);
-    const before = new Set(studio.openPorts.map((p) => p.port));
-    let ok = false;
     try {
-      const result = await studio.shell.exec(commandLine);
-      if (result.code !== 0) {
-        setErrors([result.stderr.trim() || result.stdout.trim() || `exited with code ${result.code}`]);
+      const result = await runServeCommand(studio.runtime, studio.shell, commandLine);
+      if (!result.ok) {
+        setErrors([result.stderr?.trim() || result.stdout?.trim() || `exited with code ${result.code}`]);
         setOutput(null);
       } else {
         setErrors([]);
-        setOutput(result.stdout.trim() || null);
-        const opened = studio.openPorts.find((p) => !before.has(p.port));
-        if (opened) setSelectedPort(opened.port);
+        setOutput(result.stdout?.trim() || null);
+        const first = result.openedPorts[0];
+        if (first !== undefined) setSelectedPort(first);
         else if (selectedPort === null) setSelectedPort(studio.openPorts[0]?.port ?? null);
-        ok = true;
       }
       ranOnce.current = true;
-    } catch (err) {
-      setErrors([err instanceof Error ? err.message : String(err)]);
-      setOutput(null);
+      return { ok: result.ok, opened: [...result.openedPorts] };
     } finally {
       setRunning(false);
     }
-    return ok;
   }
 
   /** Bundle the project (esbuild-wasm, in-browser) to /dist, then serve it —
    *  the TS/React path, since a raw .tsx source tree can't be served as-is.
    *  Returns whether the bundle+serve succeeded. */
-  async function bundleAndRun(): Promise<boolean> {
-    if (building || running) return false;
+  async function bundleAndRun(): Promise<{ ok: boolean; opened: number[] }> {
+    if (building || running) return { ok: false, opened: [] };
     setBuilding(true);
     setErrors([]);
     setOutput(null);
@@ -103,14 +99,14 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
       const result = await bundleProject(studio.fs);
       if (!result.ok) {
         setErrors(result.errors);
-        return false;
+        return { ok: false, opened: [] };
       }
       const commandLine = "erdou serve dist --spa";
       setCmd(commandLine);
       return await runCommand(commandLine);
     } catch (err) {
       setErrors([err instanceof Error ? err.message : String(err)]);
-      return false;
+      return { ok: false, opened: [] };
     } finally {
       setBuilding(false);
     }
@@ -124,19 +120,17 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
    *  whatever `fsVersion` ends up at once the action's writes are done, so
    *  the `live` effect can tell the run's own writes apart from a later,
    *  real external edit (see `shouldRerun`). */
-  async function doRun(action: () => Promise<boolean>): Promise<void> {
+  async function doRun(action: () => Promise<{ ok: boolean; opened: number[] }>): Promise<void> {
     busy.current = true;
     try {
       for (const p of openedPorts.current) await studio.closePort(p);
       openedPorts.current = [];
-      const before = new Set(studio.openPorts.map((p) => p.port));
-      const ok = await action();
-      // Read AFTER the action resolves: `port.opened` fires synchronously
-      // during `shell.exec`, so by now any newly-served port is present, and
-      // `fsVersion` already reflects every write the action made.
-      openedPorts.current = studio.openPorts.map((p) => p.port).filter((p) => !before.has(p));
+      const result = await action();
+      openedPorts.current = result.opened;
+      // By now every VFS write the action itself made is reflected (runCommand
+      // resolved), so this baseline still tells own-writes from later edits.
       lastRunFsVersion.current = studio.fsVersion;
-      if (ok) setNonce((n) => n + 1);
+      if (result.ok) setNonce((n) => n + 1);
     } finally {
       busy.current = false;
     }
