@@ -1,5 +1,6 @@
-import { describe } from "vitest";
+import { describe, afterEach } from "vitest";
 import type { MakeRuntime } from "./types.js";
+import { teardownRuntimes } from "./types.js";
 import { filesystemSuite } from "./suites/filesystem.js";
 import { processSuite } from "./suites/process.js";
 import { shellSuite } from "./suites/shell.js";
@@ -18,6 +19,9 @@ export type { MakeRuntime } from "./types.js";
  */
 export function runConformance(name: string, make: MakeRuntime): void {
   describe(`conformance: ${name}`, () => {
+    afterEach(async () => {
+      await teardownRuntimes();
+    });
     filesystemSuite(make);
     processSuite(make);
     shellSuite(make);

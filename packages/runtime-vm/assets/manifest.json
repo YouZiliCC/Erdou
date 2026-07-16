@@ -1,0 +1,18 @@
+{
+  "note": "Pinned inputs for `pnpm --filter @erdou/runtime-vm download-assets` and `bake`. These produce gitignored artifacts in this dir; nothing binary is committed.",
+  "alpine": { "version": "3.24.1", "arch": "x86", "minirootfs": "alpine-minirootfs-3.24.1-x86.tar.gz", "cdn": "https://dl-cdn.alpinelinux.org/alpine" },
+  "kernel": {
+    "file": "kernel.bin",
+    "source": "v86 buildroot bzImage (9p+virtio); staged locally from the verified R11 spikes (spike dirs a/b/c, buildroot-bzimage68.bin) — no stable public URL pinned yet, see download-assets.mjs note",
+    "sha256": "507a759c70ab7a490a233be454d0b5b88bc667956a410b531cb4edc091e2eb1c"
+  },
+  "bios": {
+    "seabios": "seabios.bin",
+    "vgabios": "vgabios.bin",
+    "source": "v86 build assets; staged locally from the verified R11 spikes (seabios.bin, vgabios.bin) — no stable public URL pinned yet",
+    "seabiosSha256": "73e3f359102e3a9982c35fce98eb7cd08f18303ac7f1ba6ebfbe6cdc1c244d98",
+    "vgabiosSha256": "a4bc0d80cc3ca028c73dafa8fee396b8d054ce87ebd8abfbd31b06b437607880"
+  },
+  "guestd": { "path": "src/guest/guestd.py" },
+  "memoryMB": 512
+}

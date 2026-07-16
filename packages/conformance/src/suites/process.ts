@@ -31,5 +31,19 @@ export function processSuite(make: MakeRuntime): void {
       const info = (await rt.getProcesses()).find((x) => x.pid === p.pid);
       expect(info?.state).toBe("exited");
     });
+
+    it("kill(pid) on an exec'd process is honored through the contract", async () => {
+      const rt = await booted(make);
+      const p = await rt.exec("echo killable");
+      // kill by pid must not throw whether the process is still running or already
+      // exited (echo exits instantly on the browser kernel; a real shell may linger).
+      await rt.kill(p.pid);
+      const status = await rt.wait(p.pid);
+      // Either it finished on its own (code 0) or was signalled — both valid; the
+      // point is kill(pid) is contract surface and wait(pid) still resolves.
+      expect(typeof status.code).toBe("number");
+      const info = (await rt.getProcesses()).find((x) => x.pid === p.pid);
+      expect(info === undefined || info.state !== "running").toBe(true);
+    });
   });
 }
