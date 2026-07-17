@@ -3,7 +3,7 @@ import { createTools, type ToolDef } from "@erdou/agent-tools";
 import type { AgentOptions, AgentRunResult, AgentEvent } from "./types.js";
 import { buildSystemPrompt } from "./prompt.js";
 
-const GATED_TOOLS = new Set(["run_shell", "remove_path"]);
+const GATED_TOOLS = new Set(["run_shell", "remove_path", "switch_environment"]);
 
 /**
  * The reference Coding Agent. It drives a Runtime through agent-tools using a
@@ -18,7 +18,7 @@ export class CodingAgent {
   private readonly maxSteps: number;
 
   constructor(private readonly opts: AgentOptions) {
-    this.tools = opts.tools ?? createTools();
+    this.tools = [...(opts.tools ?? createTools()), ...(opts.extraTools ?? [])];
     this.toolByName = new Map(this.tools.map((t) => [t.name, t]));
     this.toolSpecs = this.tools.map((t) => ({
       name: t.name,

@@ -38,6 +38,8 @@ export interface AgentOptions {
   model: ModelConfig;
   /** Defaults to createTools(). */
   tools?: ToolDef[];
+  /** Appended after the built-ins (or after `tools` when given), e.g. app-bound tools like switch_environment. */
+  extraTools?: ToolDef[];
   /** Max model turns before stopping. Default 20. */
   maxSteps?: number;
   /** Overrides the generated system prompt entirely. */
@@ -45,7 +47,7 @@ export interface AgentOptions {
   /** Specifics for the generated environment brief. */
   environment?: EnvironmentInfo;
   onEvent?: (event: AgentEvent) => void;
-  /** When set, gated tools (run_shell, remove_path) must be approved before running. */
+  /** When set, gated tools (run_shell, remove_path, switch_environment) must be approved before running. */
   approve?: (req: ApprovalRequest) => Promise<ApprovalDecision>;
 }
 
