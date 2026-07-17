@@ -1,7 +1,13 @@
 import { BrowserRuntime } from "@erdou/runtime-browser";
 import type { FileSystemApi, Runtime } from "@erdou/runtime-contract";
 import type { PtySession } from "@erdou/runtime-vm";
+// Subpath import ONLY (browser-clean — it imports just profiles.data.json). The
+// barrel (".") would drag ~700KB of v86 into the main bundle (see the note on
+// SKELETON_DIRS below). `VM_PROFILES` is a tiny data array; the type is erased.
+import { VM_PROFILES, type VmProfile } from "@erdou/runtime-vm/profiles";
 import { registerLanguages } from "./languages.js";
+
+export type { VmProfile };
 
 /** The VM kernel's six empty bind-mount stub dirs (image-owned, never real
  *  project content). Mirrors `@erdou/runtime-vm`'s `fs-bridge.ts`
@@ -17,6 +23,25 @@ import { registerLanguages } from "./languages.js";
  *  chunk. This local copy is the single browser-side source of truth; both
  *  `workspace-copy.ts` and `studio.ts` import it from here. */
 export const SKELETON_DIRS: readonly string[] = ["bin", "lib", "usr", "proc", "dev", "tmp"];
+
+/** The active execution environment: the fast browser kernel, or a VM kernel on
+ *  a specific image profile. Its string id (`browser` | `vm:<profile>`) is the
+ *  stable handle the selector, the switch tool, and the run-diff all key on. */
+export type Environment = { kind: "browser" } | { kind: "vm"; profile: VmProfile };
+
+/** `Environment` → its string id (`browser` | `vm:base` | `vm:node` | `vm:sci`). */
+export function environmentId(env: Environment): string {
+  return env.kind === "browser" ? "browser" : `vm:${env.profile}`;
+}
+
+/** Parse a string id back into an `Environment`. Fails loud (fail-fast) on an
+ *  unknown id so a bad selector value or agent tool arg surfaces immediately. */
+export function parseEnvironmentId(id: string): Environment {
+  if (id === "browser") return { kind: "browser" };
+  const profile = id.startsWith("vm:") ? id.slice(3) : "";
+  if ((VM_PROFILES as readonly string[]).includes(profile)) return { kind: "vm", profile: profile as VmProfile };
+  throw new Error(`Unknown environment id "${id}" (known: browser, ${VM_PROFILES.map((p) => `vm:${p}`).join(", ")})`);
+}
 
 /** Request/response shell session — the browser kernel's shape. Round 11's VM
  *  kernel adds a PTY-stream shape beside this one; consumers pick by kernel. */
@@ -34,11 +59,16 @@ export interface RpcShellSession {
  */
 export interface Kernel {
   readonly kind: "browser" | "vm";
+  /** VM image profile (base/node/sci); undefined on the browser kernel. */
+  readonly profile?: VmProfile;
   readonly runtime: Runtime;
   readonly fs: FileSystemApi;
   openShell(): RpcShellSession;
   /** Streaming interactive terminal — the VM kernel provides it; the browser kernel does not. */
   openPty?(opts?: { cols?: number; rows?: number }): Promise<PtySession>;
+  /** Tear down the underlying guest — the VM kernel provides it (one-VM-alive
+   *  switching calls it); the browser kernel omits it (it stays cached). */
+  shutdown?(): Promise<void>;
 }
 
 export function createBrowserKernel(): Kernel {
