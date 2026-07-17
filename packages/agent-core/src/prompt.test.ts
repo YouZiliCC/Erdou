@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { RuntimeCapabilities } from "@erdou/runtime-contract";
-import { buildSystemPrompt } from "./prompt.js";
+import { buildSystemPrompt, type EnvironmentCatalog } from "./prompt.js";
 
 const caps: RuntimeCapabilities = {
   nativeProcesses: true,
@@ -65,5 +65,120 @@ describe("buildSystemPrompt (real OS)", () => {
     const p = buildSystemPrompt({}, { ...realCaps, packageManagers: [], networkEgress: "full" as const });
     expect(p).toMatch(/No package manager/);
     expect(p).toMatch(/Outbound network is available/);
+  });
+
+  it("phrases cors-only egress truthfully — npm/pip via a gateway, arbitrary hosts unreachable", () => {
+    const p = buildSystemPrompt({}, realCaps); // realCaps.networkEgress === "cors-only"
+    expect(p).toMatch(/npm\/pip/);
+    expect(p).toMatch(/gateway/i);
+    expect(p).toMatch(/arbitrary hosts are NOT reachable/);
+  });
+});
+
+describe("buildSystemPrompt (environments catalog)", () => {
+  const realCaps: RuntimeCapabilities = {
+    ...caps,
+    realOs: true,
+    interpreters: ["python3"],
+    packageManagers: ["apk", "pip"],
+    networkEgress: "cors-only",
+    memoryLimitMB: 512,
+  };
+
+  const catalog: EnvironmentCatalog = {
+    current: "vm:base",
+    available: [
+      {
+        id: "browser",
+        label: "Browser kernel",
+        interpreters: ["python (Pyodide)", "wasi"],
+        packageManagers: ["pip (micropip)"],
+        installRecipes: [
+          "pip install <package> — micropip: pure-Python wheels from PyPI only; installs reset on page reload.",
+        ],
+        switchGuidance: "Default. Fastest start, no real Linux.",
+        speed: "instant",
+      },
+      {
+        id: "vm:base",
+        label: "Linux VM · Python",
+        interpreters: ["python3"],
+        packageManagers: ["apk", "pip"],
+        installRecipes: [
+          "pip install <package> — via the package gateway; user-site persists in the project; a full venv is heavy (~1.5k files).",
+        ],
+        switchGuidance: "Real Alpine shell with Python + pip.",
+        speed: "slow — emulated x86",
+      },
+      {
+        id: "vm:node",
+        label: "Linux VM · Node.js",
+        interpreters: ["python3", "node"],
+        packageManagers: ["apk", "pip", "npm"],
+        installRecipes: [
+          "npm install <package> — via the package gateway; node_modules persists in the project.",
+        ],
+        switchGuidance: "Alpine with Node.js + npm.",
+        speed: "slow — emulated x86",
+      },
+      {
+        id: "vm:sci",
+        label: "Linux VM · NumPy/Pandas",
+        interpreters: ["python3"],
+        packageManagers: ["apk", "pip"],
+        installRecipes: [
+          "NumPy and Pandas are baked in; the first import numpy/pandas takes ~50 s per process.",
+        ],
+        switchGuidance: "Data work beyond pure-Python wheels.",
+        speed: "slow — emulated x86",
+      },
+    ],
+  };
+
+  it("renders the catalog with the current env, every available env and its per-env facts", () => {
+    const p = buildSystemPrompt({ catalog }, realCaps);
+    expect(p).toMatch(/ENVIRONMENTS & PACKAGES/);
+    // current env is named
+    expect(p).toMatch(/Linux VM · Python \(vm:base\)/);
+    expect(p).toMatch(/\[current\]/);
+    // every available env id + label appears
+    for (const id of ["browser", "vm:base", "vm:node", "vm:sci"]) expect(p).toContain(id);
+    expect(p).toContain("Linux VM · Node.js");
+    // interpreters + package managers rendered
+    expect(p).toContain("python (Pyodide)");
+    expect(p).toMatch(/apk, pip, npm/);
+    // install recipes (truthful narratives) rendered verbatim from the supplied data
+    expect(p).toMatch(/user-site persists/);
+    expect(p).toMatch(/venv is heavy/);
+    expect(p).toMatch(/node_modules persists/);
+    expect(p).toMatch(/reset on page reload/);
+    expect(p).toMatch(/~50 s per process/);
+  });
+
+  it("tells the model when/how to switch and to trust the latest tool result (M3)", () => {
+    const p = buildSystemPrompt({ catalog }, realCaps);
+    expect(p).toMatch(/switch_environment/);
+    expect(p).toMatch(/workspace/i); // files follow the switch
+    expect(p).toMatch(/change.*mid-run/i);
+    expect(p).toMatch(/latest tool result/i);
+  });
+
+  it("states installs go through the gateway and apk is bake-time only", () => {
+    const p = buildSystemPrompt({ catalog }, realCaps);
+    expect(p).toMatch(/package gateway/i);
+    expect(p).toMatch(/apk/);
+    expect(p).toMatch(/baked|bake/i);
+  });
+
+  it("appends the catalog to the simulated browser prompt too", () => {
+    const p = buildSystemPrompt({ catalog }, caps); // caps.realOs === false
+    expect(p).toMatch(/simulated.*browser-native/i);
+    expect(p).toMatch(/ENVIRONMENTS & PACKAGES/);
+    expect(p).toMatch(/switch_environment/);
+  });
+
+  it("omits the catalog section entirely when no catalog is supplied (back-compat)", () => {
+    expect(buildSystemPrompt({}, realCaps)).not.toMatch(/ENVIRONMENTS & PACKAGES/);
+    expect(buildSystemPrompt({ languages: ["python"] }, caps)).not.toMatch(/ENVIRONMENTS & PACKAGES/);
   });
 });

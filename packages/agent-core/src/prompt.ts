@@ -1,6 +1,50 @@
 import type { RuntimeCapabilities } from "@erdou/runtime-contract";
 import type { EnvironmentInfo } from "./types.js";
 
+/**
+ * One environment the agent can run in (or switch into). Structural, plain data:
+ * the app owns the catalog (which profiles are baked, their install stories) and
+ * supplies it — agent-core only renders it into the brief. Shaped so the app's
+ * environment descriptors map straight in.
+ */
+export interface EnvironmentBrief {
+  /** Stable env id — the switch_environment target, e.g. "browser" | "vm:base" | "vm:node" | "vm:sci". */
+  readonly id: string;
+  readonly label: string;
+  /** Language runtimes available here. */
+  readonly interpreters: readonly string[];
+  /** Package managers available here (empty when none). */
+  readonly packageManagers: readonly string[];
+  /** One line per supported install path — persistence/speed caveats included (app-authored, so they stay truthful). */
+  readonly installRecipes: readonly string[];
+  /** When to pick this environment. */
+  readonly switchGuidance: string;
+  /** Human-readable speed class, e.g. "instant" or "slow — emulated x86". */
+  readonly speed?: string;
+}
+
+/**
+ * The set of environments the agent can move between via switch_environment,
+ * plus which one it is running in right now. Supplied by the app on
+ * `AgentOptions.environment.catalog`; rendered by buildSystemPrompt.
+ */
+export interface EnvironmentCatalog {
+  /** Id of the environment the agent is running in right now. */
+  readonly current: string;
+  /** Every environment switch_environment can move to (includes the current one). */
+  readonly available: readonly EnvironmentBrief[];
+}
+
+// Extend the app-supplied environment shape with the catalog, without owning
+// types.ts: the catalog is agent-core's type, delivered through the existing
+// AgentOptions.environment channel that agent.ts already forwards.
+declare module "./types.js" {
+  interface EnvironmentInfo {
+    /** Environments the agent can switch between (+ the current one). */
+    catalog?: EnvironmentCatalog;
+  }
+}
+
 const SHELL_BUILTINS =
   "ls cat grep find head tail mkdir rm cp mv touch echo pwd env which ps kill true false";
 
@@ -25,6 +69,40 @@ export function buildSystemPrompt(env: EnvironmentInfo, caps: RuntimeCapabilitie
 /** Caller-supplied languages override the runtime's own interpreter list. */
 function languagesOf(env: EnvironmentInfo, caps: RuntimeCapabilities): string[] {
   return env.languages ?? caps.interpreters;
+}
+
+/**
+ * The environments-catalog section, appended to whichever base brief applies.
+ * Data-driven: every per-env fact (interpreters, package managers, install
+ * recipes) comes from the app; the framing (when/how to switch, the mid-run
+ * caveat, the egress boundary) is agent-core's. Returns "" when no catalog is
+ * supplied, so old callers are unaffected. The leading "\n" survives the empty
+ * filter and separates it from the prior section with a blank line.
+ */
+function environmentsCatalogSection(env: EnvironmentInfo): string {
+  const catalog = env.catalog;
+  if (!catalog) return "";
+
+  const current = catalog.available.find((e) => e.id === catalog.current);
+  const currentLabel = current ? `${current.label} (${catalog.current})` : catalog.current;
+
+  const lines = [
+    "ENVIRONMENTS & PACKAGES",
+    `- You are running in: ${currentLabel}. You can move between the environments below with the switch_environment tool; your /workspace files follow you.`,
+    "- The current environment can change mid-run via switch_environment — so trust the latest tool result over this brief, which is NOT rebuilt on later turns.",
+    "- Switch when the current environment lacks an interpreter, package manager, or preinstalled package you need (e.g. you need npm, a real Linux shell, or NumPy/Pandas). Stay put when it already has what you need — switching copies the workspace and boots another VM.",
+    "- Package installs go through the package gateway: the npm and PyPI registries are reachable, but arbitrary hosts are not. apk system packages are baked into the image at build time, not installable at runtime.",
+    "- Available environments (switch_environment targets):",
+  ];
+  for (const e of catalog.available) {
+    const marker = e.id === catalog.current ? " [current]" : "";
+    const interps = e.interpreters.length > 0 ? e.interpreters.join(", ") : "shell built-ins only";
+    const pms = e.packageManagers.length > 0 ? e.packageManagers.join(", ") : "none";
+    const speed = e.speed ? ` Speed: ${e.speed}.` : "";
+    lines.push(`  - ${e.id} — ${e.label}${marker}. Interpreters: ${interps}. Package managers: ${pms}.${speed} ${e.switchGuidance}`);
+    for (const recipe of e.installRecipes) lines.push(`      install: ${recipe}`);
+  }
+  return `\n${lines.join("\n")}`;
 }
 
 function simulatedPrompt(env: EnvironmentInfo, caps: RuntimeCapabilities): string {
@@ -68,6 +146,7 @@ function simulatedPrompt(env: EnvironmentInfo, caps: RuntimeCapabilities): strin
     "- Interactive prompts: you cannot ask the user anything mid-task.",
     "",
     ...HOW_TO_WORK,
+    environmentsCatalogSection(env),
     env.notes ? `\nNOTES\n${env.notes}` : "",
   ]
     .filter((line) => line !== "")
@@ -103,6 +182,7 @@ function realOsPrompt(env: EnvironmentInfo, caps: RuntimeCapabilities): string {
     "",
     ...HOW_TO_WORK,
     "- Remember the slow CPU: verify with the cheapest command that proves the change.",
+    environmentsCatalogSection(env),
     env.notes ? `\nNOTES\n${env.notes}` : "",
   ]
     .filter((line) => line !== "")
