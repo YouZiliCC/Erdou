@@ -30,4 +30,27 @@ describe("parseListeningPorts", () => {
     ].join("\n");
     expect(parseListeningPorts(both)).toEqual([{ port: 8000, loopback: false }]);
   });
+
+  it("treats the tcp6 :: (all-zero V6_ANY) LISTEN address as reachable", () => {
+    // /proc/net/tcp6 row: 32 hex chars for the v6 local_address, same column layout as tcp4.
+    const line =
+      "   0: 00000000000000000000000000000000:1F40 00000000000000000000000000000000:0000 0A 0 0 0 0 0 0 0 0 1 1 0 100 0 0 10 0";
+    expect(parseListeningPorts(line)).toEqual([{ port: 8000, loopback: false }]);
+  });
+
+  it("treats the tcp6 ::1 LISTEN address as loopback", () => {
+    // ::1 encodes as 3 all-zero 32-bit words followed by 01000000 (little-endian last word).
+    const line =
+      "   0: 00000000000000000000000001000000:2329 00000000000000000000000000000000:0000 0A 0 0 0 0 0 0 0 0 1 1 0 100 0 0 10 0";
+    expect(parseListeningPorts(line)).toEqual([{ port: 9001, loopback: true }]);
+  });
+
+  it("honors a custom opts.eth0Hex override (not just the hard-coded default)", () => {
+    // 192.168.1.50 little-endian hex, distinct from DEFAULT_ETH0_HEX (192.168.86.100 = 6456A8C0).
+    const customEth0Hex = "3201A8C0";
+    const line = "   0: 3201A8C0:1B58 00000000:0000 0A 0 0 0 0 0 0 0 0 1 1 0 100 0 0 10 0";
+    expect(parseListeningPorts(line, { eth0Hex: customEth0Hex })).toEqual([{ port: 7000, loopback: false }]);
+    // Without the override, that same IP is just some other host — not reachable.
+    expect(parseListeningPorts(line)).toEqual([{ port: 7000, loopback: true }]);
+  });
 });
