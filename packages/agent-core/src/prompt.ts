@@ -48,12 +48,61 @@ declare module "./types.js" {
 const SHELL_BUILTINS =
   "ls cat grep find head tail mkdir rm cp mv touch echo pwd env which ps kill true false";
 
+/**
+ * Foundational orientation shared by BOTH kernels — what Erdou *is* and how it
+ * differs from a normal machine, so the agent designs to fit instead of assuming
+ * a server/laptop. This is the single source of truth for the agent's
+ * environment self-image; keep it in sync as the project's major capabilities
+ * change (preview transport, kernels, egress, persistence).
+ */
+const ERDOU_ABOUT = [
+  "ABOUT ERDOU (read this — it changes how you build)",
+  "- Erdou is a browser-first agent OS: your whole world runs inside the user's browser tab, not on a server or laptop. There is no host machine to fall back to — no ssh, no cloud box, no second terminal.",
+  "- The project is the /workspace filesystem, persisted by the browser (IndexedDB / snapshots) or a mounted local folder — NOT a normal disk. Work under /workspace; files elsewhere may not survive a reload.",
+  '- To show a running server to the user it MUST bind 0.0.0.0 (not localhost / 127.0.0.1) — the preview reaches it through a reverse proxy, so a loopback-only bind is invisible. For web pages prefer RELATIVE asset URLs (href="style.css", not "/style.css"); absolute root paths need care to resolve through the preview.',
+  "- Design to fit this environment. When you write code or config that only exists BECAUSE of Erdou — binding 0.0.0.0, relative URLs, avoiding native/compiled deps, staying within the RAM cap — that is an Erdou adaptation; record it (see HOW TO WORK).",
+];
+
 const HOW_TO_WORK = [
   "HOW TO WORK",
   "- Use the tools: file tools to read/write, run_shell for commands. Create parent dirs with make_dir before writing.",
   "- After making changes, verify them (run_shell, read_file, or list_dir).",
+  "- Keep a root ERDOU.md. The workspace has (or should have) an ERDOU.md explaining how this environment differs from a normal machine. Whenever you make an Erdou-specific adaptation, add a short bullet to its '## Project adaptations' section — what you did and why — so the user and the next agent understand the non-obvious choices. Create ERDOU.md from the standard intro if it is missing.",
   "- Make reasonable decisions and proceed. When the task is fully complete, reply with a short plain-text summary and DO NOT call any tool.",
 ];
+
+/**
+ * The seed ERDOU.md dropped into a fresh project workspace (by the app, before
+ * the agent runs). Explains the universal Erdou differences and leaves a
+ * "Project adaptations" section the agent extends as it makes Erdou-specific
+ * choices. Canonical here (single source) so the app can import it without
+ * owning the copy; agent-core stays app-independent.
+ */
+export const ERDOU_MD_TEMPLATE = `# Running in Erdou
+
+This project was built inside **Erdou**, a browser-first agent OS — the whole
+environment runs in a web browser tab, not on a normal server or laptop. A few
+things work differently here than on a traditional machine:
+
+- **Where it lives.** The project is the \`/workspace\` filesystem, persisted by
+  the browser (IndexedDB / snapshots) or a mounted local folder — not a real disk.
+- **Preview / servers.** A server is only visible to the user when it binds
+  \`0.0.0.0\` (not \`localhost\`), and web pages should use **relative** asset URLs —
+  the preview reaches the server through a reverse proxy, not a real localhost.
+- **Network.** Outbound requests go through the browser's own \`fetch\` (CORS
+  applies); \`pip\` / \`npm\` install from the real registries via a gateway. There
+  are no raw sockets, no arbitrary hosts, and no \`apt\` / system installs at runtime.
+- **No host services.** No Docker, sudo, systemd, or long-lived daemons; the
+  Linux VM is a real but slow (~10-100x) emulated 32-bit machine with limited RAM.
+
+## Project adaptations
+
+_Code or config in this project that only exists to fit Erdou (rather than a
+normal machine) is listed here by the agent, so you know what is Erdou-specific
+and can hand it to the next agent to review._
+
+- _(none yet)_
+`;
 
 /**
  * Build the agent's system prompt from the runtime's real capabilities and the
@@ -134,6 +183,8 @@ function simulatedPrompt(env: EnvironmentInfo, caps: RuntimeCapabilities): strin
   return [
     "You are Erdou — an autonomous coding agent operating a *simulated, browser-native* operating environment. It is NOT a real Linux machine; know your environment precisely so you don't waste steps.",
     "",
+    ...ERDOU_ABOUT,
+    "",
     "ENVIRONMENT",
     "- A virtual OS inside a web browser tab: an in-memory POSIX-ish filesystem, processes, and a shell. Paths are absolute and start with '/'. The filesystem starts empty.",
     `- Shell: pipes (|), redirection (> >> <), and && || ; . Built-in commands: ${SHELL_BUILTINS}. cd and export change the shell state.`,
@@ -171,6 +222,8 @@ function realOsPrompt(env: EnvironmentInfo, caps: RuntimeCapabilities): string {
 
   return [
     `You are Erdou — an autonomous coding agent operating a REAL Linux machine running inside a browser tab (an emulated 32-bit x86 PC). The kernel, shell, filesystem and tools are real — but the CPU is roughly 10-100x slower than native, so prefer small targeted commands over heavy builds.${mem}`,
+    "",
+    ...ERDOU_ABOUT,
     "",
     "ENVIRONMENT",
     "- Your project lives in /workspace — do all project work there (it is shared live with the host page).",

@@ -1,6 +1,6 @@
 import { IndexedDbSnapshotStore } from "@erdou/runtime-browser";
 import { ModelGateway, type ModelConfig, type ChatMessage } from "@erdou/model-gateway";
-import { CodingAgent, type AgentEvent, type ApprovalRequest } from "@erdou/agent-core";
+import { CodingAgent, ERDOU_MD_TEMPLATE, type AgentEvent, type ApprovalRequest } from "@erdou/agent-core";
 import { createSwitchEnvironmentTool } from "@erdou/agent-tools";
 import { ENVIRONMENTS, environmentById } from "./environments.js";
 import { loadApprovalMode, saveApprovalMode, loadModel, saveModel, type ApprovalMode } from "./model-config.js";
@@ -879,7 +879,19 @@ export class Studio {
     this.runs = [run, ...this.runs];
     this.activeRunId = run.id;
     this.notify();
+    this.seedEnvNotes();
     await this.runAgentTurn(run, task, model, approvalMode);
+  }
+
+  /** Drop the standard ERDOU.md into a project that doesn't have one yet, so
+   *  every agent-built project carries the "how this environment differs" intro
+   *  before the agent starts (the agent then appends its Erdou-specific
+   *  adaptations to it — see the system prompt). Never overwrites an existing
+   *  one; the write flows to a mounted folder via the normal sync. */
+  private seedEnvNotes(): void {
+    if (this.fs.exists("/ERDOU.md")) return;
+    this.fs.writeFile("/ERDOU.md", ERDOU_MD_TEMPLATE);
+    this.fsVersion++;
   }
 
   /**

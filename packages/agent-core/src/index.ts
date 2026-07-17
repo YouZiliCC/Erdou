@@ -1,5 +1,5 @@
 export { CodingAgent } from "./agent.js";
-export { buildSystemPrompt } from "./prompt.js";
+export { buildSystemPrompt, ERDOU_MD_TEMPLATE } from "./prompt.js";
 export type {
   AgentOptions,
   AgentRunResult,

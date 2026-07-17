@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { RuntimeCapabilities } from "@erdou/runtime-contract";
-import { buildSystemPrompt, type EnvironmentCatalog } from "./prompt.js";
+import { buildSystemPrompt, ERDOU_MD_TEMPLATE, type EnvironmentCatalog } from "./prompt.js";
 
 const caps: RuntimeCapabilities = {
   nativeProcesses: true,
@@ -180,5 +180,29 @@ describe("buildSystemPrompt (environments catalog)", () => {
   it("omits the catalog section entirely when no catalog is supplied (back-compat)", () => {
     expect(buildSystemPrompt({}, realCaps)).not.toMatch(/ENVIRONMENTS & PACKAGES/);
     expect(buildSystemPrompt({ languages: ["python"] }, caps)).not.toMatch(/ENVIRONMENTS & PACKAGES/);
+  });
+});
+
+describe("Erdou environment orientation (both kernels)", () => {
+  const realCaps: RuntimeCapabilities = { ...caps, realOs: true, interpreters: ["python3"], packageManagers: ["pip"], networkEgress: "cors-only" };
+  for (const [name, c] of [["simulated", caps], ["real OS", realCaps]] as const) {
+    it(`${name}: orients the agent to Erdou + the preview 0.0.0.0/relative-URL rule + the ERDOU.md instruction`, () => {
+      const p = buildSystemPrompt({}, c);
+      expect(p).toContain("ABOUT ERDOU");
+      expect(p).toMatch(/browser-first agent OS/i);
+      expect(p).toMatch(/bind 0\.0\.0\.0/); // the preview rule that bit users
+      expect(p).toMatch(/RELATIVE asset URLs/i);
+      expect(p).toContain("ERDOU.md"); // maintain-the-notes instruction
+      expect(p).toMatch(/Project adaptations/); // the section the agent extends
+    });
+  }
+});
+
+describe("ERDOU_MD_TEMPLATE", () => {
+  it("is a seedable intro with an empty Project adaptations section", () => {
+    expect(ERDOU_MD_TEMPLATE).toContain("# Running in Erdou");
+    expect(ERDOU_MD_TEMPLATE).toContain("## Project adaptations");
+    expect(ERDOU_MD_TEMPLATE).toContain("0.0.0.0");
+    expect(ERDOU_MD_TEMPLATE).toContain("(none yet)");
   });
 });
