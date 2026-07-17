@@ -197,3 +197,62 @@
 - Spec coverage: §1→T1/T3/T10, §2→T2/T3 (+S1's zero-gateway verdict), §3→T1/T7, §4→T6/T8/T9, §5→T5/T12, §6→T4, §7→T10/T11. All spike caveats have owners (resolv.conf→T3; facade→T8; lineage eviction→T1; shared pyodide instance→T4; https-page note→T12 docs).
 - File-conflict audit: studio.ts/kernel.ts/vm-kernel.ts/KernelToggle.tsx ONLY in lane L-studio (T7→T8 sequential). profiles.ts created T1, consumed T3/T5/T7/T9 (read-only). capabilities.ts only T9. TitleBar.tsx only T5. agent-core: T6 (types/agent) vs T9 (prompt) — different files, parallel-safe; controller stages commits accordingly.
 - Type consistency: `VmProfile`, `PROFILE_META`, `Environment`, env id `browser|vm:<profile>`, `createSwitchEnvironmentTool(cb, {environments})`, `AgentOptions.tools` — single definitions, cross-referenced.
+
+---
+
+## PLAN VERIFICATION AMENDMENTS (v2 — AUTHORITATIVE; these OVERRIDE any conflicting task text above)
+
+Adversarial plan-verification (2 lenses, 6 Critical + 9 Important + 7 Minor) folded in. Every implementer MUST read the amendments for their task; where an amendment contradicts the task body, the amendment wins. Dossier naming is superseded: the switch tool arg is `target` with ids `browser|vm:<profile>` (not `profile`); the VM kernel cache is keyed by env id.
+
+### Single source of truth for profile package lists (resolves M11 + the .mjs-can't-import-.ts fact)
+`bake-image.mjs` is a plain Node `.mjs` (imports `./lib/apk.mjs`, no tsx) — it CANNOT import `src/profiles.ts`. Canonical package DATA lives in **`packages/runtime-vm/src/profiles.data.json`** (`{ base: {version, packages, label, interpreters, packageManagers}, node: {...}, sci: {...} }`). `profiles.ts` imports it (`resolveJsonModule` is on — verify tsconfig; else `import ... assert {type:"json"}`) and re-exports typed `PROFILE_META`/`VmProfile`; `bake-image.mjs` reads it via `JSON.parse(fs.readFileSync(new URL("../src/profiles.data.json", import.meta.url)))`. One file, both sides. (T1 creates both; T3 reads the JSON.)
+
+### T1 amendments
+- Subpath export: add to `packages/runtime-vm/package.json` `exports` `"./profiles": { "types": "./src/profiles.ts", "import": "./src/profiles.ts" }` AND `publishConfig.exports` `"./profiles": { "types": "./dist/profiles.d.ts", "import": "./dist/profiles.js" }`; add `src/profiles.ts` to the tsup build entry list (`build: tsup src/index.ts src/node.ts src/profiles.ts ...`).
+- **I5 (no v86 in bundle) — T1 OWNS the guard test:** add a hermetic static-graph test (reuse the `localGraph` walker from `index.browser-clean.test.ts`) asserting `profiles.ts`'s transitive LOCAL import graph contains no `v86` specifier, no `v86-host.ts`, no node builtins. profiles.ts must import ONLY the JSON (+ pure TS).
+
+### T2 amendments (I4 — shim must have boot-install bite)
+Install the shim in **`V86Host.boot`** (right after emulator creation / `networkAdapter()` availability), NOT in vm-runtime.ts — V86Host has the proven `makeEmulator()` FakeHost seam (`v86-host.input-sender.test.ts:14-30`). Add a hermetic v86-host test: fake emulator exposes a NetworkAdapter `{fetch}`; after boot assert `adapter.fetch` was wrapped (marker prop) AND a fake pypi simple-API response comes back link-rewritten. Files: add `packages/runtime-vm/src/v86-host.ts` + `v86-host.input-sender.test.ts` (or a new v86-host.egress.test.ts) to T2; vm-runtime.ts drops out of T2's list.
+
+### T4 amendments
+- **I7:** T4 CREATES `apps/web/src/lib/languages.test.ts` (none exists): fake runtime records `registerProgram` calls; assert python/python3 AND pip/pip3 register, and pip+python share ONE factory (single load).
+- **I3 (concurrency):** serialize `python`/`pip` executions on a shared promise-chain tail inside the shared factory (~5 lines); the serve/dispatch WSGI callback stays OUTSIDE the queue (a long pip install must not stall a served app). One test: pip started while a python run is pending executes after it (no stdout/stderr crossing).
+
+### T5 amendments
+- **C3/I2 presence channel:** do NOT browser-probe `assetsPresent` (Node-only; SPA-fallback trap). `link-vm-assets.mjs` additionally writes `apps/web/public/vm-assets/profiles.json` listing the profiles it actually linked; the selector fetches it. Extract a PURE `environmentOptions(catalog, presentProfiles) -> {value,label,disabled?,hint?}[]` into `environments.ts` with a unit test (KernelToggle stays a dumb renderer — this is the bite seam, avoids the R12.5 no-component-test gap).
+- **I9 hook chaining:** predev/prebuild slots ALREADY run link-vm-assets — CHAIN, don't add: `"prebuild": "node scripts/link-vm-assets.mjs && node scripts/render-help.mjs"` (same for predev). render-help.mjs exports `renderMd`/`inject` so the unit test imports them (no duplicate renderer).
+- **M11 catalog for the script:** render-help.mjs reads env data from `profiles.data.json` (same single source) + a plain env-catalog description; do not import the TS catalog.
+
+### T6 amendments (C1-tests + C3/I8-semantics)
+- `AgentOptions.tools` ALREADY EXISTS with REPLACE semantics (`types.ts:40`, `agent.ts:21` `opts.tools ?? createTools()`). Do NOT change its meaning. Add a NEW `extraTools?: ToolDef[]` appended after the built-ins in agent.ts; T8 passes `extraTools:[switchTool]` only. Test: "built-ins not duplicated when extraTools passed" (tool-name uniqueness in toolSpecs).
+- **GATED_TOOLS:** T6 MUST add `"switch_environment"` to `agent-core/src/agent.ts:6` `GATED_TOOLS` + a unit test (switch_environment in Confirm mode awaits approve; a non-gated extra tool does not). This is the ONLY approval mechanism — do not invent a per-ToolDef flag.
+
+### T7 amendments (C1 + C2 + C3 + I2 — the deepest task; these are authoritative)
+One-VM-alive EXACT sequence (S6 §3, supersedes the task one-liner AND S4 §2.e/§2.3):
+1. profile-aware guards (target==current → no-op; `switchingKernel`/`running` per existing rules).
+2. **Boot target B first, A untouched** (accept transient 2×512MB overlap).
+3. `this.running` re-check → if a run started: `await B.shutdown()`, **keep A cached**, abort.
+4. `stopTrackedServe()` on the OUTGOING runtime (kills servePid, closes ports) while `this.runtime` still targets A.
+5. `copyWorkspace(A.fs, B.fs)`.
+6. Swap: unsub → `kernel = next` → `_shell = undefined` → resubscribe → `setPreviewRuntime`.
+7. **LAST:** `await A.shutdown().catch(e => logSystem(...))` then update cache — but ONLY when A is a VM being replaced. **vm→browser KEEPS the VM cached alive** (preserves R12.5 I4 + `studio-switch.test.ts:68,:126-150`); shutdown fires only when a VM profile is replaced by a *different* VM profile (or a stale cached VM while browser is active, per S6 §3 bullet 1). Cache: single `vmKernel` slot is fine; if a Map, VM entries are dropped on shutdown.
+- **C2 stale PTY:** add `apps/web/src/components/TerminalPanel.tsx` + `PtyTerminal.tsx` to T7's files AND to the L-studio conflict audit. Remount the PTY on kernel identity (a `key={envId}` or a Studio kernel-generation counter on `<PtyTerminal>`), so a vm:base→vm:node switch re-opens the terminal on the new guest. Add a step asserting the PTY re-opens after a vm→vm switch.
+- **C3/I2 selector:** lists browser + ALL vm profiles; switching to an unbaked profile fails LOUDLY at boot with the `bake --profile <p>` hint (existing catch at `studio.ts:341-346` keeps the user on the working kernel). Use the pure `environmentOptions()` from T5 (disabled+hint from profiles.json). The "absent-profile refused" studio test targets the makeKernel/boot failure path (name it in the assertion).
+
+### T8 amendments (C2-tests + I1 + M1)
+- S4 §2 ordering is authoritative EXCEPT step (e) and caveat §2.3 (predate one-VM-alive) — use T7's sequence.
+- **I1 servePid (pinned, no waffle):** NEVER refuse for servePid. Order in the run-initiated switch: defensive guard → set `this.switchingKernel` FIRST (inherits runServe's refuse + the stale-settle poison path) → `await eventsSettled()` → `await stopTrackedServe()` on the outgoing runtime → T7 sequence → clear switchingKernel → return new-env brief. FAILURE path: try/catch — on boot/asset failure clear switchingKernel, leave current kernel untouched, return `ok:false` with the bake-hint error (model continues on the old env).
+- **Facade (M1):** forward ALL 22 `Runtime` methods (runtime-contract/src/runtime.ts) to `this.kernel.runtime` at call time, incl. `subscribe` (type-completeness; note a facade-made subscription binds to the then-current runtime — harmless: agent-tools uses only readFile/writeFile/readdir/mkdir/rm/exec, grep-verified no subscribe). Studio's own subscriptions stay on concrete runtimes.
+- **C2 facade test recipe (hermetic, MUST be constructible):** in `studio-agent-switch.test.ts`: override `(studio as any).gateway` with a scripted gateway (turns: `switch_environment{target:"vm:node"}` → `write_file`/`run_shell` → final); pre-seed the per-envId VM kernel cache with a FAKE vm:node kernel (distinct fs + spied runtime) via internals cast BEFORE the run; assert the 2nd tool call executed on the seeded kernel's runtime (file lands in its fs / exec spy) AND `run.changes` contains the post-switch edit (proves `repointRunDiff`). M2: do NOT await `wait()` on a shut-down runtime in tests (never settles post-dispose).
+
+### T9 amendments (M3)
+The catalog section must state "the current environment can change mid-run via switch_environment; trust the latest tool result" (reply turns do NOT rebuild the system prompt — `agent.ts:37-39`). The switch tool's callback summary string (T8) must carry full new-env facts (interpreters, packageManagers, egress, install recipe) since it is the model's only in-band update.
+
+### T10 amendments (M10)
+Per-profile pre-save_state smokes ALSO cat-assert baked config markers: `/etc/resolv.conf` contains `192.168.86.1`; `/etc/pip.conf` contains `break-system-packages`; node `/root/.npmrc` contains `registry.npmjs.org`; `echo $HOME`→`/root`. Cheap, catches bake typos at bake time.
+
+### T11 amendments (I6 + M13)
+Explicit per-`it` timeouts: flask acceptance loop `{timeout:300_000}`, sci import `180_000`, pip/npm legs `180_000`, micropip `120_000` (place micropip test in runtime-vm's package to inherit 120s default, or set it — apps/web default is 5s, fatal). PIN versions: `six==1.17.0`, `left-pad@1.3.0`, flask pinned to a current exact minor. No auto-retries; each test quotes wall time; on failure capture the NAT fetch log. Gating idiom (visible skips, no false pass): `const RUN = assetsPresent(profile) && process.env.ERDOU_NET_E2E === "1"; describe.skipIf(!RUN)(...)`.
+
+### Conflict-audit corrections
+L-studio (T7→T8, sequential) now also owns `TerminalPanel.tsx` + `PtyTerminal.tsx`. T2 owns `v86-host.ts` (shim install) — no other Wave-1 lane touches it (T4 FU2's input-sender test is committed to main already; T2's egress test is a new file). agent-core: T6 edits `types.ts`+`agent.ts`; T9 edits `prompt.ts` — disjoint, parallel-safe (Wave 2). `capabilities.ts` only T9.
