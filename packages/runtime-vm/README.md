@@ -137,7 +137,7 @@ process, so a port (1-3) freed by one session's `dispose()` is safe to reuse for
 
 ## Networking & live preview (Round 12)
 
-The baked state is **networked**: the bake brings up a virtio NIC and DHCPs `eth0` to `192.168.86.100` *before* `save_state`, so a restore boots with a live, addressed interface and zero per-boot network setup. This required a **re-bake** — adding `net_device` only at restore time crashes v86's per-device `set_state`, and the frozen kernel only creates `eth0` when the NIC is present at boot. `VmRuntime.boot()` also brings `lo` up, so a `127.0.0.1`-default server can still bind inside the guest.
+The baked state is **networked**: the bake brings up a virtio NIC, DHCPs `eth0` to `192.168.86.100`, and brings `lo` up *before* `save_state`, so a restore boots with live, addressed interfaces and zero per-boot network setup — a `127.0.0.1`-default server can bind inside the guest immediately. The bake **asserts** both (quote-split `ETH_OK`/`LO_OK` markers checked host-side) and fails loudly rather than saving a broken-networking image. This required a **re-bake** — adding `net_device` only at restore time crashes v86's per-device `set_state`, and the frozen kernel only creates `eth0` when the NIC is present at boot.
 
 Restore MUST pass both v86 options (both are set in `v86-host.ts`):
 
@@ -157,7 +157,7 @@ rm -f packages/runtime-vm/assets/state.bin
 pnpm --filter @erdou/runtime-vm bake
 ```
 
-Then **bump `version` in `apps/web/src/lib/vm-assets.ts`** so IndexedDB-cached clients re-fetch the new state (currently `alpine-3.24.1-r12-net-watch`). The `state.zst`/kernel/bios binaries stay gitignored — never commit them.
+Then **bump `version` in `apps/web/src/lib/vm-assets.ts`** so IndexedDB-cached clients re-fetch the new state (currently `alpine-3.24.1-r12-lo-baked`). The `state.zst`/kernel/bios binaries stay gitignored — never commit them.
 
 **Deferred to a later round (out of scope this round):** the npm/pip network-egress gateway (spec §7) and WISP — `networkEgress` is still `"none"`. This round is preview-only; the fetch-NAT is used solely for the host→guest dispatch reverse-proxy.
 
@@ -167,7 +167,7 @@ The default `pnpm test` skips four slow suites, keeping CI hermetic: Node confor
 package's own browser e2e, apps/web's in-app PTY e2e, and apps/web's in-app preview e2e are all
 `describe.skipIf`-gated off by default and report as skipped rather than run.
 
-Run the Node conformance suite (30 tests: contract ops — spawn/kill/ps/chdir — workspace snapshotting,
+Run the Node conformance suite (32 tests: contract ops — spawn/kill/ps/chdir — workspace snapshotting,
 live 9p sync, PTY open/write/close, a `syncFs()`/async-bridge shared-fs9p check, and the Round 12
 networking checks — networked-state restore (`eth0` = 192.168.86.100), a live `networkAdapter()`, the
 `dispatch` reverse-proxy into a real 0.0.0.0 guest server, and `port.opened`/`port.closed` plus the

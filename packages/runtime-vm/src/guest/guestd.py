@@ -4,7 +4,7 @@
 # subprocess (no per-command chroot). Speaks the length-prefixed binary frame
 # protocol (see guestd-protocol.ts) over /dev/hvc0. Verified by the gated
 # conformance run (packages/runtime-vm/src/vm-runtime.conformance.test.ts).
-import os, json, struct, subprocess, threading, signal, shutil, time
+import os, json, struct, subprocess, threading, signal, shutil, time, traceback
 
 fd = os.open("/dev/hvc0", os.O_RDWR)
 import tty
@@ -150,23 +150,30 @@ def _parse_listening(text):
 def port_watcher():
     last = {}
     while True:
-        cur = {}
-        for path in ("/proc/net/tcp", "/proc/net/tcp6"):
-            try:
-                with open(path) as f:
-                    text = f.read()
-            except OSError:
-                continue
-            for port, loop in _parse_listening(text).items():
-                prev = cur.get(port)
-                cur[port] = loop if prev is None else (prev and loop)
-        for port, loop in cur.items():
-            if port not in last or last[port] != loop:
-                send_json("L", 0, {"port": port, "listening": True, "loopback": loop})
-        for port, loop in last.items():
-            if port not in cur:
-                send_json("L", 0, {"port": port, "listening": False, "loopback": loop})
-        last = cur
+        try:
+            cur = {}
+            for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+                try:
+                    with open(path) as f:
+                        text = f.read()
+                except OSError:
+                    continue
+                for port, loop in _parse_listening(text).items():
+                    prev = cur.get(port)
+                    cur[port] = loop if prev is None else (prev and loop)
+            for port, loop in cur.items():
+                if port not in last or last[port] != loop:
+                    send_json("L", 0, {"port": port, "listening": True, "loopback": loop})
+            for port, loop in last.items():
+                if port not in cur:
+                    send_json("L", 0, {"port": port, "listening": False, "loopback": loop})
+            last = cur
+        except Exception:
+            # Never let one unexpected exception kill port events for the whole
+            # session (mirrors the frame loop's never-die guard). A "!" frame is
+            # useless here — the host drops id-0 error frames (guestd-client.ts
+            # pending.get(id) miss) — so log the traceback to /tmp/gd.log instead.
+            traceback.print_exc()
         time.sleep(0.5)
 
 threading.Thread(target=port_watcher, daemon=True).start()

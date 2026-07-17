@@ -57,7 +57,7 @@ export const GUEST_SETUP_CMD =
   "mkdir -p /mnt/workspace/dev/pts; mount -t devpts devpts /mnt/workspace/dev/pts; " +
   "echo SETUPD''ONE";
 export const PYCACHE_WARMUP_CMD =
-  "chroot /mnt/workspace /usr/bin/python3 -c 'import subprocess, tty, termios, json, struct, threading, signal, shutil, pty, fcntl, select' 2>/dev/null; echo WAR''MED";
+  "chroot /mnt/workspace /usr/bin/python3 -c 'import subprocess, tty, termios, json, struct, threading, signal, shutil, pty, fcntl, select, traceback' 2>/dev/null; echo WAR''MED";
 export const REMOUNT_RO_CMD =
   "for d in bin lib usr; do mount -o remount,ro,bind /mnt/workspace/$d || echo ROF''AIL_$d; done; echo ROREAD''Y";
 export const LAUNCH_GUESTD_CMD =

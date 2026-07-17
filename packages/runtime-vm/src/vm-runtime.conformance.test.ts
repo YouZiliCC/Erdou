@@ -64,6 +64,16 @@ describe.skipIf(!RUN)("VmRuntime (gated e2e)", () => {
     await rt.shutdown();
   });
 
+  it("restores the baked state with loopback (lo) already up — no per-boot lo exec", async () => {
+    const rt = new VmRuntime(makeInputs);
+    await rt.boot();
+    // lo up + 127.0.0.1 must come from the BAKED state now: boot() no longer
+    // runs the busybox lo-up exec. busybox `ip` applet, as in the eth0 test.
+    const p = await rt.exec("busybox ip -o addr show lo");
+    expect(await p.stdout.text()).toContain("127.0.0.1");
+    await rt.shutdown();
+  });
+
   it("V86Host.networkAdapter() is live after boot from the networked state", async () => {
     const host = new V86Host();
     await host.boot(await makeInputs(), { bootTimeoutMs: 30_000 });
@@ -91,6 +101,11 @@ describe.skipIf(!RUN)("VmRuntime (gated e2e)", () => {
     }
     expect(ok).toBeDefined();
     expect(new TextDecoder().decode(ok!.body)).toContain("hello-from-guest-dispatch");
+    // Header hygiene (T3a): python http.server always sends Content-Length; the
+    // codec must have stripped it so the preview SW can never mis-frame.
+    expect(ok!.headers["content-length"]).toBeUndefined();
+    expect(ok!.headers["transfer-encoding"]).toBeUndefined();
+    expect(ok!.headers["content-type"]).toContain("text/html"); // non-framing headers still flow
     // Leak fix (conn.close()): many sequential dispatches must NOT grow the
     // emulator's retained TCP-connection table. Each guest FIN parks the conn in
     // `close-wait`; dispatch()'s conn.close() completes the passive close →
