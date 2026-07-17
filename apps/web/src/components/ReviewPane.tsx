@@ -43,8 +43,21 @@ export function ReviewPane({ studio }: { studio: Studio }) {
         {tab === "Diff" &&
           (run ? <DiffPanel run={run} studio={studio} /> : <div className="hint">No active run selected.</div>)}
         {tab === "Files" && <FilePanel studio={studio} />}
-        {tab === "Terminal" && <TerminalPanel studio={studio} />}
-        {tab === "Preview" && <PreviewPanel studio={studio} />}
+        {/* Terminal and Preview stay MOUNTED across tab switches (hidden, not
+            unmounted) — both own expensive live state that conditional
+            rendering would destroy: leaving Terminal would dispose the VM
+            PtySession (kills ptybridge → "reconnect" on return), and leaving
+            Preview would tear down the running iframe (reload on return). The
+            wrapper carries `flex:1; min-height:0` via `.tab-body > *`; the
+            panel's own `height:100%` fills it. `display:none` while inactive
+            drops it from flex layout without unmounting, so no effect re-runs.
+            The cheap panels (Diff/Files/Processes) stay conditional. */}
+        <div style={{ display: tab === "Terminal" ? undefined : "none" }}>
+          <TerminalPanel studio={studio} />
+        </div>
+        <div style={{ display: tab === "Preview" ? undefined : "none" }}>
+          <PreviewPanel studio={studio} />
+        </div>
         {tab === "Processes" && <ProcessPanel studio={studio} />}
       </div>
     </div>

@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import type { ModelConfig } from "@erdou/model-gateway";
 import { useStudio } from "./lib/use-studio.js";
 import { loadModel, saveModel, loadApprovalMode, saveApprovalMode, type ApprovalMode } from "./lib/model-config.js";
+import { loadLayout, saveLayout, clampSidebar, clampReview, type LayoutState } from "./lib/layout-state.js";
 import { SettingsDialog } from "./components/SettingsDialog.js";
 import { TitleBar } from "./components/TitleBar.js";
 import { KernelToggle } from "./components/KernelToggle.js";
@@ -9,14 +10,52 @@ import { TaskSidebar } from "./components/TaskSidebar.js";
 import { Conversation } from "./components/Conversation.js";
 import { Composer } from "./components/Composer.js";
 import { ReviewPane } from "./components/ReviewPane.js";
+import { ResizableShell } from "./components/ResizableShell.js";
+import { SecureContextBanner } from "./components/SecureContextBanner.js";
 
 export function App() {
   const studio = useStudio();
   const [model, setModel] = useState<ModelConfig>(() => loadModel());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [mode, setMode] = useState<ApprovalMode>(() => loadApprovalMode());
+  const [layout, setLayout] = useState<LayoutState>(() => loadLayout());
 
   const configured = model.apiKey.trim().length > 0;
+
+  // The three columns' geometry (widths + sidebar-collapsed) persists across
+  // reloads. Clamp on every mutation so a bad value can never be stored, then
+  // save. layout-state.ts owns all bounds; the drag handlers pre-clamp too.
+  function updateLayout(patch: Partial<LayoutState>) {
+    setLayout((prev) => {
+      const next: LayoutState = {
+        sidebarWidth: clampSidebar(patch.sidebarWidth ?? prev.sidebarWidth),
+        reviewWidth: clampReview(patch.reviewWidth ?? prev.reviewWidth),
+        sidebarCollapsed: patch.sidebarCollapsed ?? prev.sidebarCollapsed,
+      };
+      saveLayout(next);
+      return next;
+    });
+  }
+
+  // Re-clamp the layout whenever the window shrinks: a review width valid on a
+  // wide screen would otherwise strand the center column (.review is flex:0 0
+  // with min-width, so .center shrinks to 0). loadLayout() re-derives from the
+  // PERSISTED (desired) width clamped to the new viewport without overwriting
+  // it, so shrinking never hides the chat and re-widening restores the width.
+  useEffect(() => {
+    function onResize() {
+      setLayout((prev) => {
+        const next = loadLayout();
+        return next.sidebarWidth === prev.sidebarWidth &&
+          next.reviewWidth === prev.reviewWidth &&
+          next.sidebarCollapsed === prev.sidebarCollapsed
+          ? prev
+          : next;
+      });
+    }
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   // Composer selector and Settings share this one persisted value.
   function changeMode(next: ApprovalMode) {
@@ -80,6 +119,7 @@ export function App() {
 
   return (
     <div className="app">
+      <SecureContextBanner />
       <TitleBar
         workspace={workspace}
         model={configured ? model.model : "no model key"}
@@ -90,26 +130,43 @@ export function App() {
       >
         <KernelToggle studio={studio} />
       </TitleBar>
-      <div className="shell">
-        <TaskSidebar studio={studio} onNew={() => studio.newDraft()} onOpenFolder={() => void openFolder()} />
-        <section className="center">
-          <div className="thread-head">
-            <span className="t">{studio.activeRun?.title ?? "New task"}</span>
-            {studio.activeRun && <span className={"chip " + studio.activeRun.status}>{studio.activeRun.status}</span>}
-          </div>
-          <Conversation studio={studio} />
-          <Composer
-            running={studio.running || studio.activeRun?.status === "running" || !!studio.switchingKernel}
-            replying={studio.activeRun !== undefined}
-            mode={mode}
-            onModeChange={changeMode}
-            onRun={runTask}
+      <ResizableShell
+        sidebarWidth={layout.sidebarWidth}
+        reviewWidth={layout.reviewWidth}
+        collapsed={layout.sidebarCollapsed}
+        onSidebarWidthChange={(w) => updateLayout({ sidebarWidth: w })}
+        onReviewWidthChange={(w) => updateLayout({ reviewWidth: w })}
+        onExpandSidebar={() => updateLayout({ sidebarCollapsed: false })}
+        sidebar={
+          <TaskSidebar
+            studio={studio}
+            onNew={() => studio.newDraft()}
+            onOpenFolder={() => void openFolder()}
+            onCollapse={() => updateLayout({ sidebarCollapsed: true })}
           />
-        </section>
-        <section className="review">
-          <ReviewPane studio={studio} />
-        </section>
-      </div>
+        }
+        center={
+          <section className="center">
+            <div className="thread-head">
+              <span className="t">{studio.activeRun?.title ?? "New task"}</span>
+              {studio.activeRun && <span className={"chip " + studio.activeRun.status}>{studio.activeRun.status}</span>}
+            </div>
+            <Conversation studio={studio} />
+            <Composer
+              running={studio.running || studio.activeRun?.status === "running" || !!studio.switchingKernel}
+              replying={studio.activeRun !== undefined}
+              mode={mode}
+              onModeChange={changeMode}
+              onRun={runTask}
+            />
+          </section>
+        }
+        review={
+          <section className="review">
+            <ReviewPane studio={studio} />
+          </section>
+        }
+      />
 
       {settingsOpen && (
         <SettingsDialog

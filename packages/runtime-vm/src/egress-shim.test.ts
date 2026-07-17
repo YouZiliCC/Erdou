@@ -153,6 +153,71 @@ describe("egress shim: pypi simple-API link rewrite", () => {
   });
 });
 
+describe("egress shim: strips preflight-tripping request headers (Cache-Control / Pragma)", () => {
+  // The forwarded init.headers may be a Headers instance (after strip) or the
+  // original form; normalize through Headers for assertions.
+  const forwarded = (calls: { url: string; init?: unknown }[]): Headers =>
+    new Headers((calls[0]!.init as { headers?: HeadersInit }).headers);
+
+  it("strips Cache-Control + Pragma from a plain-object headers (case-insensitive), keeps the rest, and does not mutate the caller's object", async () => {
+    const { fetchFn, calls } = makeUpstream(fakeRes({ url: "https://pypi.org/simple/six/" }));
+    const headers = {
+      Accept: "application/vnd.pypi.simple.v1+json",
+      "Cache-Control": "max-age=0",
+      Pragma: "no-cache",
+      "If-None-Match": '"abc"',
+      "X-Custom": "keep",
+    };
+    await wrapEgressFetch(fetchFn)("http://pypi.org/simple/six/", { method: "GET", headers });
+    const h = forwarded(calls);
+    expect(h.has("cache-control")).toBe(false);
+    expect(h.has("pragma")).toBe(false);
+    expect(h.get("accept")).toBe("application/vnd.pypi.simple.v1+json");
+    expect(h.get("if-none-match")).toBe('"abc"');
+    expect(h.get("x-custom")).toBe("keep");
+    // caller's original object untouched
+    expect(headers["Cache-Control"]).toBe("max-age=0");
+    expect(headers.Pragma).toBe("no-cache");
+  });
+
+  it("strips them from a Headers instance without mutating the caller's Headers", async () => {
+    const { fetchFn, calls } = makeUpstream(fakeRes({ url: "https://pypi.org/simple/six/" }));
+    const headers = new Headers({ accept: "application/json", "cache-control": "no-cache", pragma: "no-cache" });
+    await wrapEgressFetch(fetchFn)("http://pypi.org/simple/six/", { headers });
+    const h = forwarded(calls);
+    expect(h.has("cache-control")).toBe(false);
+    expect(h.has("pragma")).toBe(false);
+    expect(h.get("accept")).toBe("application/json");
+    // caller's Headers not mutated
+    expect(headers.get("cache-control")).toBe("no-cache");
+    expect(headers.get("pragma")).toBe("no-cache");
+  });
+
+  it("strips them from an array-of-pairs headers, keeps the rest, and does not mutate the caller's array", async () => {
+    const { fetchFn, calls } = makeUpstream(fakeRes({ url: "https://registry.npmjs.org/left-pad" }));
+    const headers: [string, string][] = [
+      ["accept", "*/*"],
+      ["cache-control", "max-age=0"],
+      ["pragma", "no-cache"],
+      ["user-agent", "pip/24"],
+    ];
+    await wrapEgressFetch(fetchFn)("http://registry.npmjs.org/left-pad", { headers });
+    const h = forwarded(calls);
+    expect(h.has("cache-control")).toBe(false);
+    expect(h.has("pragma")).toBe(false);
+    expect(h.get("accept")).toBe("*/*");
+    expect(h.get("user-agent")).toBe("pip/24");
+    // caller's array untouched
+    expect(headers).toHaveLength(4);
+  });
+
+  it("applies to ALL hosts, not just pypi (npm registry too — npm rejects the preflight the same way)", async () => {
+    const { fetchFn, calls } = makeUpstream(fakeRes({ url: "https://registry.npmjs.org/left-pad" }));
+    await wrapEgressFetch(fetchFn)("http://registry.npmjs.org/left-pad", { headers: { "Cache-Control": "no-cache" } });
+    expect(forwarded(calls).has("cache-control")).toBe(false);
+  });
+});
+
 describe("installEgressShim", () => {
   it("replaces adapter.fetch with a marked wrapper and is idempotent (no double wrap)", () => {
     const { fetchFn } = makeUpstream(fakeRes({ url: "https://pypi.org/simple/six/" }));

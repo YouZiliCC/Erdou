@@ -1,21 +1,29 @@
 import type { Studio, Run } from "../lib/studio.js";
+import { FolderSyncControls } from "./FolderSyncControls.js";
 
 /** Left rail: the list of agent "task threads" with live status chips. */
 export function TaskSidebar({
   studio,
   onNew,
   onOpenFolder,
+  onCollapse,
 }: {
   studio: Studio;
   onNew: () => void;
   onOpenFolder: () => void;
+  onCollapse: () => void;
 }) {
   return (
     <aside className="sidebar">
       <button className="btn newtask" onClick={onNew}>
         ＋ New task
       </button>
-      <div className="sbh">Tasks</div>
+      <div className="sbh sbh-row">
+        <span>Tasks</span>
+        <button className="sb-collapse" onClick={onCollapse} title="Collapse sidebar" aria-label="Collapse sidebar">
+          ‹
+        </button>
+      </div>
       <div className="threads">
         {studio.runs.length === 0 && <div className="hint sm">No tasks yet.</div>}
         {studio.runs.map((r) => (
@@ -44,6 +52,7 @@ export function TaskSidebar({
             Open folder
           </button>
         )}
+        {studio.mountName && <FolderSyncControls studio={studio} />}
         <div className="rt">
           <span className="dot on" /> runtime live
         </div>
