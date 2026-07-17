@@ -9,7 +9,7 @@ describe("vmCapabilities", () => {
     expect(caps.nativeAddons).toBe(true); // a real machine runs native binaries
     expect(caps.interpreters).toEqual(["python3"]);
     expect(caps.packageManagers).toEqual(["apk", "pip"]);
-    expect(caps.networkEgress).toBe("none"); // Round 12 adds the gateway
+    expect(caps.networkEgress).toBe("none"); // NAT-dispatch is inbound-only (preview); egress gateway is a future round
     expect(caps.memoryLimitMB).toBe(512);
     expect(caps.snapshotCost).toBe("cheap"); // workspace-scoped, not the whole machine
   });
