@@ -141,12 +141,6 @@ async function main() {
       args: ["--no-sandbox", "--disable-dev-shm-usage", "--no-proxy-server"],
     });
     const page = await browser.newPage();
-    // The app pulls Google Fonts via a render-blocking <link>. In this
-    // sandboxed headless browser (no network) that request hangs on DNS ~30s
-    // before ERR_ABORTED, stalling first paint and delaying the kernel button
-    // (and triggering spurious reloads). Abort font requests instantly so
-    // nothing render-blocks on an unreachable host.
-    await page.route(/fonts\.(googleapis|gstatic)\.com/, (r) => r.abort());
     page.on("pageerror", (e) => console.log(`[pageerror] ${e.message}`));
     page.on("requestfailed", (r) => console.log(`[requestfailed] ${r.url()} ${r.failure()?.errorText}`));
     page.on("response", (r) => {
