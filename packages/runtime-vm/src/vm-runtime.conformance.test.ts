@@ -73,4 +73,26 @@ describe.skipIf(!RUN)("VmRuntime (gated e2e)", () => {
     expect(typeof net.connect).toBe("function");
     await host.destroy();
   });
+
+  it("dispatch reverse-proxies to a real guest HTTP server bound to 0.0.0.0", async () => {
+    const rt = new VmRuntime(makeInputs);
+    await rt.boot();
+    await rt.writeFile("/index.html", "hello-from-guest-dispatch");
+    // Detached: exec resolves on process START; the server binds after cold-start.
+    await rt.exec("python3 -m http.server 8000 --bind 0.0.0.0");
+    const get = () => rt.dispatch(8000, { method: "GET", url: "/index.html", headers: {}, body: new Uint8Array() });
+    let ok: import("@erdou/runtime-contract").HttpResponse | undefined;
+    const deadline = Date.now() + 40_000; // python cold-start ~16s — poll generously
+    while (Date.now() < deadline) {
+      const r = await get();
+      if (r.status === 200) { ok = r; break; }
+      await new Promise((res) => setTimeout(res, 1000));
+    }
+    expect(ok).toBeDefined();
+    expect(new TextDecoder().decode(ok!.body)).toContain("hello-from-guest-dispatch");
+    // A closed port probes false → 502, no hang.
+    const closed = await rt.dispatch(9999, { method: "GET", url: "/", headers: {}, body: new Uint8Array() });
+    expect(closed.status).toBe(502);
+    await rt.shutdown();
+  }, 60_000);
 });

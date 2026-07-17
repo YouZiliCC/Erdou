@@ -13,6 +13,7 @@ import { snapshotWorkspace, restoreWorkspace } from "./workspace-snapshot.js";
 import { vmCapabilities } from "./capabilities.js";
 import { openPtySession, type PtySession } from "./pty.js";
 import { SyncFs9pFs } from "./sync-fs.js";
+import { serializeHttpRequest, parseHttpResponse, responseComplete } from "./http-codec.js";
 
 const SIG = (s?: Signal): string => s ?? "SIGTERM";
 
@@ -175,7 +176,59 @@ export class VmRuntime implements Runtime {
     return { port, close: async () => reg.close(port) };
   }
   async exposePort(port: number): Promise<string> { return this.ports.exposePort(port); }
-  async dispatch(port: number, req: HttpRequest): Promise<HttpResponse> { return this.ports.dispatch(port, req); }
+
+  /** Reverse-proxy an HTTP request into a real server running inside the guest.
+   *  Probe-first (fast + reliable): a closed OR loopback-only bind probes false →
+   *  a real 502, never a hang. Otherwise open a per-request TCP connection into
+   *  the guest, write the serialized request on the async `connect` event,
+   *  accumulate `data`, and finish on a self-describing completion rule
+   *  (Content-Length satisfied / chunked terminator) OR a 600ms idle timer OR
+   *  the unreliable `close` OR a 15s hard cap. Verified in the Round-12 spike. */
+  async dispatch(port: number, req: HttpRequest): Promise<HttpResponse> {
+    const net = this.host.networkAdapter();
+    // Probe-first: fast + reliable (mac fix). A closed OR loopback-only bind
+    // probes false → a real 502, never a hang.
+    if (!(await net.tcp_probe(port))) {
+      return { status: 502, headers: { "content-type": "text/plain" }, body: new TextEncoder().encode(`No server listening on port ${port}`) };
+    }
+    const raw = serializeHttpRequest(req);
+    const bytes = await new Promise<Uint8Array>((resolve) => {
+      const conn = net.connect(port);
+      const chunks: Uint8Array[] = [];
+      let idle: ReturnType<typeof setTimeout> | undefined;
+      let done = false;
+      const acc = (): Uint8Array => {
+        const total = chunks.reduce((n, c) => n + c.length, 0);
+        const out = new Uint8Array(total);
+        let o = 0;
+        for (const c of chunks) { out.set(c, o); o += c.length; }
+        return out;
+      };
+      const finish = (): void => {
+        if (done) return;
+        done = true;
+        if (idle) clearTimeout(idle);
+        clearTimeout(hard);
+        resolve(acc());
+      };
+      // Hard cap: never hang forever if the guest wedges mid-response.
+      const hard = setTimeout(finish, 15_000);
+      conn.on("connect", () => conn.write(raw));
+      conn.on("data", (d) => {
+        chunks.push(d instanceof Uint8Array ? d : new Uint8Array(d as ArrayBufferLike));
+        if (responseComplete(acc())) { finish(); return; }
+        if (idle) clearTimeout(idle);
+        idle = setTimeout(finish, 600); // idle fallback for keep-alive servers with no length info
+      });
+      conn.on("close", finish); // unreliable — a backstop, not the primary condition
+    });
+    if (bytes.length === 0) {
+      // M2: a no-bytes close (closed-port RST / connect that produced nothing)
+      // reads as 502, not a false "timed out within 15s".
+      return { status: 502, headers: { "content-type": "text/plain" }, body: new TextEncoder().encode(`No response from port ${port}`) };
+    }
+    return parseHttpResponse(bytes);
+  }
   async closePort(port: number): Promise<void> { this.ports.close(port); }
 
   async getCapabilities(): Promise<RuntimeCapabilities> { return vmCapabilities(["python3"]); }
