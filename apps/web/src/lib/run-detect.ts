@@ -57,16 +57,26 @@ export function staticServeCommand(kind: KernelKind, dir: string): string {
 
 /**
  * Suggest a run command for the project currently in `fs`, tried in order:
- *  1. A `.py` file anywhere (VCS/`node_modules` excluded) that looks like a
- *     Flask/WSGI app -> `python <file>`.
- *  2. A static site with `/index.html` at the root -> staticServeCommand "/".
+ *  1. (browser only) A `.py` file anywhere (VCS/`node_modules` excluded) that
+ *     looks like a Flask/WSGI app -> `python <file>`.
+ *  2. (browser only) A static site with `/index.html` at the root ->
+ *     staticServeCommand "/".
  *  3. A built static site at `/dist/index.html` -> staticServeCommand "/dist".
  *  4. Otherwise `null` — nothing to prefill, the user types their own command.
  */
 export function detectRunCommand(fs: FileSystemApi, kind: KernelKind = "browser"): string | null {
-  const wsgiEntry = findWsgiEntry(fs, "/");
-  if (wsgiEntry) return `python ${wsgiEntry}`;
-  if (fs.exists("/index.html")) return staticServeCommand(kind, "/");
+  if (kind !== "vm") {
+    // The erdou.serve/Flask shim is pyodide-only; the guest's bare python3 has
+    // no flask and no egress, so a WSGI prefill on the vm is guaranteed-broken.
+    const wsgiEntry = findWsgiEntry(fs, "/");
+    if (wsgiEntry) return `python ${wsgiEntry}`;
+  }
+  if (fs.exists("/index.html") && kind !== "vm") {
+    // Only /dist is safe to advertise in the guest: contract "/" IS the chroot
+    // root, so serving it would expose the skeleton dirs (/bin, /usr, ...) and
+    // live /dev device nodes through the preview proxy.
+    return staticServeCommand(kind, "/");
+  }
   if (fs.exists("/dist/index.html")) return staticServeCommand(kind, "/dist");
   return null;
 }

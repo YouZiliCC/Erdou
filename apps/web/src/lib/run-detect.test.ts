@@ -57,10 +57,10 @@ describe("staticServeCommand", () => {
 });
 
 describe("detectRunCommand (vm kernel)", () => {
-  it("suggests python3 http.server for a root index.html on the vm kernel", () => {
+  it("does NOT prefill a root serve on the vm kernel (chroot root exposes skeleton dirs and /dev nodes)", () => {
     const fs = new BrowserRuntime().fs;
     fs.writeFile("/index.html", "<!doctype html><html><body>hi</body></html>");
-    expect(detectRunCommand(fs, "vm")).toBe("python3 -m http.server 8080 --bind 0.0.0.0 -d /");
+    expect(detectRunCommand(fs, "vm")).toBeNull();
   });
 
   it("suggests python3 http.server for /dist/index.html on the vm kernel", () => {
@@ -76,10 +76,17 @@ describe("detectRunCommand (vm kernel)", () => {
     expect(detectRunCommand(fs)).toBe("erdou serve / --spa");
   });
 
-  it("still prefers the WSGI prefill over static serving on the vm kernel", () => {
+  it("skips the WSGI prefill on the vm kernel (no flask in the bare guest python3) -> null", () => {
     const fs = new BrowserRuntime().fs;
-    fs.writeFile("/index.html", "<!doctype html>");
+    fs.writeFile("/app.py", "from flask import Flask\napp = Flask(__name__)\n");
+    expect(detectRunCommand(fs, "vm")).toBeNull();
+  });
+
+  it("WSGI file on the vm kernel falls through to the /dist static prefill when present", () => {
+    const fs = new BrowserRuntime().fs;
     fs.writeFile("/server.py", "from flask import Flask\napp = Flask(__name__)\n");
-    expect(detectRunCommand(fs, "vm")).toBe("python /server.py");
+    fs.mkdir("/dist", { recursive: true });
+    fs.writeFile("/dist/index.html", "<!doctype html><html><body>built</body></html>");
+    expect(detectRunCommand(fs, "vm")).toBe("python3 -m http.server 8080 --bind 0.0.0.0 -d /dist");
   });
 });
