@@ -9,6 +9,7 @@ import { createBrowserKernel, SKELETON_DIRS, type Kernel, type RpcShellSession }
 import { loadRuns, saveRuns, clearRuns } from "./runs-store.js";
 import { SnapshotReader, buildFileChanges } from "./snapshot-read.js";
 import { startPreviewProxy, setPreviewRuntime } from "./preview-bridge.js";
+import { runServeCommand, type RunServeResult } from "./run-serve.js";
 import { copyWorkspace } from "./workspace-copy.js";
 import { writeFolderState, readFolderState, type FolderState } from "./folder-state.js";
 import {
@@ -38,6 +39,13 @@ export interface TraceLine {
 }
 
 export type RunStatus = "running" | "review" | "done" | "error";
+
+/** `Studio.runServe`'s result: the serve outcome, plus `stale: true` when it
+ *  settled after a kernel switch — its pid was killed on the runtime that owns
+ *  it, and the caller must record nothing (no ports, no preview URL). */
+export interface StudioServeResult extends RunServeResult {
+  stale?: boolean;
+}
 
 export interface FileChange {
   path: string;
@@ -756,6 +764,47 @@ export class Studio {
    *  allows to be asynchronous — via the boot-time subscription. */
   closePort(port: number): Promise<void> {
     return this.runtime.closePort(port);
+  }
+
+  /**
+   * Run the Preview panel's serve command, owning its race with `switchKernel`:
+   * `runServeCommand` can await `port.opened` for seconds (VM python cold
+   * start), long enough for a switch to complete mid-flight — and
+   * `stopTrackedServe` only sees ALREADY-recorded state (`servePid` is
+   * assigned on settle), so it would kill nothing and the settle would then
+   * record the OUTGOING kernel's pid against the new one (every later kill
+   * path targeting the wrong runtime; the real server orphaned). So:
+   *  - refuse while a switch is in flight (the reverse window: a serve started
+   *    against the outgoing kernel during a cold VM boot);
+   *  - capture the kernel at start and run against IT;
+   *  - a settle after a switch is STALE: kill its pid on the CAPTURED runtime
+   *    (the one that owns it; ESRCH-safe) and record nothing.
+   * Never rejects — failures come back as `ok: false` (run-serve's idiom).
+   */
+  async runServe(commandLine: string): Promise<StudioServeResult> {
+    if (this.switchingKernel) {
+      return {
+        ok: false,
+        openedPorts: [],
+        loopbackPorts: [],
+        stderr: "A kernel switch is in progress — wait for it to finish, then run again.",
+      };
+    }
+    const captured = this.kernel;
+    const shell = this.shell; // opens on `captured` (no switch is in flight here)
+    const result = await runServeCommand(captured.runtime, shell, commandLine);
+    // `|| this.switchingKernel`: a settle can also land while switchKernel is
+    // parked pre-swap inside stopTrackedServe (kernel not yet reassigned) —
+    // its pid check already passed, so recording here would re-poison it.
+    if (this.kernel !== captured || this.switchingKernel) {
+      if (result.pid !== undefined) void captured.runtime.kill(result.pid).catch(() => {});
+      // Browser-path stale (no pid): the serve is a port REGISTRATION — free it
+      // on the captured runtime or a switch-back re-serve hits EADDRINUSE.
+      for (const port of result.openedPorts) void captured.runtime.closePort(port);
+      return { ...result, ok: false, stale: true };
+    }
+    this.servePid = result.pid ?? null;
+    return result;
   }
 
   /** Kill the tracked detached server and close every tracked port on the

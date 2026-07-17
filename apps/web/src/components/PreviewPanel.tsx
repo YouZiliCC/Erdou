@@ -3,7 +3,6 @@ import type { Studio } from "../lib/studio.js";
 import { detectRunCommand, staticServeCommand } from "../lib/run-detect.js";
 import { bundleProject, hasBundleEntry } from "../lib/bundle-project.js";
 import { shouldRerun } from "../lib/live-rerun.js";
-import { runServeCommand } from "../lib/run-serve.js";
 import { Toggle } from "./ui/Toggle.js";
 
 /** Preview: type/detect a run command, execute it in the persistent shell, then
@@ -54,16 +53,31 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
   const lastRunFsVersion = useRef(0);
 
   /** Re-prefill the command when the kernel switches, but only if the input
-   *  still holds the previous kernel's auto-detection (never clobber a
-   *  user-typed command). */
+   *  still holds an auto-set command (never clobber a user-typed one). Two
+   *  auto-set shapes exist: the previous kernel's detection, and Bundle & Run's
+   *  `/dist` serve — which detection does NOT reproduce when `/index.html`
+   *  also exists (it prefers "/"), so it needs its own comparison or it would
+   *  be misclassified as user-typed and survive as the wrong kernel's command. */
   const prevKind = useRef(studio.kernelKind);
   useEffect(() => {
     if (studio.kernelKind === prevKind.current) return;
-    const stale = detectRunCommand(studio.fs, prevKind.current) ?? "";
+    const prev = prevKind.current;
     prevKind.current = studio.kernelKind;
-    setCmd((cur) => (cur === stale ? (detectRunCommand(studio.fs, studio.kernelKind) ?? "") : cur));
+    const staleDetect = detectRunCommand(studio.fs, prev) ?? "";
+    const staleBundle = staticServeCommand(prev, "/dist");
+    setCmd((cur) =>
+      cur === staleBundle
+        ? staticServeCommand(studio.kernelKind, "/dist")
+        : cur === staleDetect
+          ? (detectRunCommand(studio.fs, studio.kernelKind) ?? "")
+          : cur,
+    );
   }, [studio.kernelKind, studio.fs]);
 
+  // Locks Run/Bundle & Run during a switch (mirrors Composer's R11c lock):
+  // a serve started in this window would target the OUTGOING kernel.
+  // `studio.runServe` refuses too — this is the UI half of that guard.
+  const switching = studio.switchingKernel !== null;
   // Derived, not stored: a stale selection (its port already stopped) just
   // falls back to nothing selected instead of needing an effect to reconcile.
   const openPorts = studio.openPorts;
@@ -73,15 +87,20 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
   const bundleEntry = hasBundleEntry(studio.fs);
   const showBundlePrompt = bundleEntry && !cmd.trim();
 
-  /** Runs `commandLine` via the event-driven helper. Returns success + the
-   *  ports the run opened (captured from events — a serving command may still
-   *  be running when this resolves; that is the contract's serve idiom). */
+  /** Runs `commandLine` via `studio.runServe` (which owns the serve/switch
+   *  race — pid bookkeeping and stale-settle cleanup live there). Returns
+   *  success + the ports the run opened (captured from events — a serving
+   *  command may still be running when this resolves; that is the contract's
+   *  serve idiom). */
   async function runCommand(commandLine: string): Promise<{ ok: boolean; opened: number[] }> {
     if (!commandLine || running) return { ok: false, opened: [] };
     setRunning(true);
     try {
-      const result = await runServeCommand(studio.runtime, studio.shell, commandLine);
-      studio.servePid = result.pid ?? null;
+      const result = await studio.runServe(commandLine);
+      // Settled after a kernel switch: Studio already killed it on the kernel
+      // that owns it — record NOTHING here (no ports, no error, no preview),
+      // the switch reset below has already put the panel in its blank state.
+      if (result.stale) return { ok: false, opened: [] };
       if (!result.ok) {
         setErrors([result.stderr?.trim() || result.stdout?.trim() || `exited with code ${result.code}`]);
         setOutput(null);
@@ -201,10 +220,14 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
   // Kernel-switch hygiene (panel half): Studio killed the outgoing kernel's
   // server and cleared openPorts/servePid pre-swap. Reset what only this panel
   // tracks so the next doRun doesn't close the other kernel's port numbers on
-  // the new runtime.
+  // the new runtime — and drop lastAction/ranOnce so live mode doesn't auto
+  // re-run the OLD kernel's (kernel-specific, guaranteed-failing) command on
+  // the new one; the next run must come from a fresh click.
   useEffect(() => {
     openedPorts.current = [];
     setSelectedPort(null);
+    lastAction.current = null;
+    ranOnce.current = false;
   }, [studio.kernelKind]);
 
   function stop(port: number): void {
@@ -234,13 +257,13 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
           }
           spellCheck={false}
         />
-        <button className="btn primary" onClick={handleRun} disabled={running || building || !cmd.trim()}>
+        <button className="btn primary" onClick={handleRun} disabled={running || building || switching || !cmd.trim()}>
           {running ? "Running…" : "Run"}
         </button>
         <button
           className={"btn" + (showBundlePrompt ? " primary" : " ghost")}
           onClick={handleBundleAndRun}
-          disabled={building || running || !bundleEntry}
+          disabled={building || running || switching || !bundleEntry}
           title="Bundle the project with esbuild (in-browser) to /dist, then serve it"
         >
           {building ? "Bundling…" : "Bundle & Run"}
