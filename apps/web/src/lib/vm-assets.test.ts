@@ -7,6 +7,6 @@ describe("vmAssets", () => {
     expect(a.baseUrl).toBe("/vm-assets");
     expect(typeof a.wasmUrl).toBe("string");
     expect(a.wasmUrl.length).toBeGreaterThan(0);
-    expect(a.version).toBe("alpine-3.24.1-r11b");
+    expect(a.version).toBe("alpine-3.24.1-r12-net");
   });
 });

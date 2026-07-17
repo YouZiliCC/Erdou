@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { runConformance } from "@erdou/conformance";
 import { VmRuntime } from "./vm-runtime.js";
+import { V86Host } from "./v86-host.js";
 import { assetsPresent, defaultAssets, loadNodeInputs } from "./node.js";
 
 const RUN = assetsPresent() && process.env.ERDOU_VM_E2E === "1";
@@ -49,5 +50,27 @@ describe.skipIf(!RUN)("VmRuntime (gated e2e)", () => {
     const data = await rt.readFile("/sf.txt");
     expect(new TextDecoder().decode(data)).toBe("x");
     await rt.shutdown();
+  });
+
+  it("restores the networked state cleanly: eth0 has 192.168.86.100", async () => {
+    const rt = new VmRuntime(makeInputs);
+    await rt.boot();
+    // `ip` is not a standalone binary in the Alpine guest chroot's PATH; busybox
+    // provides it as an applet (`busybox ip …`). This proves the restored state
+    // booted with eth0 already DHCP-addressed (192.168.86.100), no per-boot setup.
+    const p = await rt.exec("busybox ip -o addr show eth0");
+    expect(await p.stdout.text()).toContain("192.168.86.100");
+    await rt.shutdown();
+  });
+
+  it("V86Host.networkAdapter() is live after boot from the networked state", async () => {
+    const host = new V86Host();
+    await host.boot(await makeInputs(), { bootTimeoutMs: 30_000 });
+    host.run();
+    const net = host.networkAdapter();
+    expect(net).toBeDefined();
+    expect(typeof net.tcp_probe).toBe("function");
+    expect(typeof net.connect).toBe("function");
+    await host.destroy();
   });
 });
