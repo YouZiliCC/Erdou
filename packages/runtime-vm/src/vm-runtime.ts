@@ -59,6 +59,11 @@ export class VmRuntime implements Runtime {
 
   async boot(): Promise<void> {
     if (this.booted) return;
+    // Reset port-tracking bookkeeping so a boot() after shutdown() on the same
+    // instance starts clean (a genuinely-reopened port must still emit
+    // port.opened) — no-op on a fresh instance, where both Sets are empty already.
+    this.openPorts.clear();
+    this.loopbackPorts.clear();
     const inputs = await this.loadInputs();
     await this.host.boot(inputs, this.bootTimeoutMs ? { bootTimeoutMs: this.bootTimeoutMs } : {});
     this.bridge = new Fs9pBridge(this.host.fs9p, (e) => this.emit(e));
@@ -71,7 +76,7 @@ export class VmRuntime implements Runtime {
     // servers binding 127.0.0.1 fail with EADDRNOTAVAIL. Bring loopback up here
     // so localhost dev servers can bind (and the loopback-only "bind 0.0.0.0"
     // hint is reachable). busybox provides `ip` as an applet in the exec chroot.
-    await (await this.guestd.exec("busybox ip addr add 127.0.0.1/8 dev lo 2>/dev/null; busybox ip link set lo up")).wait();
+    await (await this.guestd.exec("busybox ip addr add 127.0.0.1/8 dev lo 2>/dev/null; busybox ip link set lo up 2>/dev/null")).wait();
     this.booted = true;
   }
 
