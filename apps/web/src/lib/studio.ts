@@ -33,6 +33,7 @@ import {
   type DirHandleLike,
   type MountMtimes,
 } from "./local-mount.js";
+import { pullDiskToWorkspace, pushWorkspaceToDisk, reselectFolder as reselectFolderOp } from "./folder-sync-controls.js";
 
 const SNAPSHOT_ID = "erdou:default";
 /** Cap on `Studio.systemLog` entries so a noisy source (e.g. failing rescans) can't grow it unbounded. */
@@ -702,6 +703,52 @@ export class Studio {
     } catch (err) {
       this.logSystem("error", "Failed to sync to local folder", asMessage(err));
     }
+  }
+
+  // --- explicit MANUAL folder-sync (alongside the auto-sync above, not a
+  //     replacement): one-shot pull/push and a folder swap, driven from
+  //     FolderSyncControls. They reuse the same primitives + mtimes map + VM
+  //     rootSkip as the auto path, so the two can't drift. Errors propagate to
+  //     the caller (the UI shows them) rather than being swallowed here.
+
+  /** Manual "Pull from disk ↓": load the mounted folder from disk into the
+   *  workspace now — disk wins (a full re-pull, distinct from the mtime-gated
+   *  background rescan). No-op returning 0 if nothing is mounted; returns the
+   *  file count pulled. */
+  async pullFolderNow(): Promise<number> {
+    if (!this.mount) return 0;
+    const count = await pullDiskToWorkspace(this.mount, this.fs, this.mountMtimes);
+    this.fsVersion++;
+    this.notify();
+    return count;
+  }
+
+  /** Manual "Push to disk ↑": write the whole workspace back to the mounted
+   *  folder now, honoring VM_PRESERVE_DIRS at root on the VM kernel exactly like
+   *  the auto save path. No-op if nothing is mounted. */
+  async pushFolderNow(): Promise<void> {
+    if (!this.mount) return;
+    await pushWorkspaceToDisk(
+      this.mount,
+      this.fs,
+      this.mountMtimes,
+      this.kernelKind === "vm" ? new Set(VM_PRESERVE_DIRS) : undefined,
+    );
+  }
+
+  /** Manual "Re-select folder": re-run the directory picker to swap to a
+   *  DIFFERENT local folder, replacing the current mount (`mountFolder` persists
+   *  + loads the new handle). Needs a user gesture. Returns true if a new folder
+   *  was mounted, false if the user cancelled the picker. */
+  async reselectFolder(): Promise<boolean> {
+    const picker = (window as unknown as { showDirectoryPicker?: (o?: unknown) => Promise<unknown> })
+      .showDirectoryPicker;
+    if (!picker) throw new Error("Folder mounting needs the File System Access API — use Chrome or Edge.");
+    const handle = await reselectFolderOp(
+      () => picker({ mode: "readwrite" }) as Promise<DirHandleLike>,
+      (h) => this.mountFolder(h),
+    );
+    return handle !== null;
   }
 
   private scheduleSave(): void {
