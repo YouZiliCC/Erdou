@@ -32,123 +32,154 @@ describe("loadBrowserInputs", () => {
     "seabios.bin": new Uint8Array([1, 2]),
     "vgabios.bin": new Uint8Array([3, 4]),
     "kernel.bin": new Uint8Array([5, 6]),
-    "state.zst": STATE_GZ,
+    "state-base.zst": STATE_GZ,
   };
 
-  it("fetches + gzip-decompresses the state and returns V86BootInputs", async () => {
+  it("fetches + gzip-decompresses state-<profile>.zst and returns V86BootInputs", async () => {
     const idb = fakeIdb();
     const inputs = await loadBrowserInputs({
-      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", version: "v1",
+      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", profile: "base", version: "v1",
       fetchImpl: fakeFetch(assets), idb,
     });
     expect(new Uint8Array(inputs.state!)).toEqual(STATE_RAW);
     expect(new Uint8Array(inputs.kernel)).toEqual(assets["kernel.bin"]);
     expect(inputs.wasmUrl).toBe("https://x/v86.wasm");
     expect(inputs.memoryMB).toBe(512);
-    // the compressed state got cached under the version key
-    expect(idb.store.get("state:v1")).toEqual(STATE_GZ);
+    // the compressed state got cached under the 3-part profile:version key
+    expect(idb.store.get("state:base:v1")).toEqual(STATE_GZ);
   });
 
-  it("serves the state from IndexedDB on a second load without fetching state.zst", async () => {
+  it("serves the state from IndexedDB on a second load without fetching state-<profile>.zst", async () => {
     const idb = fakeIdb();
-    idb.store.set("state:v1", STATE_GZ);
-    const fetchSpy = vi.fn(fakeFetch({ ...assets, "state.zst": new Uint8Array() })); // state fetch would give empty
+    idb.store.set("state:base:v1", STATE_GZ);
+    const fetchSpy = vi.fn(fakeFetch({ ...assets, "state-base.zst": new Uint8Array() })); // state fetch would give empty
     const inputs = await loadBrowserInputs({
-      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", version: "v1",
+      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", profile: "base", version: "v1",
       fetchImpl: fetchSpy as unknown as typeof fetch, idb,
     });
     expect(new Uint8Array(inputs.state!)).toEqual(STATE_RAW); // decompressed from cache, not the empty fetch
-    const fetchedState = fetchSpy.mock.calls.some((c) => String(c[0]).endsWith("state.zst"));
+    const fetchedState = fetchSpy.mock.calls.some((c) => String(c[0]).endsWith("state-base.zst"));
     expect(fetchedState).toBe(false);
   });
 
   it("re-fetches when the cached blob is corrupt (decompress fails), then repairs the cache", async () => {
     const idb = fakeIdb();
-    idb.store.set("state:v1", new Uint8Array([0, 1, 2, 3])); // not valid gzip
+    idb.store.set("state:base:v1", new Uint8Array([0, 1, 2, 3])); // not valid gzip
     const inputs = await loadBrowserInputs({
-      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", version: "v1",
-      fetchImpl: fakeFetch(assets), idb, // fakeFetch returns the REAL gzip for state.zst
+      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", profile: "base", version: "v1",
+      fetchImpl: fakeFetch(assets), idb, // fakeFetch returns the REAL gzip for state-base.zst
     });
     expect(new Uint8Array(inputs.state!)).toEqual(STATE_RAW); // recovered from the network
-    expect(idb.store.get("state:v1")).toEqual(STATE_GZ);      // cache repaired
+    expect(idb.store.get("state:base:v1")).toEqual(STATE_GZ); // cache repaired
   });
 
-  it("evicts stale state:<version> keys on put", async () => {
+  it("evicts only SAME-profile stale versions on put — sibling profiles survive", async () => {
     const idb = fakeIdb();
-    idb.store.set("state:old", new Uint8Array([9]));
-    await loadBrowserInputs({ baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", version: "v1", fetchImpl: fakeFetch(assets), idb });
-    expect(idb.store.has("state:old")).toBe(false); // old version evicted
-    expect(idb.store.has("state:v1")).toBe(true);
+    idb.store.set("state:base:old", new Uint8Array([9])); // same lineage, older bake
+    idb.store.set("state:node:v9", new Uint8Array([8]));  // sibling profile — ~40MB in real life, must survive
+    idb.store.set("state:sci:v9", new Uint8Array([7]));
+    await loadBrowserInputs({ baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", profile: "base", version: "v1", fetchImpl: fakeFetch(assets), idb });
+    expect(idb.store.has("state:base:old")).toBe(false); // old same-profile version evicted
+    expect(idb.store.has("state:base:v1")).toBe(true);
+    expect(idb.store.has("state:node:v9")).toBe(true);   // siblings untouched
+    expect(idb.store.has("state:sci:v9")).toBe(true);
+  });
+
+  it("sweeps legacy pre-R13 2-part state:<version> keys on put (would pin ~40MB forever)", async () => {
+    const idb = fakeIdb();
+    idb.store.set("state:alpine-3.24.1-r12-lo-baked", new Uint8Array([9]));
+    await loadBrowserInputs({ baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", profile: "base", version: "v1", fetchImpl: fakeFetch(assets), idb });
+    expect(idb.store.has("state:alpine-3.24.1-r12-lo-baked")).toBe(false);
+    expect(idb.store.has("state:base:v1")).toBe(true);
   });
 
   const metaOf = (m: object): Uint8Array => new TextEncoder().encode(JSON.stringify(m));
 
-  it("fail-fasts on a meta version mismatch (stale state.zst) without caching anything", async () => {
+  it("fail-fasts on a meta version mismatch (stale state image) without caching anything", async () => {
     const idb = fakeIdb();
     await expect(loadBrowserInputs({
-      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", version: "v2", expectedStateVersion: "v2",
-      fetchImpl: fakeFetch({ ...assets, "state.meta.json": metaOf({ version: "v1-old-bake" }) }), idb,
-    })).rejects.toThrow(/stale state\.zst on disk.*pnpm --filter @erdou\/runtime-vm bake/);
+      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", profile: "base", version: "v2", expectedStateVersion: "v2",
+      fetchImpl: fakeFetch({ ...assets, "state-base.meta.json": metaOf({ version: "v1-old-bake", profile: "base" }) }), idb,
+    })).rejects.toThrow(/stale state-base\.zst on disk.*pnpm --filter @erdou\/runtime-vm bake --profile base/);
     expect(idb.store.size).toBe(0); // the old bytes must NOT land under the new key
   });
 
-  it("fail-fasts when state.meta.json has no version field and expectedStateVersion is set", async () => {
+  it("fail-fasts on a meta PROFILE mismatch (cross-linked assets) without caching anything", async () => {
     const idb = fakeIdb();
     await expect(loadBrowserInputs({
-      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", version: "v2", expectedStateVersion: "v2",
-      fetchImpl: fakeFetch({ ...assets, "state.meta.json": metaOf({ alpine: "3.24.1" }) }), idb,
-    })).rejects.toThrow(/stale state\.zst on disk/);
+      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", profile: "base", version: "v2", expectedStateVersion: "v2",
+      fetchImpl: fakeFetch({ ...assets, "state-base.meta.json": metaOf({ version: "v2", profile: "node" }) }), idb,
+    })).rejects.toThrow(/profile "node".*expected "base".*bake --profile base/);
+    expect(idb.store.size).toBe(0);
+  });
+
+  it("fail-fasts when state-<profile>.meta.json has no version field and expectedStateVersion is set", async () => {
+    const idb = fakeIdb();
+    await expect(loadBrowserInputs({
+      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", profile: "base", version: "v2", expectedStateVersion: "v2",
+      fetchImpl: fakeFetch({ ...assets, "state-base.meta.json": metaOf({ alpine: "3.24.1" }) }), idb,
+    })).rejects.toThrow(/stale state-base\.zst on disk/);
     expect(idb.store.size).toBe(0);
   });
 
   it("surfaces the instructive re-bake error when the meta fetch 404s (unlinked/misconfigured assets)", async () => {
     const idb = fakeIdb();
     await expect(loadBrowserInputs({
-      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", version: "v2", expectedStateVersion: "v2",
-      fetchImpl: fakeFetch(assets), idb, // no state.meta.json served -> fetch 404s
-    })).rejects.toThrow(/re-run `pnpm --filter @erdou\/runtime-vm bake`/);
+      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", profile: "base", version: "v2", expectedStateVersion: "v2",
+      fetchImpl: fakeFetch(assets), idb, // no state-base.meta.json served -> fetch 404s
+    })).rejects.toThrow(/re-run `pnpm --filter @erdou\/runtime-vm bake --profile base`/);
     expect(idb.store.size).toBe(0);
   });
 
   it("surfaces the instructive re-bake error when the meta body is not JSON (SPA index fallback)", async () => {
     const idb = fakeIdb();
     await expect(loadBrowserInputs({
-      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", version: "v2", expectedStateVersion: "v2",
-      fetchImpl: fakeFetch({ ...assets, "state.meta.json": new TextEncoder().encode("<!doctype html>") }), idb,
-    })).rejects.toThrow(/re-run `pnpm --filter @erdou\/runtime-vm bake`/);
+      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", profile: "base", version: "v2", expectedStateVersion: "v2",
+      fetchImpl: fakeFetch({ ...assets, "state-base.meta.json": new TextEncoder().encode("<!doctype html>") }), idb,
+    })).rejects.toThrow(/re-run `pnpm --filter @erdou\/runtime-vm bake --profile base`/);
     expect(idb.store.size).toBe(0);
   });
 
-  it("caches and boots as before when the meta version matches", async () => {
+  it("caches and boots as before when the meta version + profile match", async () => {
     const idb = fakeIdb();
     const inputs = await loadBrowserInputs({
-      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", version: "v2", expectedStateVersion: "v2",
-      fetchImpl: fakeFetch({ ...assets, "state.meta.json": metaOf({ version: "v2" }) }), idb,
+      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", profile: "base", version: "v2", expectedStateVersion: "v2",
+      fetchImpl: fakeFetch({ ...assets, "state-base.meta.json": metaOf({ version: "v2", profile: "base" }) }), idb,
     });
     expect(new Uint8Array(inputs.state!)).toEqual(STATE_RAW);
-    expect(idb.store.get("state:v2")).toEqual(STATE_GZ);
+    expect(idb.store.get("state:base:v2")).toEqual(STATE_GZ);
+  });
+
+  it("loads sibling profiles from their own files and keys", async () => {
+    const idb = fakeIdb();
+    const inputs = await loadBrowserInputs({
+      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", profile: "node", version: "n1",
+      fetchImpl: fakeFetch({ ...assets, "state-node.zst": STATE_GZ }), idb,
+    });
+    expect(new Uint8Array(inputs.state!)).toEqual(STATE_RAW);
+    expect(idb.store.get("state:node:n1")).toEqual(STATE_GZ);
   });
 
   it("skips the meta check on a cache hit (validated when written)", async () => {
     const idb = fakeIdb();
-    idb.store.set("state:v2", STATE_GZ);
-    const fetchSpy = vi.fn(fakeFetch(assets)); // no state.meta.json served — a meta fetch would 404-throw
+    idb.store.set("state:base:v2", STATE_GZ);
+    const fetchSpy = vi.fn(fakeFetch(assets)); // no state-base.meta.json served — a meta fetch would 404-throw
     const inputs = await loadBrowserInputs({
-      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", version: "v2", expectedStateVersion: "v2",
+      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", profile: "base", version: "v2", expectedStateVersion: "v2",
       fetchImpl: fetchSpy as unknown as typeof fetch, idb,
     });
     expect(new Uint8Array(inputs.state!)).toEqual(STATE_RAW);
-    expect(fetchSpy.mock.calls.some((c) => String(c[0]).endsWith("state.meta.json"))).toBe(false);
+    expect(fetchSpy.mock.calls.some((c) => String(c[0]).endsWith("state-base.meta.json"))).toBe(false);
   });
 
-  it("does not fetch state.meta.json when expectedStateVersion is not set (old behavior)", async () => {
+  it("does not fetch the meta when expectedStateVersion is not set (old behavior)", async () => {
     const idb = fakeIdb();
-    const fetchSpy = vi.fn(fakeFetch(assets)); // no state.meta.json served
+    const fetchSpy = vi.fn(fakeFetch(assets)); // no state-base.meta.json served
     await loadBrowserInputs({
-      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", version: "v1",
+      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", profile: "base", version: "v1",
       fetchImpl: fetchSpy as unknown as typeof fetch, idb,
     });
-    expect(fetchSpy.mock.calls.some((c) => String(c[0]).endsWith("state.meta.json"))).toBe(false);
-    expect(idb.store.get("state:v1")).toEqual(STATE_GZ);
+    expect(fetchSpy.mock.calls.some((c) => String(c[0]).endsWith("state-base.meta.json"))).toBe(false);
+    expect(idb.store.get("state:base:v1")).toEqual(STATE_GZ);
   });
 });

@@ -46,6 +46,21 @@ function localGraph(entry: string): string[] {
   return [...seen];
 }
 
+describe("profiles subpath is browser-clean (apps/web main bundle imports it — no v86)", () => {
+  it("profiles.ts imports ONLY the data JSON", () => {
+    expect(topLevelImports(join(here, "profiles.ts"))).toEqual(["./profiles.data.json"]);
+  });
+
+  it("its transitive local graph pulls no v86, no v86-host.ts, no node builtins", () => {
+    const graph = localGraph(join(here, "profiles.ts"));
+    expect(graph.filter((f) => /v86-host\.ts$/.test(f))).toEqual([]);
+    for (const f of graph) {
+      const bad = topLevelImports(f).filter((i) => i === "v86" || i.startsWith("v86/") || NODE_BUILTINS.test(i));
+      expect(bad, `${f} pulls forbidden imports: ${bad}`).toEqual([]);
+    }
+  });
+});
+
 describe("runtime-vm default entry is browser-clean", () => {
   it("index.ts does not (transitively, at any depth) re-export a node:* module", () => {
     const idxImports = topLevelImports(join(here, "index.ts"));

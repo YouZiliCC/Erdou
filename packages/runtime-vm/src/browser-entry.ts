@@ -10,7 +10,8 @@ const dec = new TextDecoder();
 
 export async function bootAndSelfTest(baseUrl: string, wasmUrl: string): Promise<string> {
   const results: string[] = [];
-  const inputs = await loadBrowserInputs({ baseUrl, wasmUrl, version: "e2e", memoryMB: 512 });
+  // Self-test always boots the base profile image (state-base.zst — baked in T10).
+  const inputs = await loadBrowserInputs({ baseUrl, wasmUrl, profile: "base", version: "e2e", memoryMB: 512 });
   const host = new V86Host();
   await host.boot(inputs, { bootTimeoutMs: 30_000 });
   host.run();
