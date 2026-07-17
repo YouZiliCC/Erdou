@@ -9,4 +9,9 @@ describe("vmAssets", () => {
     expect(a.wasmUrl.length).toBeGreaterThan(0);
     expect(a.version).toBe("alpine-3.24.1-r12-lo-baked");
   });
+
+  it("binds the fetched bytes to the cache key: expectedStateVersion mirrors version", () => {
+    const a = vmAssets();
+    expect(a.expectedStateVersion).toBe(a.version);
+  });
 });

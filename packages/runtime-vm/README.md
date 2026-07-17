@@ -157,7 +157,7 @@ rm -f packages/runtime-vm/assets/state.bin
 pnpm --filter @erdou/runtime-vm bake
 ```
 
-Then **bump `version` in `apps/web/src/lib/vm-assets.ts`** so IndexedDB-cached clients re-fetch the new state (currently `alpine-3.24.1-r12-lo-baked`). The `state.zst`/kernel/bios binaries stay gitignored — never commit them.
+Then **bump `version` in `apps/web/src/lib/vm-assets.ts` AND `STATE_VERSION` in `scripts/bake-image.mjs`** (same string) so IndexedDB-cached clients re-fetch the new state (currently `alpine-3.24.1-r12-lo-baked`). The bake stamps that version into `assets/state.meta.json`, and `loadBrowserInputs` verifies it on every cache-miss fetch (`expectedStateVersion`), so a stale on-disk `state.zst` from an older bake fail-fasts with a re-bake instruction instead of being silently cached under the new key. The `state.zst`/kernel/bios binaries stay gitignored — never commit them.
 
 **Deferred to a later round (out of scope this round):** the npm/pip network-egress gateway (spec §7) and WISP — `networkEgress` is still `"none"`. This round is preview-only; the fetch-NAT is used solely for the host→guest dispatch reverse-proxy.
 

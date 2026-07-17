@@ -10,6 +10,11 @@ import { V86 } from "v86";
 import { fetchBuf, parseApkIndex, resolve, installApks, unpackMinirootfs } from "./lib/apk.mjs";
 import { setupSplitFs, GUEST_SETUP_CMD, PYCACHE_WARMUP_CMD, REMOUNT_RO_CMD, LAUNCH_GUESTD_CMD } from "./lib/preload.mjs";
 
+// Must equal `version`/`expectedStateVersion` in apps/web/src/lib/vm-assets.ts
+// (bump both on re-bake): stamped into state.meta.json so loadBrowserInputs can
+// fail-fast when the on-disk state.zst is from an older bake than the app expects.
+const STATE_VERSION = "alpine-3.24.1-r12-lo-baked";
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const assets = path.join(here, "..", "assets");
 const tmp = path.join(here, "..", ".bake-tmp");
@@ -129,7 +134,7 @@ console.log("6/6 zstd-compress → assets/state.zst");
 // gzip is fine for the MVP if zstd bindings aren't present; keep the extension honest.
 const compressed = zlib.gzipSync(state, { level: 9 });
 fs.writeFileSync(path.join(assets, "state.zst"), compressed);
-fs.writeFileSync(path.join(assets, "state.meta.json"), JSON.stringify({ rawBytes: state.length, compressedBytes: compressed.length, alpine: ver, codec: "gzip", net: true }, null, 2));
+fs.writeFileSync(path.join(assets, "state.meta.json"), JSON.stringify({ version: STATE_VERSION, rawBytes: state.length, compressedBytes: compressed.length, alpine: ver, codec: "gzip", net: true }, null, 2));
 // assets.ts decompresses state.zst -> state.bin and caches it (only writes if
 // absent). Drop the stale cache now so a rebake's new state.zst is the one
 // that actually gets loaded, not a leftover decompression of the old one.
