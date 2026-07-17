@@ -242,9 +242,10 @@ async function main() {
       // 4) python3 -c 'print(6*7)' -> 42, executed by the real Alpine guest.
       try {
         // PtyTerminal opens the pty session asynchronously after mount
-        // (`openPty` resolves post-boot); `term.onData` isn't wired until
-        // that promise settles, so keystrokes typed before the guest's first
-        // shell prompt renders are silently dropped. Wait for that prompt.
+        // (`openPty` resolves post-boot). Keystrokes typed before it resolves
+        // are queued by the input gate and flushed to the session, but the
+        // guest shell's first prompt still arrives asynchronously — wait for
+        // it so typeAndWaitFor baselines against settled output.
         await waitForXterm("$", 15_000);
         await typeAndWaitFor("python3 -c 'print(6*7)'", "42", { timeoutMs: 10_000 });
         pass("pty-python-42", true);
