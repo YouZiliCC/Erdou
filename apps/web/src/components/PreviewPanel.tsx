@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Studio } from "../lib/studio.js";
-import { detectRunCommand } from "../lib/run-detect.js";
+import { detectRunCommand, staticServeCommand } from "../lib/run-detect.js";
 import { bundleProject, hasBundleEntry } from "../lib/bundle-project.js";
 import { shouldRerun } from "../lib/live-rerun.js";
 import { runServeCommand } from "../lib/run-serve.js";
@@ -25,7 +25,7 @@ import { Toggle } from "./ui/Toggle.js";
  *  themselves forever — only a real external edit after the run settled
  *  schedules another one. */
 export function PreviewPanel({ studio }: { studio: Studio }) {
-  const [cmd, setCmd] = useState(() => detectRunCommand(studio.fs) ?? "");
+  const [cmd, setCmd] = useState(() => detectRunCommand(studio.fs, studio.kernelKind) ?? "");
   const [running, setRunning] = useState(false);
   const [building, setBuilding] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
@@ -52,10 +52,17 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
    *  `shouldRerun`) so a run's OWN writes don't re-trigger itself forever;
    *  only a fsVersion bump strictly AFTER this point is a real external edit. */
   const lastRunFsVersion = useRef(0);
-  /** The VM's detached server pid from the last run (real guest socket), so the
-   *  next run — or an explicit Stop — can kill it: a real socket stays bound
-   *  until the process dies (unlike the browser kernel's virtual-port unregister). */
-  const servePid = useRef<number | null>(null);
+
+  /** Re-prefill the command when the kernel switches, but only if the input
+   *  still holds the previous kernel's auto-detection (never clobber a
+   *  user-typed command). */
+  const prevKind = useRef(studio.kernelKind);
+  useEffect(() => {
+    if (studio.kernelKind === prevKind.current) return;
+    const stale = detectRunCommand(studio.fs, prevKind.current) ?? "";
+    prevKind.current = studio.kernelKind;
+    setCmd((cur) => (cur === stale ? (detectRunCommand(studio.fs, studio.kernelKind) ?? "") : cur));
+  }, [studio.kernelKind, studio.fs]);
 
   // Derived, not stored: a stale selection (its port already stopped) just
   // falls back to nothing selected instead of needing an effect to reconcile.
@@ -74,7 +81,7 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
     setRunning(true);
     try {
       const result = await runServeCommand(studio.runtime, studio.shell, commandLine);
-      servePid.current = result.pid ?? null;
+      studio.servePid = result.pid ?? null;
       if (!result.ok) {
         setErrors([result.stderr?.trim() || result.stdout?.trim() || `exited with code ${result.code}`]);
         setOutput(null);
@@ -106,7 +113,11 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
         setErrors(result.errors);
         return { ok: false, opened: [] };
       }
-      const commandLine = "erdou serve dist --spa";
+      // Kernel-aware: the VM guest has no `erdou` binary; serve /dist with the
+      // guest's python3 http.server instead (see staticServeCommand). Either
+      // way the run goes through runServeCommand, which already picks the
+      // detached-exec + port.opened path on realOs kernels.
+      const commandLine = staticServeCommand(studio.kernelKind, "/dist");
       setCmd(commandLine);
       return await runCommand(commandLine);
     } catch (err) {
@@ -131,9 +142,9 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
       // Kill the previous detached server (VM path) before the close-then-serve,
       // so a live re-run can rebind the port — a real guest socket stays bound
       // until the process dies. No-op on the browser kernel (servePid is null).
-      if (servePid.current !== null) {
-        await studio.runtime.kill(servePid.current).catch(() => {});
-        servePid.current = null;
+      if (studio.servePid !== null) {
+        await studio.runtime.kill(studio.servePid).catch(() => {});
+        studio.servePid = null;
       }
       for (const p of openedPorts.current) await studio.closePort(p);
       openedPorts.current = [];
@@ -187,14 +198,23 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [studio.fsVersion, live]);
 
+  // Kernel-switch hygiene (panel half): Studio killed the outgoing kernel's
+  // server and cleared openPorts/servePid pre-swap. Reset what only this panel
+  // tracks so the next doRun doesn't close the other kernel's port numbers on
+  // the new runtime.
+  useEffect(() => {
+    openedPorts.current = [];
+    setSelectedPort(null);
+  }, [studio.kernelKind]);
+
   function stop(port: number): void {
     // On the VM path the tracked pid IS the real guest server — closePort alone
     // is pure bookkeeping and would leave it bound + running, so kill it too.
     // Browser-safe: servePid stays null on the browser kernel, so kill is never
     // called there.
-    if (servePid.current !== null) {
-      void studio.runtime.kill(servePid.current).catch(() => {});
-      servePid.current = null;
+    if (studio.servePid !== null) {
+      void studio.runtime.kill(studio.servePid).catch(() => {});
+      studio.servePid = null;
     }
     void studio.closePort(port);
     if (selectedPort === port) setSelectedPort(null);
@@ -207,7 +227,11 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
           className="run-input"
           value={cmd}
           onChange={(e) => setCmd(e.target.value)}
-          placeholder="run command, e.g. erdou serve . --spa"
+          placeholder={
+            studio.kernelKind === "vm"
+              ? "run command, e.g. python3 -m http.server 8080 --bind 0.0.0.0"
+              : "run command, e.g. erdou serve . --spa"
+          }
           spellCheck={false}
         />
         <button className="btn primary" onClick={handleRun} disabled={running || building || !cmd.trim()}>
