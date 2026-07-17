@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { Vfs, PipeStream } from "@erdou/runtime-browser";
 import type { ExecContext } from "@erdou/runtime-contract";
-import { createPythonRunner } from "./python.js";
-import type { Pyodide, EmscriptenFS } from "./pyodide.js";
+import { createPythonRunners } from "./python.js";
+import type { EmscriptenFS } from "./pyodide.js";
 
 // A minimal in-memory Emscripten-like FS for the mock.
 class MockFS implements EmscriptenFS {
@@ -52,12 +52,20 @@ interface SimArgs {
   fs: MockFS;
 }
 
-class MockPyodide implements Pyodide {
+// Mock of the real Pyodide surface the runners use, including the package
+// APIs: `prebuilt` names load via loadPackage, `pypi` names install via
+// micropip, `offline` makes loadPackage fail SILENTLY (its real semantics).
+class MockPyodide {
   globals = new Map<string, unknown>();
   FS = new MockFS();
+  loadedPackages: Record<string, string> = {};
+  prebuilt = new Set<string>();
+  pypi = new Set<string>();
+  offline = false;
+  events: string[] = [];
   private out: (t: string) => void = () => {};
   private err: (t: string) => void = () => {};
-  constructor(private sim: (a: SimArgs) => number) {}
+  constructor(private sim: (a: SimArgs) => number | Promise<number> = () => 0) {}
   setStdout(o: { batched: (t: string) => void }) {
     this.out = o.batched;
   }
@@ -65,7 +73,7 @@ class MockPyodide implements Pyodide {
     this.err = o.batched;
   }
   async runPythonAsync(): Promise<unknown> {
-    const exit = this.sim({
+    const exit = await this.sim({
       code: String(this.globals.get("__erdou_code")),
       argv: this.globals.get("__erdou_argv") as string[],
       cwd: String(this.globals.get("__erdou_cwd")),
@@ -75,6 +83,35 @@ class MockPyodide implements Pyodide {
     });
     this.globals.set("__erdou_exit", exit);
     return undefined;
+  }
+  async loadPackage(
+    names: string | string[],
+    opts?: { messageCallback?: (m: string) => void; errorCallback?: (m: string) => void },
+  ): Promise<unknown> {
+    const list = Array.isArray(names) ? names : [names];
+    this.events.push("loadPackage:" + list.join(","));
+    for (const n of list) {
+      if (this.offline) {
+        opts?.errorCallback?.(`Failed to load ${n}`);
+      } else if (n === "micropip" || this.prebuilt.has(n)) {
+        this.loadedPackages[n] = "default channel";
+      } else {
+        opts?.errorCallback?.(`No known package with name '${n}'`);
+      }
+    }
+    return [];
+  }
+  pyimport(name: string): unknown {
+    this.events.push("pyimport:" + name);
+    return {
+      install: async (req: string) => {
+        this.events.push("micropip.install:" + req);
+        const bare = req.split(/[=<>!~[]/)[0] ?? req;
+        if (this.offline || !this.pypi.has(bare)) throw new Error(`Can't fetch metadata for '${req}'.`);
+        this.loadedPackages[bare] = "pypi";
+      },
+      destroy: () => {},
+    };
   }
 }
 
@@ -90,19 +127,20 @@ function makeCtx(argv: string[], fs: Vfs): { ctx: ExecContext; stdout: PipeStrea
   };
 }
 
+const makeRunners = (py: MockPyodide) => createPythonRunners({ load: async () => py });
+
 describe("python runner (plumbing, mock Pyodide)", () => {
   it("reads a script from the fs, captures stdout, sets argv, returns exit code", async () => {
     const fs = new Vfs({ clock: () => 0 });
     fs.writeFile("/hello.py", 'print("hi")');
     let seen: SimArgs | undefined;
-    const run = createPythonRunner({
-      load: async () =>
-        new MockPyodide((a) => {
-          seen = a;
-          a.out("hi\n");
-          return 0;
-        }),
-    });
+    const run = makeRunners(
+      new MockPyodide((a) => {
+        seen = a;
+        a.out("hi\n");
+        return 0;
+      }),
+    ).python;
     const { ctx, stdout } = makeCtx(["python", "/hello.py", "world"], fs);
     const code = await run(ctx);
     stdout.end();
@@ -115,9 +153,7 @@ describe("python runner (plumbing, mock Pyodide)", () => {
 
   it("supports python -c and propagates a non-zero exit code", async () => {
     const fs = new Vfs({ clock: () => 0 });
-    const run = createPythonRunner({
-      load: async () => new MockPyodide((a) => (a.code.includes("sys.exit(3)") ? 3 : 0)),
-    });
+    const run = makeRunners(new MockPyodide((a) => (a.code.includes("sys.exit(3)") ? 3 : 0))).python;
     const { ctx } = makeCtx(["python", "-c", "import sys; sys.exit(3)"], fs);
     expect(await run(ctx)).toBe(3);
   });
@@ -125,14 +161,13 @@ describe("python runner (plumbing, mock Pyodide)", () => {
   it("syncs files Python writes back into the Erdou filesystem", async () => {
     const fs = new Vfs({ clock: () => 0 });
     fs.mkdir("/app");
-    const run = createPythonRunner({
-      load: async () =>
-        new MockPyodide((a) => {
-          a.fs.mkdir("/app");
-          a.fs.writeFile("/app/out.txt", new TextEncoder().encode("generated"));
-          return 0;
-        }),
-    });
+    const run = makeRunners(
+      new MockPyodide((a) => {
+        a.fs.mkdir("/app");
+        a.fs.writeFile("/app/out.txt", new TextEncoder().encode("generated"));
+        return 0;
+      }),
+    ).python;
     const { ctx } = makeCtx(["python", "-c", "open('/app/out.txt','w').write('generated')"], fs);
     await run(ctx);
     expect(fs.readFileText("/app/out.txt")).toBe("generated");
@@ -140,11 +175,190 @@ describe("python runner (plumbing, mock Pyodide)", () => {
 
   it("returns 2 with a clear error when the script is missing", async () => {
     const fs = new Vfs({ clock: () => 0 });
-    const run = createPythonRunner({ load: async () => new MockPyodide(() => 0) });
+    const run = makeRunners(new MockPyodide()).python;
     const { ctx, stderr } = makeCtx(["python", "/nope.py"], fs);
     const code = await run(ctx);
     stderr.end();
     expect(code).toBe(2);
     expect(await stderr.text()).toMatch(/can't open file/);
+  });
+});
+
+describe("pip runner (mock Pyodide)", () => {
+  it("installs prebuilt packages via loadPackage, never touching micropip", async () => {
+    const py = new MockPyodide();
+    py.prebuilt.add("numpy").add("pandas");
+    const { ctx, stdout } = makeCtx(["pip", "install", "numpy", "pandas"], new Vfs({ clock: () => 0 }));
+    expect(await makeRunners(py).pip(ctx)).toBe(0);
+    stdout.end();
+    expect(await stdout.text()).toContain("Successfully installed numpy pandas");
+    expect(py.loadedPackages).toMatchObject({ numpy: "default channel", pandas: "default channel" });
+    expect(py.events.some((e) => e.startsWith("pyimport"))).toBe(false);
+  });
+
+  it("falls back to micropip for packages loadPackage does not know", async () => {
+    const py = new MockPyodide();
+    py.pypi.add("cowsay");
+    const { ctx } = makeCtx(["pip", "install", "cowsay"], new Vfs({ clock: () => 0 }));
+    expect(await makeRunners(py).pip(ctx)).toBe(0);
+    expect(py.events).toContain("micropip.install:cowsay");
+    expect(py.loadedPackages["cowsay"]).toBe("pypi");
+  });
+
+  it("routes version-specified requirements straight to micropip", async () => {
+    const py = new MockPyodide();
+    py.pypi.add("six");
+    const { ctx } = makeCtx(["pip", "install", "six==1.17.0"], new Vfs({ clock: () => 0 }));
+    expect(await makeRunners(py).pip(ctx)).toBe(0);
+    expect(py.events.some((e) => e.startsWith("loadPackage:") && e.includes("six=="))).toBe(false);
+    expect(py.events).toContain("micropip.install:six==1.17.0");
+  });
+
+  it("fails (no fake success) when loadPackage silently fails offline", async () => {
+    const py = new MockPyodide();
+    py.prebuilt.add("numpy");
+    py.offline = true;
+    const { ctx, stderr } = makeCtx(["pip", "install", "numpy"], new Vfs({ clock: () => 0 }));
+    expect(await makeRunners(py).pip(ctx)).toBe(1);
+    stderr.end();
+    const err = await stderr.text();
+    expect(err).toMatch(/CDN|network/);
+    expect(err).toContain("Failed to load numpy");
+  });
+
+  // `loadedPackages` is a plain object — an `in` check would see Object.prototype
+  // keys, faking success for real PyPI names like `constructor` or `toString`.
+  it("does not fake success for package names that collide with Object.prototype", async () => {
+    const py = new MockPyodide();
+    py.offline = true;
+    const { ctx, stdout } = makeCtx(["pip", "install", "constructor", "toString"], new Vfs({ clock: () => 0 }));
+    expect(await makeRunners(py).pip(ctx)).toBe(1);
+    stdout.end();
+    expect(await stdout.text()).not.toContain("Successfully installed");
+  });
+
+  it("reports already-loaded packages as satisfied instead of claiming a fresh install", async () => {
+    const py = new MockPyodide();
+    py.prebuilt.add("numpy");
+    const runners = makeRunners(py);
+    await runners.pip(makeCtx(["pip", "install", "numpy"], new Vfs({ clock: () => 0 })).ctx);
+    const { ctx, stdout } = makeCtx(["pip", "install", "numpy"], new Vfs({ clock: () => 0 }));
+    expect(await runners.pip(ctx)).toBe(0);
+    stdout.end();
+    const out = await stdout.text();
+    expect(out).toContain("Requirement already satisfied: numpy");
+    expect(out).not.toContain("Successfully installed");
+  });
+
+  it("errors clearly when micropip cannot resolve a package, with a network hint", async () => {
+    const py = new MockPyodide();
+    const { ctx, stderr } = makeCtx(["pip", "install", "nosuchpkg"], new Vfs({ clock: () => 0 }));
+    expect(await makeRunners(py).pip(ctx)).toBe(1);
+    stderr.end();
+    const err = await stderr.text();
+    expect(err).toContain("failed to install 'nosuchpkg'");
+    expect(err).toContain("PyPI is unreachable");
+  });
+
+  it("pip list prints loaded packages with their source", async () => {
+    const py = new MockPyodide();
+    py.prebuilt.add("numpy");
+    const runners = makeRunners(py);
+    await runners.pip(makeCtx(["pip", "install", "numpy"], new Vfs({ clock: () => 0 })).ctx);
+    const { ctx, stdout } = makeCtx(["pip", "list"], new Vfs({ clock: () => 0 }));
+    expect(await runners.pip(ctx)).toBe(0);
+    stdout.end();
+    expect(await stdout.text()).toContain("numpy (default channel)");
+  });
+
+  it("errors on unsupported subcommands, options, and empty installs (no fake success)", async () => {
+    const py = new MockPyodide();
+    const pip = makeRunners(py).pip;
+    const fs = () => new Vfs({ clock: () => 0 });
+
+    const usage = makeCtx(["pip"], fs());
+    expect(await pip(usage.ctx)).toBe(1);
+    usage.stderr.end();
+    expect(await usage.stderr.text()).toMatch(/usage/);
+
+    const uninstall = makeCtx(["pip", "uninstall", "x"], fs());
+    expect(await pip(uninstall.ctx)).toBe(1);
+    uninstall.stderr.end();
+    expect(await uninstall.stderr.text()).toContain("unsupported command 'uninstall'");
+
+    const flag = makeCtx(["pip", "install", "-q", "numpy"], fs());
+    expect(await pip(flag.ctx)).toBe(1);
+    flag.stderr.end();
+    expect(await flag.stderr.text()).toContain("unsupported option '-q'");
+
+    const empty = makeCtx(["pip", "install"], fs());
+    expect(await pip(empty.ctx)).toBe(1);
+    empty.stderr.end();
+    expect(await empty.stderr.text()).toMatch(/at least one package/);
+  });
+
+  it("shares one Pyodide instance between python and pip (both orders)", async () => {
+    const fs = () => new Vfs({ clock: () => 0 });
+
+    let loads = 0;
+    const py = new MockPyodide();
+    py.prebuilt.add("numpy");
+    const runners = createPythonRunners({
+      load: async () => {
+        loads += 1;
+        return py;
+      },
+    });
+    expect(await runners.python(makeCtx(["python", "-c", "1"], fs()).ctx)).toBe(0);
+    expect(await runners.pip(makeCtx(["pip", "install", "numpy"], fs()).ctx)).toBe(0);
+    expect(loads).toBe(1);
+
+    let loads2 = 0;
+    const py2 = new MockPyodide();
+    py2.prebuilt.add("numpy");
+    const runners2 = createPythonRunners({
+      load: async () => {
+        loads2 += 1;
+        return py2;
+      },
+    });
+    expect(await runners2.pip(makeCtx(["pip", "install", "numpy"], fs()).ctx)).toBe(0);
+    expect(await runners2.python(makeCtx(["python", "-c", "1"], fs()).ctx)).toBe(0);
+    expect(loads2).toBe(1);
+  });
+
+  it("serializes a pip run behind a pending python run; streams do not cross", async () => {
+    const events: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const py = new MockPyodide(async (a) => {
+      events.push("python:start");
+      a.out("py-out\n");
+      await gate;
+      events.push("python:end");
+      return 0;
+    });
+    py.events = events;
+    py.prebuilt.add("numpy");
+    const runners = makeRunners(py);
+
+    const pyCtx = makeCtx(["python", "-c", "slow"], new Vfs({ clock: () => 0 }));
+    const pipCtx = makeCtx(["pip", "install", "numpy"], new Vfs({ clock: () => 0 }));
+    const pythonDone = runners.python(pyCtx.ctx);
+    const pipDone = runners.pip(pipCtx.ctx);
+
+    // Give an unserialized pip plenty of time to reach loadPackage.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(events).toEqual(["python:start"]);
+
+    release();
+    expect(await pythonDone).toBe(0);
+    expect(await pipDone).toBe(0);
+    expect(events).toEqual(["python:start", "python:end", "loadPackage:numpy"]);
+
+    pyCtx.stdout.end();
+    pipCtx.stdout.end();
+    expect(await pyCtx.stdout.text()).toBe("py-out\n");
+    expect(await pipCtx.stdout.text()).not.toContain("py-out");
   });
 });
