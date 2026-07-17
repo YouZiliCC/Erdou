@@ -24,7 +24,7 @@ export async function createVmKernel(
   onProgress("Loading VM image…");
   const runtime: VmLike = opts.makeRuntime
     ? opts.makeRuntime()
-    : new VmRuntime(() => loadBrowserInputs(vmAssets(profile)));
+    : new VmRuntime(() => loadBrowserInputs(vmAssets(profile)), { profile });
   onProgress("Booting Alpine Linux…");
   await runtime.boot();
   onProgress("Ready");

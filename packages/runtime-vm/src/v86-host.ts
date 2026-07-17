@@ -133,11 +133,14 @@ export class V86Host {
       );
       this.emulator.add_listener("emulator-ready", () => { clearTimeout(timer); resolve(); });
     });
-    // Re-install after restore: restoring from initial_state RECONSTRUCTS
-    // network_adapter, so the pre-ready wrap above targets a dead object and the
-    // live adapter's fetch is bare (pip 403s; npm masks it via 301). Idempotent
-    // (marker guard), so the no-restore path where the object is unchanged is a
-    // no-op. Found by the Round-13 net-e2e acceptance suite.
+    // Re-install after emulator-ready. OBSERVED: at this point the live adapter's
+    // fetch is bare — the pre-ready wrap above did not reach the object the relay
+    // actually uses, so without this pip 403s (npm masks it via 301). The exact
+    // v86 internal cause (adapter not yet built at line 123 / reconstructed while
+    // restoring initial_state) is not asserted here — only the bare-after-ready
+    // symptom, which this re-install fixes. Idempotent (marker guard), so when the
+    // pre-ready object IS the live one this is a no-op. Found by the Round-13
+    // net-e2e acceptance suite; covered hermetically by v86-host.egress.test.ts.
     this.installEgress();
     assertFs9pSymbols(this.emulator.fs9p);
     (this as { fs9p: Fs9p }).fs9p = this.emulator.fs9p as Fs9p;

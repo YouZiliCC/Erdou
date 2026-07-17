@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { V86Host, type V86BootInputs } from "./v86-host.js";
-import { EGRESS_SHIM_MARKER, type UpstreamResponse } from "./egress-shim.js";
+import { EGRESS_SHIM_MARKER, type UpstreamFetch, type UpstreamResponse } from "./egress-shim.js";
 
 function fakeFs9p(): Record<string, unknown> {
   const o: Record<string, unknown> = { inodes: [] };
@@ -49,6 +49,34 @@ function makeFakeHost() {
   return { host: new FakeHost(), adapter, upstream, fetched };
 }
 
+/** A fake v86 that SWAPS its `network_adapter` for a fresh, bare-fetch object at
+ *  emulator-ready — modeling the OBSERVED post-restore behavior: the live adapter
+ *  the relay ends up using is NOT the one present when boot() runs the pre-ready
+ *  wrap, so only the post-ready re-install reaches it. The pre-ready `preReady`
+ *  object is wrapped but discarded; `postReady` is what networkAdapter() returns. */
+function makeReconstructingHost() {
+  const bareAdapter = (): { fetch: UpstreamFetch } => ({
+    // A no-op fetch is enough — installEgressShim only wraps, never calls it.
+    fetch: (async () => { throw new Error("not under test"); }) as UpstreamFetch,
+  });
+  const preReady = bareAdapter();
+  const postReady = bareAdapter();
+  const emu: any = {
+    network_adapter: preReady,
+    fs9p: fakeFs9p(),
+    destroy: async () => {},
+    add_listener(ev: string, cb: () => void) {
+      // Reconstruct the adapter BEFORE signaling ready, so the live object at the
+      // post-ready install (v86-host line 141) differs from the pre-ready one.
+      if (ev === "emulator-ready") { emu.network_adapter = postReady; cb(); }
+    },
+  };
+  class FakeHost extends V86Host {
+    protected makeEmulator(): any { return emu; }
+  }
+  return { host: new FakeHost(), preReady, postReady };
+}
+
 const inputs: V86BootInputs = { bios: new ArrayBuffer(8), vgaBios: new ArrayBuffer(8), kernel: new ArrayBuffer(8), wasmUrl: "x", memoryMB: 512 };
 
 describe("V86Host.boot installs the pypi egress shim on the NAT adapter", () => {
@@ -78,5 +106,19 @@ describe("V86Host.boot installs the pypi egress shim on the NAT adapter", () => 
     await host.destroy();
     await host.boot(inputs);
     expect(adapter.fetch).toBe(first);
+  });
+
+  it("re-installs on the adapter swapped in at emulator-ready (post-ready install reaches the LIVE object)", async () => {
+    // Bite for the SECOND, post-emulator-ready installEgress() (v86-host line 141):
+    // when the live adapter is reconstructed after the pre-ready wrap, only the
+    // re-install carries the shim onto the object the relay actually uses. Reverting
+    // that call leaves postReady.fetch bare → this fails.
+    const { host, preReady, postReady } = makeReconstructingHost();
+    await host.boot(inputs);
+    expect(host.networkAdapter()).toBe(postReady); // the live adapter is the reconstructed one
+    const live = postReady.fetch as UpstreamFetch & { [EGRESS_SHIM_MARKER]?: true };
+    expect(live[EGRESS_SHIM_MARKER]).toBe(true);
+    // The pre-ready wrap did happen (idempotent), just on the now-discarded object.
+    expect((preReady.fetch as { [EGRESS_SHIM_MARKER]?: true })[EGRESS_SHIM_MARKER]).toBe(true);
   });
 });
