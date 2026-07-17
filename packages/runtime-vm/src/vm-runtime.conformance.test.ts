@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import type { RuntimeEvent } from "@erdou/runtime-contract";
 import { runConformance } from "@erdou/conformance";
 import { VmRuntime } from "./vm-runtime.js";
 import { V86Host } from "./v86-host.js";
@@ -108,4 +109,38 @@ describe.skipIf(!RUN)("VmRuntime (gated e2e)", () => {
     expect(closed.status).toBe(502);
     await rt.shutdown();
   }, 90_000);
+
+  const waitFor = async (pred: () => boolean, ms: number): Promise<void> => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (pred()) return;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    throw new Error(`waitFor: condition not met within ${ms}ms`);
+  };
+
+  it("emits port.opened for a 0.0.0.0 guest server and port.closed when it dies", async () => {
+    const rt = new VmRuntime(makeInputs);
+    await rt.boot();
+    const events: RuntimeEvent[] = [];
+    rt.subscribe((e) => events.push(e));
+    const server = await rt.exec("python3 -m http.server 8000 --bind 0.0.0.0");
+    await waitFor(() => events.some((e) => e.type === "port.opened" && e.port === 8000), 40_000);
+    const opened = events.find((e) => e.type === "port.opened" && e.port === 8000);
+    expect(opened && opened.type === "port.opened" && opened.url).toBe("/__port__/8000/");
+    await rt.kill(server.pid, "SIGKILL");
+    await waitFor(() => events.some((e) => e.type === "port.closed" && e.port === 8000), 15_000);
+    await rt.shutdown();
+  }, 70_000);
+
+  it("does NOT emit port.opened for a 127.0.0.1-only server (emits resource.warning)", async () => {
+    const rt = new VmRuntime(makeInputs);
+    await rt.boot();
+    const events: RuntimeEvent[] = [];
+    rt.subscribe((e) => events.push(e));
+    await rt.exec("python3 -m http.server 8001 --bind 127.0.0.1");
+    await waitFor(() => events.some((e) => e.type === "resource.warning" && e.resource === "port:8001"), 40_000);
+    expect(events.some((e) => e.type === "port.opened" && e.port === 8001)).toBe(false);
+    await rt.shutdown();
+  }, 60_000);
 });

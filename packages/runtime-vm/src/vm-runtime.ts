@@ -8,7 +8,6 @@ import type {
 import { V86Host } from "./v86-host.js";
 import { Fs9pBridge } from "./fs-bridge.js";
 import { GuestdClient, type GuestProcess } from "./guestd-client.js";
-import { PortRegistry } from "./port-registry.js";
 import { snapshotWorkspace, restoreWorkspace } from "./workspace-snapshot.js";
 import { vmCapabilities } from "./capabilities.js";
 import { openPtySession, type PtySession } from "./pty.js";
@@ -32,8 +31,11 @@ export class VmRuntime implements Runtime {
   private host: V86Host;
   private bridge!: Fs9pBridge;
   private guestd!: GuestdClient;
-  private ports!: PortRegistry;
   private readonly listeners = new Set<RuntimeEventListener>();
+  /** Ports currently reachable+listening (idempotent emit tracking). */
+  private readonly openPorts = new Set<number>();
+  /** Ports bound loopback-only (not previewable) — tracked so we emit the hint once. */
+  private readonly loopbackPorts = new Set<number>();
   // Retained per pid — kept AFTER exit (unlike guestd.ps(), which only lists
   // live /proc) so wait()/kill()/getProcesses() honor the contract for an
   // already-exited process. BrowserRuntime's process table never deletes
@@ -59,12 +61,17 @@ export class VmRuntime implements Runtime {
     if (this.booted) return;
     const inputs = await this.loadInputs();
     await this.host.boot(inputs, this.bootTimeoutMs ? { bootTimeoutMs: this.bootTimeoutMs } : {});
-    this.ports = new PortRegistry((e) => this.emit(e));
     this.bridge = new Fs9pBridge(this.host.fs9p, (e) => this.emit(e));
     this.bridge.attach();          // wraps fs9p + builds the workspace path index from the restored state
     this.host.run();               // resume the CPU from the baked state (guestd is already resident)
     this.guestd = new GuestdClient(this.host.channel());
+    this.guestd.onPortEvent((e) => this.onGuestPortEvent(e));                    // real /proc/net/tcp watcher → port.opened/closed + loopback hint
     await this.guestd.ready({ deadlineMs: this.bootTimeoutMs ?? 60_000 });      // first hvc0 frame is the kick; guestd replies READY
+    // The baked state brings eth0 up (DHCP) but never configures lo, so guest
+    // servers binding 127.0.0.1 fail with EADDRNOTAVAIL. Bring loopback up here
+    // so localhost dev servers can bind (and the loopback-only "bind 0.0.0.0"
+    // hint is reachable). busybox provides `ip` as an applet in the exec chroot.
+    await (await this.guestd.exec("busybox ip addr add 127.0.0.1/8 dev lo 2>/dev/null; busybox ip link set lo up")).wait();
     this.booted = true;
   }
 
@@ -170,12 +177,43 @@ export class VmRuntime implements Runtime {
   async createSnapshot(): Promise<Snapshot> { this.bridge.flush(); return snapshotWorkspace(this.host.fs9p, this.clock); }
   async restoreSnapshot(s: Snapshot): Promise<void> { await restoreWorkspace(this.host.fs9p, this.bridge, s); }
 
-  // ---- ports (in-VM for 11a; real guest proxy is Round 12) ----
-  async listen(port: number): Promise<VirtualPort> {
-    const reg = this.ports; reg.serve(port, () => ({ status: 502, headers: {}, body: new Uint8Array() }));
-    return { port, close: async () => reg.close(port) };
+  // ---- ports (real guest proxy; Round 12) ----
+  private emitOpened(port: number): void {
+    this.loopbackPorts.delete(port);
+    if (this.openPorts.has(port)) return;
+    this.openPorts.add(port);
+    this.emit({ type: "port.opened", port, url: `/__port__/${port}/` });
   }
-  async exposePort(port: number): Promise<string> { return this.ports.exposePort(port); }
+  private emitClosed(port: number): void {
+    this.loopbackPorts.delete(port);
+    if (!this.openPorts.delete(port)) return;
+    this.emit({ type: "port.closed", port });
+  }
+  private emitLoopback(port: number): void {
+    if (this.openPorts.has(port) || this.loopbackPorts.has(port)) return;
+    this.loopbackPorts.add(port);
+    this.emit({
+      type: "resource.warning",
+      resource: `port:${port}`,
+      detail: `Server on port ${port} is bound to loopback (127.0.0.1) — bind 0.0.0.0 to make it previewable.`,
+    });
+  }
+  /** guestd /proc/net/tcp watcher → runtime bus. Reachable listen → opened;
+   *  gone → closed; loopback-only listen → a visible "bind 0.0.0.0" hint. */
+  private onGuestPortEvent(e: { port: number; listening: boolean; loopback: boolean }): void {
+    if (!e.listening) { this.emitClosed(e.port); return; }
+    if (e.loopback) this.emitLoopback(e.port);
+    else this.emitOpened(e.port);
+  }
+
+  async listen(port: number): Promise<VirtualPort> {
+    this.emitOpened(port);
+    return { port, close: async () => this.emitClosed(port) };
+  }
+  async exposePort(port: number): Promise<string> {
+    this.emitOpened(port);
+    return `/__port__/${port}/`;
+  }
 
   /** Reverse-proxy an HTTP request into a real server running inside the guest.
    *  Probe-first (fast + reliable): a closed OR loopback-only bind probes false →
@@ -250,7 +288,7 @@ export class VmRuntime implements Runtime {
       conn.on("close", finish); // unreliable — a backstop, not the primary condition
     });
   }
-  async closePort(port: number): Promise<void> { this.ports.close(port); }
+  async closePort(port: number): Promise<void> { this.emitClosed(port); }
 
   async getCapabilities(): Promise<RuntimeCapabilities> { return vmCapabilities(["python3"]); }
   subscribe(l: RuntimeEventListener): Unsubscribe { this.listeners.add(l); return () => this.listeners.delete(l); }
