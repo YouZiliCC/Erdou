@@ -4,10 +4,17 @@ import { truncate, type Studio, type TraceLine } from "../lib/studio.js";
 import { ApprovalPrompt } from "./ApprovalPrompt.js";
 import { Chevron } from "./ui/icons.js";
 
-const EXAMPLES = ["Open a local folder", "Scaffold a Vite app", "Write & run a Python script"];
+const EXAMPLES = [
+  "Build a small Python HTTP server and preview it",
+  "Scaffold a Vite app",
+  "Write & run a Python script",
+];
+
+/** How many recent system-channel errors stay pinned below the transcript once a run is open. */
+const SYSTEM_ERROR_STRIP_LIMIT = 3;
 
 /** Center column: the active run's transcript, or a first-run empty state. */
-export function Conversation({ studio }: { studio: Studio }) {
+export function Conversation({ studio, onExample }: { studio: Studio; onExample: (task: string) => void }) {
   const run = studio.activeRun;
   const ref = useRef<HTMLDivElement>(null);
 
@@ -26,7 +33,9 @@ export function Conversation({ studio }: { studio: Studio }) {
           </p>
           <div className="ex">
             {EXAMPLES.map((e) => (
-              <span key={e}>{e}</span>
+              <button type="button" key={e} onClick={() => onExample(e)}>
+                {e}
+              </button>
             ))}
           </div>
         </div>
@@ -41,15 +50,29 @@ export function Conversation({ studio }: { studio: Studio }) {
     );
   }
 
+  // The system channel (folder-sync failures, mount/kernel errors) is invisible
+  // once a run is selected — pin its recent errors in a strip so data-safety
+  // messages like "Failed to sync to local folder" can't be missed (audit B3).
+  const systemErrors = studio.systemLog.filter((l) => l.kind === "error").slice(-SYSTEM_ERROR_STRIP_LIMIT);
+
   return (
-    <div className="tr" ref={ref}>
-      <div className="msg">
-        <div className="who">you</div>
-        <div className="you">{run.task}</div>
+    <>
+      <div className="tr" ref={ref}>
+        <div className="msg">
+          <div className="who">you</div>
+          <div className="you">{run.task}</div>
+        </div>
+        {renderTrace(run.trace)}
+        {studio.pendingApproval && run.status === "running" && <ApprovalPrompt studio={studio} />}
       </div>
-      {renderTrace(run.trace)}
-      {studio.pendingApproval && run.status === "running" && <ApprovalPrompt studio={studio} />}
-    </div>
+      {systemErrors.length > 0 && (
+        <div className="sysbar" role="alert">
+          {systemErrors.map((line) => (
+            <SystemLine key={line.id} line={line} />
+          ))}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -92,7 +115,15 @@ function TraceBlock({ line }: { line: TraceLine }) {
     case "done":
       return <div className="done">◆ {line.text}</div>;
     case "error":
-      return <div className="err">✖ {line.text}</div>;
+      // The gateway's real failure (e.g. "openai-compatible chat failed: 401
+      // {invalid_api_key}") lands in `detail` — surface it, not just the
+      // generic "Agent stopped" text (audit B1).
+      return (
+        <div className="err">
+          ✖ {line.text}
+          {line.detail && line.detail !== line.text && <pre className="err-detail">{line.detail}</pre>}
+        </div>
+      );
     case "system":
       return <SystemLine line={line} />;
   }

@@ -1,4 +1,4 @@
-import type { Executor, FileSystemApi } from "@erdou/runtime-contract";
+import type { ExecContext, Executor, FileSystemApi } from "@erdou/runtime-contract";
 import type { Pyodide, EmscriptenFS } from "./pyodide.js";
 import { ERDOU_SETUP, createServeBinding } from "./erdou-module.js";
 
@@ -49,8 +49,40 @@ export interface PyodidePackages {
 
 export type PipPyodide = Pyodide & PyodidePackages;
 
+/**
+ * Install-transparency hooks the app attaches: browser-kernel installs land
+ * only in the session's in-memory Pyodide, so the app records what a session
+ * installed and hints at restoring it in the next one. This package stays
+ * storage-agnostic per the layering invariant — it only calls/reads these.
+ */
+export interface PipInstallHooks {
+  /**
+   * Called once per successful `pip install`, with every requirement the
+   * command ensured (the exact argv strings — reusable as `pip install
+   * <names>`).
+   */
+  onInstall?: (packages: string[]) => void;
+  /**
+   * Requirements recorded by `onInstall` in a previous session. When
+   * non-empty, the first `python`/`pip` run of this session prints a one-line
+   * restore hint with the exact `pip install` command — deliberately NO
+   * automatic re-download (a surprise multi-MB fetch is worse than the hint).
+   */
+  previousInstalls?: readonly string[];
+}
+
+/**
+ * Loader for the shared Pyodide instance. The install hooks ride ON the loader
+ * (`load.pipInstalls`) rather than as sibling options: the app's registration
+ * seam (apps/web `registerLanguages`) forwards ONLY the loader into this
+ * factory, so the function value is the one channel that reaches it end-to-end
+ * — hooks passed any other way would be dropped at that seam. A plain
+ * `() => Promise<PipPyodide>` (no hooks attached) is a valid loader.
+ */
+export type PipPyodideLoader = (() => Promise<PipPyodide>) & { pipInstalls?: PipInstallHooks };
+
 export interface PythonRuntimeOptions {
-  load: () => Promise<PipPyodide>;
+  load: PipPyodideLoader;
 }
 
 export interface PythonRunners {
@@ -70,6 +102,26 @@ export function createPythonRunners(opts: PythonRuntimeOptions): PythonRunners {
   let instance: Promise<PipPyodide> | undefined;
   const getPyodide = (): Promise<PipPyodide> => (instance ??= opts.load());
 
+  // Installs land in this session's in-memory Pyodide only (deliberately not
+  // snapshotted) — say so instead of letting a reload silently drop them.
+  const hooks = opts.load.pipInstalls;
+  let restorable = hooks?.previousInstalls ?? [];
+  const notices: InstallNotices = {
+    restoreHint(ctx) {
+      if (restorable.length === 0) return;
+      ctx.stderr.write(
+        `note: browser-kernel installs are session-only — restore the previous session's packages with: pip install ${restorable.join(" ")}\n`,
+      );
+      restorable = [];
+    },
+    installed(ctx, packages) {
+      ctx.stderr.write(
+        "pip: note: packages install into this session's Python only and will need reinstalling after a page reload (VM kernel installs persist)\n",
+      );
+      hooks?.onInstall?.(packages);
+    },
+  };
+
   let tail: Promise<unknown> = Promise.resolve();
   const serialize =
     (exec: Executor): Executor =>
@@ -79,7 +131,23 @@ export function createPythonRunners(opts: PythonRuntimeOptions): PythonRunners {
       return run;
     };
 
-  return { python: serialize(pythonExecutor(getPyodide)), pip: serialize(pipExecutor(getPyodide)) };
+  return {
+    python: serialize(pythonExecutor(getPyodide, notices)),
+    pip: serialize(pipExecutor(getPyodide, notices)),
+  };
+}
+
+/**
+ * Session-only install transparency (the browser kernel's pip is this
+ * package's only consumer): a one-time restore hint for the previous session's
+ * packages, plus an after-install notice + app callback. Both write to stderr
+ * — advisory lines must never corrupt a program's stdout.
+ */
+interface InstallNotices {
+  /** Print the previous session's restore hint; a no-op after the first call. */
+  restoreHint(ctx: ExecContext): void;
+  /** A `pip install` succeeded: print the session-only notice, report `packages` to the app. */
+  installed(ctx: ExecContext, packages: string[]): void;
 }
 
 /**
@@ -87,8 +155,9 @@ export function createPythonRunners(opts: PythonRuntimeOptions): PythonRunners {
  * running and back afterward, wires stdout/stderr, sets sys.argv/cwd, and
  * reports the script's exit code.
  */
-function pythonExecutor(getPyodide: () => Promise<PipPyodide>): Executor {
+function pythonExecutor(getPyodide: () => Promise<PipPyodide>, notices: InstallNotices): Executor {
   return async (ctx) => {
+    notices.restoreHint(ctx);
     const args = ctx.argv.slice(1);
     let code: string;
     let scriptArgv: string[];
@@ -155,8 +224,9 @@ const PLAIN_NAME = /^[A-Za-z0-9._-]+$/;
  * names via the lock file, so it never fakes success). `list` reads
  * `loadedPackages`. Anything else errors — no fake success.
  */
-function pipExecutor(getPyodide: () => Promise<PipPyodide>): Executor {
+function pipExecutor(getPyodide: () => Promise<PipPyodide>, notices: InstallNotices): Executor {
   return async (ctx) => {
+    notices.restoreHint(ctx);
     const args = ctx.argv.slice(1);
     const cmd = args[0];
     if (cmd === undefined) {
@@ -242,6 +312,10 @@ function pipExecutor(getPyodide: () => Promise<PipPyodide>): Executor {
     const fresh = pkgs.filter((p) => !preloaded.includes(p));
     if (preloaded.length > 0) ctx.stdout.write(`Requirement already satisfied: ${preloaded.join(" ")}\n`);
     if (fresh.length > 0) ctx.stdout.write(`Successfully installed ${fresh.join(" ")}\n`);
+    // Exit 0 means every requested requirement is present in this session —
+    // report them ALL (not just `fresh`: a name preloaded as another install's
+    // dependency still belongs in the next session's restore hint).
+    notices.installed(ctx, pkgs);
     return 0;
   };
 }

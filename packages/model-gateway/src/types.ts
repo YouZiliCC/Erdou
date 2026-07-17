@@ -19,6 +19,21 @@ export interface ToolCall {
   id: string;
   name: string;
   arguments: string;
+  /**
+   * Provider-opaque raw content blocks of the assistant turn that produced
+   * this call, set by the Anthropic path on the FIRST call of each turn.
+   * Anthropic requires `thinking` blocks to be echoed back unchanged when a
+   * tool-use turn is continued on the same model (thinking is on by default
+   * on e.g. claude-sonnet-5 / claude-fable-5, and there is no universally
+   * accepted way to disable it), so the whole turn is captured verbatim here
+   * and re-sent as-is. It rides on the ToolCall because callers rebuild the
+   * assistant history message from `content` + `toolCalls` — the ToolCall
+   * objects (and their JSON persistence) pass through untouched, so the turn
+   * survives both the in-memory agent loop and a persisted-transcript reload.
+   * Plain JSON — safe to structured-clone/serialize. Ignored by the
+   * OpenAI-compatible path.
+   */
+  rawContent?: unknown[];
 }
 
 export interface ChatMessage {
@@ -37,4 +52,7 @@ export interface ChatResult {
 
 export interface ChatOptions {
   tools?: ToolSpec[];
+  /** Aborts the in-flight HTTP request (e.g. the user pressed Stop mid-call);
+   *  without it a stop only takes effect after the response arrives. */
+  signal?: AbortSignal;
 }

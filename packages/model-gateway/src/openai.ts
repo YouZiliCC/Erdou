@@ -60,6 +60,7 @@ export async function openaiChat(
     method: "POST",
     headers: headers(config),
     body: JSON.stringify(buildBody(config, messages, options)),
+    signal: options?.signal,
   });
   if (!res.ok) {
     throw new Error(`openai-compatible chat failed: ${res.status} ${await res.text()}`);

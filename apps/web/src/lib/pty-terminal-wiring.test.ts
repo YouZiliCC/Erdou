@@ -6,14 +6,17 @@ const text = (chunks: Uint8Array[]) => chunks.map((b) => new TextDecoder().decod
 const settle = () => new Promise<void>((res) => setTimeout(res, 0));
 
 /** Hand-rolled stand-in for xterm's Terminal: records write()s and lets tests
- *  fire the user-input / resize events the real terminal would emit. */
+ *  fire the user-input / resize events the real terminal would emit. Like the
+ *  real thing, `resize` mutates cols/rows AND emits onResize — a FitAddon
+ *  fit() while nothing listens yet still changes the terminal's dimensions. */
 function makeFakeTerm() {
   const dataCbs: Array<(data: string) => void> = [];
   const resizeCbs: Array<(size: { cols: number; rows: number }) => void> = [];
   const writes: Array<string | Uint8Array> = [];
+  const size = { cols: 80, rows: 24 };
   const term: TermLike = {
-    cols: 80,
-    rows: 24,
+    get cols() { return size.cols; },
+    get rows() { return size.rows; },
     onData: (cb) => { dataCbs.push(cb); },
     onResize: (cb) => { resizeCbs.push(cb); },
     write: (d) => { writes.push(d); },
@@ -22,7 +25,11 @@ function makeFakeTerm() {
     term,
     writes,
     type: (s: string) => { for (const cb of dataCbs) cb(s); },
-    resize: (cols: number, rows: number) => { for (const cb of resizeCbs) cb({ cols, rows }); },
+    resize: (cols: number, rows: number) => {
+      size.cols = cols;
+      size.rows = rows;
+      for (const cb of resizeCbs) cb({ cols, rows });
+    },
   };
 }
 
@@ -49,7 +56,13 @@ function deferredOpen() {
   let resolve: (s: PtySessionLike) => void = () => {};
   let reject: (err: unknown) => void = () => {};
   const promise = new Promise<PtySessionLike>((res, rej) => { resolve = res; reject = rej; });
-  return { openPty: () => promise, resolve, reject };
+  const calls: Array<{ cols: number; rows: number }> = [];
+  return {
+    openPty: (opts: { cols: number; rows: number }) => { calls.push(opts); return promise; },
+    resolve,
+    reject,
+    calls,
+  };
 }
 
 describe("wirePtyTerminal", () => {
@@ -125,6 +138,30 @@ describe("wirePtyTerminal", () => {
     expect(fake.disposeCount()).toBe(1);
     expect(fake.written).toEqual([]);
     expect(writes).toEqual(["\x1b[2mconnecting…\x1b[0m"]); // no erase after dispose
+  });
+
+  // D3: the pty must open at the terminal's CURRENT (fitted) dimensions, not a
+  // hardcoded 80x24 — the component fit()s before wiring.
+  it("opens the pty with the terminal's current cols/rows", () => {
+    const { term, resize } = makeFakeTerm();
+    const { openPty, calls } = deferredOpen();
+    resize(132, 43); // the component's mount-time fit(), before wiring
+    wirePtyTerminal(term, openPty);
+    expect(calls).toEqual([{ cols: 132, rows: 43 }]);
+  });
+
+  // D3: a fit() while openPty is in flight (hidden tab shown mid-connect)
+  // resizes xterm before any onResize listener exists — the wiring must sync
+  // the session to the terminal's current size once it opens.
+  it("syncs a resize that landed during openPty to the session after it opens", async () => {
+    const { term, resize } = makeFakeTerm();
+    const { openPty, resolve } = deferredOpen();
+    wirePtyTerminal(term, openPty); // opened at 80x24
+    resize(120, 40); // no listener attached yet — mutates dims only
+    const fake = makeFakeSession();
+    resolve(fake.session);
+    await settle();
+    expect(fake.resizes).toEqual([[120, 40]]);
   });
 
   it("propagates resize to the session; cleanup after resolve disposes it and stops input", async () => {

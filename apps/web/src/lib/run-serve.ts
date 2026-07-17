@@ -97,6 +97,23 @@ function runServeDetached(runtime: ServeRuntime, commandLine: string): Promise<R
         void handle.wait().then(async (status) => {
           if (settled) return;
           const stderr = await handle.stderr.text();
+          if (status.code === 0) {
+            // Exit 0 with no port: rendering "exited with code 0" as the error
+            // is a self-contradiction (and the empty stderr hides what the
+            // command DID do). Say what actually happened, with the captured
+            // output — the detached handle pipes both streams.
+            const stdout = await handle.stdout.text();
+            settle({
+              ok: false,
+              openedPorts: [...openedPorts],
+              loopbackPorts: [...loopbackPorts],
+              pid,
+              code: 0,
+              stdout,
+              stderr: exitedWithoutPortMessage(stdout, stderr),
+            });
+            return;
+          }
           settle({ ok: false, openedPorts: [...openedPorts], loopbackPorts: [...loopbackPorts], pid, code: status.code, stderr });
         });
       },
@@ -104,6 +121,57 @@ function runServeDetached(runtime: ServeRuntime, commandLine: string): Promise<R
         settle({ ok: false, openedPorts: [], loopbackPorts: [], code: -1, stderr: err instanceof Error ? err.message : String(err) }),
     );
   });
+}
+
+/** How many trailing stdout lines the exit-0-no-port message echoes (D4). */
+const STDOUT_TAIL_LINES = 10;
+
+/** The truthful message for a detached command that exited cleanly without ever
+ *  opening a port (`ls`, a build script, …) — instead of "exited with code 0"
+ *  presented as an error. Carries a tail of the command's own output so the
+ *  user sees what it did instead of a bare aphorism. */
+function exitedWithoutPortMessage(stdout: string, stderr: string): string {
+  let msg =
+    "Command exited without opening a port — a preview needs a server that binds 0.0.0.0 and keeps running.";
+  const tail = stdout.trimEnd().split("\n").slice(-STDOUT_TAIL_LINES).join("\n").trim();
+  if (tail) msg += `\n\nstdout (tail):\n${tail}`;
+  const err = stderr.trim();
+  if (err) msg += `\n\nstderr:\n${err}`;
+  return msg;
+}
+
+/** The serve state the Preview panel's kill paths need from Studio — structural
+ *  so run-serve stays independent of the Studio class (and trivially fakeable). */
+export interface TrackedServeOwner {
+  /** The tracked detached server's pid (VM path), or null (browser path). */
+  servePid: number | null;
+  /** Every port currently open on the active runtime (Studio's event-fed list). */
+  openPorts: readonly { port: number }[];
+  runtime: Pick<Runtime, "kill">;
+}
+
+/**
+ * Kill the tracked detached server (the VM path's real guest process) and
+ * report which port chips died with it — shared by the Preview panel's ×
+ * button and `doRun`'s pre-run cleanup.
+ *
+ * Returns EVERY currently-open port, because on the VM path they all belong to
+ * that one tracked serve (the same reasoning as Studio.stopTrackedServe). The
+ * panel's own opened-ports record CANNOT stand in for this: `runServeDetached`
+ * settles — and unsubscribes — on the FIRST `port.opened`, so a dev server's
+ * later siblings (e.g. its HMR port) never reach that record, and a sibling
+ * chip left open over the killed process would 502 on click (D5).
+ *
+ * Returns null when no server is tracked (`servePid` null — the browser path,
+ * where open ports may belong to other actors, e.g. an agent's own serve, and
+ * must survive): the caller falls back to its own record. The kill's catch is
+ * for an already-exited pid (ESRCH), mirroring Studio.stopTrackedServe.
+ */
+export async function killTrackedServe(studio: TrackedServeOwner): Promise<number[] | null> {
+  if (studio.servePid === null) return null;
+  await studio.runtime.kill(studio.servePid).catch(() => {});
+  studio.servePid = null;
+  return studio.openPorts.map((p) => p.port);
 }
 
 function runServeRegistering(runtime: ServeRuntime, shell: RpcShellSession, commandLine: string): Promise<RunServeResult> {

@@ -7,7 +7,7 @@ export type AgentEvent =
   | { type: "assistant"; content: string }
   | { type: "tool_call"; name: string; args: Record<string, unknown> }
   | { type: "tool_result"; name: string; ok: boolean; output: string }
-  | { type: "done"; reason: "done" | "max_steps"; summary: string };
+  | { type: "done"; reason: "done" | "max_steps" | "aborted"; summary: string };
 
 /**
  * What the agent is told about its environment, so it plans against reality
@@ -49,11 +49,16 @@ export interface AgentOptions {
   onEvent?: (event: AgentEvent) => void;
   /** When set, gated tools (run_shell, remove_path, switch_environment) must be approved before running. */
   approve?: (req: ApprovalRequest) => Promise<ApprovalDecision>;
+  /** Cancels the run: checked at the top of each step (before the next model
+   *  call) and before each tool execution. On abort the loop exits cleanly
+   *  with `stoppedReason: "aborted"` — not an error. */
+  signal?: AbortSignal;
 }
 
 export interface AgentRunResult {
   steps: number;
   finalMessage: string;
-  stoppedReason: "done" | "max_steps";
+  /** "aborted" = the caller's AbortSignal fired (user stop), distinguishable from a real failure (which throws). */
+  stoppedReason: "done" | "max_steps" | "aborted";
   transcript: ChatMessage[];
 }

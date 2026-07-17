@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Studio } from "../lib/studio.js";
 import { detectRunCommand, staticServeCommand } from "../lib/run-detect.js";
+import { killTrackedServe } from "../lib/run-serve.js";
 import { bundleProject, hasBundleEntry } from "../lib/bundle-project.js";
 import { shouldRerun } from "../lib/live-rerun.js";
 import { Toggle } from "./ui/Toggle.js";
@@ -13,10 +14,12 @@ import { Toggle } from "./ui/Toggle.js";
  *  the ports bar always hints at that.
  *
  *  Every run (Run, Bundle & Run, or a `live` re-run) goes through `doRun`,
- *  which first closes whatever port(s) THIS panel opened last time —
+ *  which first closes whatever port(s) the previous run opened —
  *  `PortRegistry.serve` throws EADDRINUSE on an already-bound port, so
  *  re-serving the same port without freeing it first would error on every
- *  re-run. On SUCCESS, `doRun` also bumps `nonce`, folded into the iframe's
+ *  re-run. (On the VM path that means killing the tracked server and closing
+ *  ALL open ports — see `killTrackedServe`; on the browser path, just this
+ *  panel's own registrations.) On SUCCESS, `doRun` also bumps `nonce`, folded into the iframe's
  *  `key`, so the preview actually remounts (and reloads) instead of sitting
  *  on a stale `src` — a failed run leaves the still-good iframe alone instead
  *  of flickering it. `live` re-runs are additionally gated on `shouldRerun`
@@ -160,13 +163,16 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
     try {
       // Kill the previous detached server (VM path) before the close-then-serve,
       // so a live re-run can rebind the port — a real guest socket stays bound
-      // until the process dies. No-op on the browser kernel (servePid is null).
-      if (studio.servePid !== null) {
-        await studio.runtime.kill(studio.servePid).catch(() => {});
-        studio.servePid = null;
-      }
-      for (const p of openedPorts.current) await studio.closePort(p);
+      // until the process dies. On a kill, close EVERY open port (they all
+      // belong to that one server), not just this panel's record — the record
+      // only ever holds the FIRST port (see killTrackedServe), so a dev
+      // server's HMR sibling would otherwise survive the re-run as a chip over
+      // a dead process (D5). Browser kernel: servePid is null, the helper
+      // returns null, and only the panel's own registrations are closed.
+      const dead = await killTrackedServe(studio);
+      const closing = dead ?? openedPorts.current;
       openedPorts.current = [];
+      for (const p of closing) await studio.closePort(p);
       const result = await action();
       openedPorts.current = result.opened;
       // By now every VFS write the action itself made is reflected (runCommand
@@ -230,17 +236,22 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
     ranOnce.current = false;
   }, [studio.kernelKind]);
 
-  function stop(port: number): void {
+  async function stop(port: number): Promise<void> {
     // On the VM path the tracked pid IS the real guest server — closePort alone
-    // is pure bookkeeping and would leave it bound + running, so kill it too.
-    // Browser-safe: servePid stays null on the browser kernel, so kill is never
-    // called there.
-    if (studio.servePid !== null) {
-      void studio.runtime.kill(studio.servePid).catch(() => {});
-      studio.servePid = null;
-    }
-    void studio.closePort(port);
-    if (selectedPort === port) setSelectedPort(null);
+    // is pure bookkeeping and would leave it bound + running, so killTrackedServe
+    // kills it first. Killing it takes down EVERY port it opened (a dev server +
+    // its HMR port render as separate chips), and on the VM path all open ports
+    // belong to that one tracked serve — so the helper returns them ALL to close
+    // as one; the panel's own record can't supply the siblings (it only ever
+    // holds the FIRST port, see killTrackedServe). A sibling chip left behind
+    // would 502 on click, its process being gone. Browser kernel: servePid stays
+    // null, the helper returns null, and only the clicked registration is closed
+    // — other actors' ports (an agent's serve) must survive.
+    const dead = await killTrackedServe(studio);
+    const closing = dead ?? [port];
+    if (dead !== null) openedPorts.current = [];
+    for (const p of closing) void studio.closePort(p);
+    if (selectedPort !== null && closing.includes(selectedPort)) setSelectedPort(null);
   }
 
   return (
@@ -284,7 +295,7 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
               <button onClick={() => window.open(`/__preview__/${p.port}/`, "_blank", "noopener")} title="Open in new tab">
                 ↗
               </button>
-              <button className="x" onClick={() => stop(p.port)} title="Stop">
+              <button className="x" onClick={() => void stop(p.port)} title="Stop">
                 ×
               </button>
             </span>

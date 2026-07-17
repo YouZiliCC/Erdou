@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { RuntimeEvent } from "@erdou/runtime-contract";
-import { runServeCommand } from "./run-serve.js";
+import { runServeCommand, killTrackedServe } from "./run-serve.js";
 
 /** Minimal fake: manual event emission + a scripted shell, plus a runtime that
  *  answers `getCapabilities` (browser by default) and an optional `exec` for the
@@ -111,6 +111,69 @@ describe("runServeCommand (VM / realOs path)", () => {
     expect(r.stderr).toContain("0.0.0.0");
   });
 
+  // D4: exit 0 + no port used to surface as a self-contradictory red
+  // "exited with code 0" (stderr empty). It must instead say what happened —
+  // no port — and echo the output the command DID produce.
+  it("exit 0 with no port gets the truthful no-port message with a stdout tail", async () => {
+    const lines = Array.from({ length: 12 }, (_, i) => `l${String(i + 1).padStart(2, "0")}`);
+    const { runtime, shell } = fake(() => Promise.reject(new Error("unused")), {
+      realOs: true,
+      runtimeExec: () =>
+        Promise.resolve({
+          ...fakeHandle(7),
+          wait: async () => ({ code: 0, signal: null }),
+          stdout: { text: async () => lines.join("\n") + "\n" },
+          stderr: { text: async () => "" },
+        }),
+    });
+    const r = await runServeCommand(runtime as any, shell as any, "python3 build.py");
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain("exited without opening a port");
+    expect(r.stderr).toContain("binds 0.0.0.0");
+    // tail = the LAST 10 lines only
+    expect(r.stderr).toContain("l03");
+    expect(r.stderr).toContain("l12");
+    expect(r.stderr).not.toContain("l01");
+    // the raw stdout is still carried whole on the result
+    expect(r.stdout).toBe(lines.join("\n") + "\n");
+  });
+
+  it("the no-port message stays bare when the command produced no output", async () => {
+    const { runtime, shell } = fake(() => Promise.reject(new Error("unused")), {
+      realOs: true,
+      runtimeExec: () =>
+        Promise.resolve({
+          ...fakeHandle(7),
+          wait: async () => ({ code: 0, signal: null }),
+          stdout: { text: async () => "" },
+          stderr: { text: async () => "" },
+        }),
+    });
+    const r = await runServeCommand(runtime as any, shell as any, "ls");
+    expect(r.ok).toBe(false);
+    expect(r.stderr).toBe(
+      "Command exited without opening a port — a preview needs a server that binds 0.0.0.0 and keeps running.",
+    );
+  });
+
+  it("exit 0 with no port still surfaces what the command wrote to stderr", async () => {
+    const { runtime, shell } = fake(() => Promise.reject(new Error("unused")), {
+      realOs: true,
+      runtimeExec: () =>
+        Promise.resolve({
+          ...fakeHandle(7),
+          wait: async () => ({ code: 0, signal: null }),
+          stdout: { text: async () => "" },
+          stderr: { text: async () => "warning: no config found\n" },
+        }),
+    });
+    const r = await runServeCommand(runtime as any, shell as any, "python3 build.py");
+    expect(r.ok).toBe(false);
+    expect(r.stderr).toContain("exited without opening a port");
+    expect(r.stderr).toContain("warning: no config found");
+  });
+
   it("a server that exits before opening a port fails with its stderr", async () => {
     const { runtime, shell } = fake(() => Promise.reject(new Error("unused")), {
       realOs: true,
@@ -124,5 +187,61 @@ describe("runServeCommand (VM / realOs path)", () => {
     const r = await runServeCommand(runtime as any, shell as any, "python3 -m http.server 8000 --bind 0.0.0.0");
     expect(r.ok).toBe(false);
     expect(r.stderr).toContain("Address already in use");
+  });
+});
+
+// D5: dead sibling port chips. A dev server opens its main port (runServeCommand
+// settles there — the panel's record only ever holds that FIRST port) and later
+// an HMR sibling, which only Studio's own event subscription records into
+// `openPorts`. Killing the tracked pid takes BOTH down, so the kill paths must
+// close every open port — not the panel record ∪ clicked, which structurally
+// cannot contain the sibling and leaves its chip 502ing over a dead process.
+describe("killTrackedServe (D5: dead sibling port chips)", () => {
+  function trackedStudio(servePid: number | null, ports: number[]) {
+    const killed: number[] = [];
+    const studio = {
+      servePid,
+      openPorts: ports.map((port) => ({ port })),
+      runtime: {
+        kill: async (pid: number) => {
+          killed.push(pid);
+        },
+      },
+    };
+    return { studio, killed };
+  }
+
+  it("kills the tracked server and returns EVERY open port — including the sibling the panel record never saw", async () => {
+    // The audited scenario: main port 5173 (settled the run), HMR sibling 5174
+    // (arrived after runServeCommand unsubscribed). ref=[5173] cannot help here;
+    // the full set must come from the open-ports list.
+    const { studio, killed } = trackedStudio(42, [5173, 5174]);
+    const dead = await killTrackedServe(studio);
+    expect(killed).toEqual([42]);
+    expect(studio.servePid).toBeNull();
+    expect(dead).toEqual([5173, 5174]);
+  });
+
+  it("returns null and kills nothing when no server is tracked — the browser path, where other actors' ports must survive", async () => {
+    const { studio, killed } = trackedStudio(null, [3000, 8080]);
+    const dead = await killTrackedServe(studio);
+    expect(dead).toBeNull();
+    expect(killed).toEqual([]);
+    expect(studio.openPorts).toEqual([{ port: 3000 }, { port: 8080 }]); // untouched
+  });
+
+  it("an already-exited pid (kill rejects, ESRCH) still clears the pid and reports every open port dead", async () => {
+    const studio = {
+      servePid: 7,
+      openPorts: [{ port: 8000 }],
+      runtime: {
+        kill: async () => {
+          throw new Error("ESRCH");
+        },
+      },
+    };
+    const dead = await killTrackedServe(studio);
+    expect(studio.servePid).toBeNull();
+    expect(dead).toEqual([8000]);
   });
 });

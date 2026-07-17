@@ -31,6 +31,7 @@ import {
   loadPersistedHandle,
   clearPersistedHandle,
   type DirHandleLike,
+  type FolderMirrorResult,
   type MountMtimes,
 } from "./local-mount.js";
 import { pullDiskToWorkspace, pushWorkspaceToDisk, reselectFolder as reselectFolderOp } from "./folder-sync-controls.js";
@@ -38,6 +39,10 @@ import { pullDiskToWorkspace, pushWorkspaceToDisk, reselectFolder as reselectFol
 const SNAPSHOT_ID = "erdou:default";
 /** Cap on `Studio.systemLog` entries so a noisy source (e.g. failing rescans) can't grow it unbounded. */
 const SYSTEM_LOG_LIMIT = 200;
+// Failure texts logged on a state TRANSITION and removed again on recovery
+// (dropSystemErrors) — shared constants so the log and the removal can't drift.
+const SAVE_FAILED_TEXT = "Couldn't save your project to this browser (storage may be full or restricted).";
+const RESCAN_FAILED_TEXT = "Mount rescan failed";
 
 export type TraceKind = "system" | "user" | "thought" | "tool" | "result" | "done" | "error";
 
@@ -88,6 +93,14 @@ export interface FileNode {
   children?: FileNode[];
 }
 
+/** Run-id generator that works on insecure contexts (http://<ip> self-hosting):
+ *  crypto.randomUUID is [SecureContext]-only and undefined there, while
+ *  crypto.getRandomValues is not gated. */
+function newRunId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 /** First non-empty line of the task, trimmed to ~48 chars. Pure. */
 export function runTitle(task: string): string {
   const firstLine = (task.split("\n")[0] ?? "").trim();
@@ -127,6 +140,11 @@ export class Studio {
   private booted = false;
   private nextId = 1;
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Debounce timer for persisting `runs` on trace appends (D2) — trailing
+   *  ~500ms so a burst of trace lines costs one IndexedDB write. */
+  private runsSaveTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Cancels the in-flight agent run (D1); non-null only while one runs. */
+  private runAbort: AbortController | null = null;
   private _shell?: RpcShellSession;
   private _unsubRuntime?: Unsubscribe;
   /** Re-points the run-scoped diff subscription onto the active kernel after a
@@ -196,6 +214,12 @@ export class Studio {
   /** Terminal/mount/system messages not tied to any run. */
   systemLog: TraceLine[] = [];
   running = false;
+  /** True from `stopRun()` until the aborted turn actually ends. The abort is
+   *  checkpoint-based (the agent exits at its next checkpoint, which during an
+   *  in-flight model call means after the HTTP response arrives), so the
+   *  Composer shows a disabled "Stopping…" state instead of a Stop button that
+   *  looks ignored. */
+  stopping = false;
   fsVersion = 0;
   /** Ports currently served by the runtime (Preview panel's open-ports list),
    *  tracked from `port.opened`/`port.closed` — not persisted; a fresh session
@@ -279,6 +303,9 @@ export class Studio {
     // switch re-aims it via `setPreviewRuntime` instead of re-registering.
     void startPreviewProxy(this.runtime);
     this.runs = await loadRuns();
+    // D2: a stored run still marked "running" was interrupted by a reload/crash
+    // mid-run (no run survives its session) — normalize it honestly and persist.
+    if (this.normalizeInterruptedRuns()) await saveRuns(this.runs);
     try {
       const snap = await this.store.load(SNAPSHOT_ID);
       if (snap) {
@@ -291,6 +318,7 @@ export class Studio {
       this.logSystem("error", "Could not restore project.", asMessage(err));
     }
     this.subscribeRuntime();
+    this.installUnloadFlush();
 
     // Restore a previously-mounted local folder if permission is still granted.
     try {
@@ -307,6 +335,47 @@ export class Studio {
       this.logSystem("error", "Could not restore mounted folder", asMessage(err));
     }
     this.notify();
+  }
+
+  /** A4: a quick reload/close inside a debounce window (snapshot 400 ms, folder
+   *  600 ms, runs 500 ms) silently dropped the pending work — terminal/manual
+   *  edits made just before Cmd-R were gone. `pagehide` covers close/reload/
+   *  navigate; `visibilitychange`→hidden covers mobile tab discard (where
+   *  pagehide may never fire). Guarded so the node-environment unit tests can
+   *  boot a Studio without DOM globals. */
+  private installUnloadFlush(): void {
+    if (typeof window === "undefined" || typeof document === "undefined") return;
+    window.addEventListener("pagehide", () => this.flushPendingSaves());
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") this.flushPendingSaves();
+    });
+  }
+
+  /** Cancel every pending debounce timer and kick its save NOW. Inherently
+   *  best-effort: IndexedDB/disk writes started during pagehide generally run
+   *  to completion, but the platform makes no hard guarantee — acceptable, as
+   *  the alternative was certainly losing the debounced work. */
+  flushPendingSaves(): void {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = undefined;
+      void this.save(); // never rejects; failures land in the systemLog (B2)
+    }
+    if (this.folderSaveTimer) {
+      clearTimeout(this.folderSaveTimer);
+      this.folderSaveTimer = undefined;
+      void this.saveToFolder(); // catches internally
+    }
+    if (this.folderStateTimer) {
+      clearTimeout(this.folderStateTimer);
+      this.folderStateTimer = undefined;
+      void this.saveStateToFolder(); // catches internally
+    }
+    if (this.runsSavePending) {
+      void this.flushRunsSave().catch((err) =>
+        this.logSystem("error", "Could not persist run history", asMessage(err)),
+      );
+    }
   }
 
   /** Subscribe to the active kernel's runtime events (file.changed / port.opened /
@@ -564,7 +633,43 @@ export class Studio {
   }
 
   async mountFolder(handle: DirHandleLike): Promise<void> {
-    const count = await loadFolderIntoVfs(handle, this.fs, "/", this.mountMtimes);
+    // A2 (data safety): the folder is the source of truth on mount — the same
+    // rule `swapMountedFolder` enforces. boot() restores the previous project
+    // into the VFS before a persisted mount reconnects, and `loadFolderIntoVfs`
+    // only ever ADDS files, so mounting into a non-empty workspace would make
+    // it old ∪ folder — and the next auto-save/Push would then write last
+    // session's files onto the freshly mounted disk (e.g. polluting a clean
+    // git repo). So a non-empty workspace is cleared first (the VM's
+    // image-owned root dirs kept), with the folder auto-save suspended across
+    // the clear+load so the churn can't mirror a half-loaded state onto any
+    // disk. Note the replaced in-browser project is NOT retained anywhere: the
+    // snapshot save that follows the load overwrites it with the folder
+    // contents.
+    const hadProject = this.fs.readdir("/").some((e) => !VM_PRESERVE_DIRS.includes(e.name));
+    const suspend = hadProject && !this.swappingFolder; // a swap already suspended + pre-cleared
+    if (suspend) {
+      this.swappingFolder = true;
+      // Kill any save a previously mounted folder had pending — it must not
+      // fire mid-load against either folder.
+      if (this.folderSaveTimer) {
+        clearTimeout(this.folderSaveTimer);
+        this.folderSaveTimer = undefined;
+      }
+    }
+    let count: number;
+    try {
+      if (hadProject) {
+        this.clearWorkspace();
+        this.mountMtimes.clear();
+        this.logSystem(
+          "system",
+          `Replaced the in-browser workspace with the contents of "${handle.name}" — a mounted folder is the source of truth.`,
+        );
+      }
+      count = await loadFolderIntoVfs(handle, this.fs, "/", this.mountMtimes);
+    } finally {
+      if (suspend) this.swappingFolder = false;
+    }
     this.mount = handle;
     this.mountName = handle.name;
     this.pendingMount = null;
@@ -579,6 +684,9 @@ export class Studio {
       const st = await readFolderState(handle);
       if (st) {
         this.runs = st.runs;
+        // Folder-hydrated runs replace `this.runs`, so the boot-time interrupted-run
+        // normalization must apply here too (skipped while a run is actually live now).
+        if (!this.running && this.normalizeInterruptedRuns()) this.scheduleFolderStateSave();
         if (st.config) {
           applyTheme(st.config.theme);
           saveApprovalMode(st.config.approvalMode);
@@ -611,7 +719,10 @@ export class Studio {
   private scheduleFolderStateSave(): void {
     if (!this.mount) return;
     if (this.folderStateTimer) clearTimeout(this.folderStateTimer);
-    this.folderStateTimer = setTimeout(() => void this.saveStateToFolder(), 600);
+    this.folderStateTimer = setTimeout(() => {
+      this.folderStateTimer = undefined; // fired — a later flushPendingSaves must not re-kick it
+      void this.saveStateToFolder();
+    }, 600);
   }
   private async saveStateToFolder(): Promise<void> {
     if (!this.mount) return;
@@ -659,8 +770,25 @@ export class Studio {
       if (!this.mount || document.hidden) return;
       try {
         const pulled = await rescanFolder(this.mount, this.fs, this.mountMtimes, "/");
-        this.mountRescanFailed = false;
+        if (this.mountRescanFailed) {
+          this.mountRescanFailed = false;
+          // Rescans work again — retire the pinned failure line (B3/B2).
+          this.dropSystemErrors(RESCAN_FAILED_TEXT);
+          this.logSystem("system", "Mount rescan recovered — external disk edits are syncing again.");
+        }
         if (pulled.length) {
+          // Two-sided edits resolve disk-wins here: a file the auto-save just
+          // skipped as an external-edit conflict is now being pulled over the
+          // workspace copy — say so instead of letting the local edit vanish.
+          const conflicted = new Set(this.lastFolderConflictsKey.split("\n"));
+          const overwritten = pulled.filter((p) => conflicted.has(p));
+          if (overwritten.length > 0) {
+            this.logSystem(
+              "system",
+              `Disk edits replaced the workspace copy of: ${overwritten.join(", ")} (both sides had changed; disk wins on rescan).`,
+            );
+            this.lastFolderConflictsKey = "";
+          }
           this.fsVersion++;
           this.notify(); // belt-and-suspenders: file.changed already fired per pulled file
         }
@@ -669,7 +797,7 @@ export class Studio {
         // failing the same way — only surface it once until a rescan succeeds.
         if (!this.mountRescanFailed) {
           this.mountRescanFailed = true;
-          this.logSystem("error", "Mount rescan failed", asMessage(err));
+          this.logSystem("error", RESCAN_FAILED_TEXT, asMessage(err));
         }
       }
     };
@@ -694,8 +822,15 @@ export class Studio {
     // sole source of truth.
     if (this.swappingFolder) return;
     if (this.folderSaveTimer) clearTimeout(this.folderSaveTimer);
-    this.folderSaveTimer = setTimeout(() => void this.saveToFolder(), 600);
+    this.folderSaveTimer = setTimeout(() => {
+      this.folderSaveTimer = undefined; // fired — a later flushPendingSaves must not re-kick it
+      void this.saveToFolder();
+    }, 600);
   }
+  /** Conflict set of the previous auto-save, as a joined key — the conflict log
+   *  fires on content transitions only, so the 600ms debounce can't spam the
+   *  system log with the same unresolved files. */
+  private lastFolderConflictsKey = "";
   async saveToFolder(): Promise<void> {
     if (!this.mount) return;
     try {
@@ -704,13 +839,24 @@ export class Studio {
       // resolv.conf, /root .npmrc) — never write those image-owned dirs into
       // the user's real folder (R12.5 IMP2 class). VM_PRESERVE_DIRS = skeleton
       // + etc + root; SKELETON_DIRS alone would dump /etc/pip.conf onto disk.
-      await saveVfsToFolder(
+      const result = await saveVfsToFolder(
         this.fs,
         this.mount,
         "/",
         this.mountMtimes,
         this.kernelKind === "vm" ? new Set(VM_PRESERVE_DIRS) : undefined,
       );
+      const key = [...result.conflicts].sort().join("\n");
+      if (key !== this.lastFolderConflictsKey && key !== "") {
+        const shown = result.conflicts.slice(0, 3).join(", ");
+        const more = result.conflicts.length > 3 ? ` (+${result.conflicts.length - 3} more)` : "";
+        this.logSystem(
+          "error",
+          `${result.conflicts.length} file(s) changed on disk outside Erdou and were not overwritten: ${shown}${more}`,
+          "Pull from disk ↓ to bring the external edits into the workspace, or Push to disk ↑ deliberately.",
+        );
+      }
+      this.lastFolderConflictsKey = key;
     } catch (err) {
       this.logSystem("error", "Failed to sync to local folder", asMessage(err));
     }
@@ -734,12 +880,14 @@ export class Studio {
     return count;
   }
 
-  /** Manual "Push to disk ↑": write the whole workspace back to the mounted
-   *  folder now, honoring VM_PRESERVE_DIRS at root on the VM kernel exactly like
-   *  the auto save path. No-op if nothing is mounted. */
-  async pushFolderNow(): Promise<void> {
-    if (!this.mount) return;
-    await pushWorkspaceToDisk(
+  /** Manual "Push to disk ↑": mirror the workspace onto the mounted folder now
+   *  (writes + deletes disk-only entries + skips externally-edited conflicts),
+   *  honoring VM_PRESERVE_DIRS at root on the VM kernel exactly like the auto
+   *  save path. Returns the mirror result for the UI to report, or null if
+   *  nothing is mounted. */
+  async pushFolderNow(): Promise<FolderMirrorResult | null> {
+    if (!this.mount) return null;
+    return pushWorkspaceToDisk(
       this.mount,
       this.fs,
       this.mountMtimes,
@@ -765,15 +913,13 @@ export class Studio {
 
   /**
    * Swap the mounted folder for a DIFFERENT one, which becomes the SOLE source
-   * of truth. Distinct from the INITIAL `mountFolder` (additive on purpose — it
-   * carries in-browser work onto the freshly-picked disk): a swap must NOT let
-   * the previous project bleed onto the new folder. `loadFolderIntoVfs` only
-   * ever ADDS files, so without clearing first the workspace would become
-   * old ∪ new and the ~600 ms folder auto-save would then mirror the old
-   * project's files onto the new folder's real disk (e.g. dirtying a `.git`
-   * repo). So: suspend the folder auto-save for the whole swap, clear the
-   * previous project out of the VFS (keeping the VM's image-owned root dirs) and
-   * drop its now-stale mtimes, THEN load the new folder via `mountFolder`.
+   * of truth. `mountFolder` clears a non-empty workspace itself (A2), but a
+   * swap must ALSO hold the folder auto-save suspension across the ENTIRE
+   * clear→load flow and drop the OLD folder's pending save + stale mtimes even
+   * when the workspace happens to be empty — the ~600 ms folder auto-save must
+   * never mirror a half-swapped workspace onto either disk (e.g. dirtying a
+   * `.git` repo). So it pre-clears here with the suspension held for the whole
+   * swap, THEN loads the new folder via `mountFolder`.
    */
   private async swapMountedFolder(handle: DirHandleLike): Promise<void> {
     this.swappingFolder = true;
@@ -804,10 +950,41 @@ export class Studio {
 
   private scheduleSave(): void {
     if (this.saveTimer) clearTimeout(this.saveTimer);
-    this.saveTimer = setTimeout(() => void this.save(), 400);
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = undefined; // fired — a later flushPendingSaves must not re-kick it
+      void this.save();
+    }, 400);
   }
+
+  /** True while snapshot saving is failing (quota / restricted storage): set by
+   *  the first failed save, cleared by the next successful one. The systemLog
+   *  carries the transition lines; the UI can watch this flag for a persistent
+   *  "your work is not being saved" state. */
+  lastSaveFailed = false;
+
+  /** Persist the workspace snapshot to IndexedDB. Never rejects (B2): the
+   *  debounced caller discards the promise, so a quota/restricted-storage
+   *  failure used to vanish — the user found out only on the next reload, with
+   *  the project gone. Logs on failure-state TRANSITIONS only (first failure +
+   *  recovery), not on every failing 400 ms debounce, so a persistently full
+   *  disk can't spam the log. */
   async save(): Promise<void> {
-    await this.store.save(SNAPSHOT_ID, await this.runtime.createSnapshot());
+    try {
+      await this.store.save(SNAPSHOT_ID, await this.runtime.createSnapshot());
+      if (this.lastSaveFailed) {
+        this.lastSaveFailed = false;
+        // Saving works again — the pinned "Couldn't save…" strip line would
+        // otherwise assert a data-loss condition that is no longer true (B3/B2).
+        this.dropSystemErrors(SAVE_FAILED_TEXT);
+        this.logSystem("system", "Project saving recovered — your work is being stored in this browser again.");
+      }
+    } catch (err) {
+      const firstFailure = !this.lastSaveFailed;
+      this.lastSaveFailed = true;
+      if (firstFailure) {
+        this.logSystem("error", SAVE_FAILED_TEXT, asMessage(err));
+      }
+    }
   }
 
   private line(kind: TraceKind, text: string, detail?: string, ok?: boolean): TraceLine {
@@ -820,9 +997,58 @@ export class Studio {
     this.notify();
   }
 
+  /** Remove earlier error lines with exactly this text — called on the matching
+   *  recovery transition. The Conversation `.sysbar` strip pins systemLog errors
+   *  with no dismissal, so a recovered failure must retire its own stale line or
+   *  the user keeps seeing an alert for a condition that no longer holds (B3/B2). */
+  private dropSystemErrors(text: string): void {
+    const next = this.systemLog.filter((l) => !(l.kind === "error" && l.text === text));
+    if (next.length === this.systemLog.length) return;
+    this.systemLog = next;
+    this.notify();
+  }
+
   private appendLine(run: Run, kind: TraceKind, text: string, detail?: string, ok?: boolean): void {
     run.trace = [...run.trace, this.line(kind, text, detail, ok)];
+    this.scheduleRunsSave(); // D2: an in-flight run's trace survives a reload/crash
     this.notify();
+  }
+
+  /** Debounce-persist the run history (~500ms trailing) — trace appends arrive
+   *  in bursts, so a burst costs one IndexedDB write. */
+  private scheduleRunsSave(): void {
+    if (this.runsSaveTimer) clearTimeout(this.runsSaveTimer);
+    this.runsSaveTimer = setTimeout(() => void this.flushRunsSave(), 500);
+  }
+
+  /** True while a debounced runs save is pending (a pagehide flush checks this). */
+  get runsSavePending(): boolean {
+    return this.runsSaveTimer !== undefined;
+  }
+
+  /** Cancel any pending debounced runs save and persist `runs` now. Called at
+   *  turn end (so the trailing timer can't double-save) and by a pagehide flush. */
+  async flushRunsSave(): Promise<void> {
+    if (this.runsSaveTimer) {
+      clearTimeout(this.runsSaveTimer);
+      this.runsSaveTimer = undefined;
+    }
+    await saveRuns(this.runs);
+  }
+
+  /** Mark every stored run still claiming "running" as interrupted — an
+   *  error-status run with an explanatory trace line — because a loaded run
+   *  can never actually be in flight. Returns true when anything changed
+   *  (the caller persists to wherever those runs came from). */
+  private normalizeInterruptedRuns(): boolean {
+    let changed = false;
+    for (const run of this.runs) {
+      if (run.status !== "running") continue;
+      run.status = "error";
+      run.trace = [...run.trace, this.line("error", "Interrupted — the page was closed while this run was in progress.")];
+      changed = true;
+    }
+    return changed;
   }
 
   /**
@@ -867,7 +1093,7 @@ export class Studio {
       return;
     }
     const run: Run = {
-      id: crypto.randomUUID(),
+      id: newRunId(),
       title: runTitle(task),
       task,
       status: "running",
@@ -879,8 +1105,31 @@ export class Studio {
     this.runs = [run, ...this.runs];
     this.activeRunId = run.id;
     this.notify();
+    // D2: persist the run at creation — before this, the first save happened in
+    // runAgentTurn's finally, so a reload mid-run silently lost the whole thread.
+    // A failed save is surfaced but doesn't block the run itself.
+    await saveRuns(this.runs).catch((err) => this.logSystem("error", "Could not persist the new run", asMessage(err)));
+    this.scheduleFolderStateSave();
     this.seedEnvNotes();
     await this.runAgentTurn(run, task, model, approvalMode);
+  }
+
+  /**
+   * Stop the in-flight agent run (the Composer's Stop button). Aborts the run's
+   * controller — the agent exits at its next checkpoint (top of step / before a
+   * tool) with `stoppedReason: "aborted"`, flowing through the same completion
+   * path as any turn — and settles a parked Confirm-mode approval as "deny",
+   * since an agent blocked awaiting approval can't observe the abort otherwise.
+   * Sets `stopping` (the Composer's "Stopping…" state) until the turn actually
+   * ends — the abort only takes effect at the agent's next checkpoint. No-op
+   * when nothing is running.
+   */
+  stopRun(): void {
+    if (!this.running) return;
+    this.stopping = true;
+    this.runAbort?.abort();
+    this.pendingApproval?.resolve("deny");
+    this.notify();
   }
 
   /** Drop the standard ERDOU.md into a project that doesn't have one yet, so
@@ -927,6 +1176,8 @@ export class Studio {
   ): Promise<void> {
     this.running = true;
     this.autoAllow = new Set();
+    const abort = new AbortController();
+    this.runAbort = abort; // D1: stopRun() aborts this turn
 
     // Capture the VFS at turn start, then collect every path the agent
     // touches via a run-scoped subscription (separate from the boot-time
@@ -985,31 +1236,47 @@ export class Studio {
       ],
       onEvent: (e) => this.onAgentEvent(run, e),
       approve: this.makeApprove(approvalMode),
+      signal: abort.signal,
     });
     try {
       // Empty `run.messages` (a fresh run) makes the agent build its system
       // prompt from scratch; a non-empty transcript (a reply) makes it
       // continue the existing conversation instead — see CodingAgent.run.
       const result = await agent.run(task, run.messages);
-      await eventsSettled(); // async-delivered file.changed events land before we read `changed`
-      // Compute the diff BEFORE deciding status, so "review" actually triggers
-      // when the run changed files (the guard was a no-op while changes was []).
-      const turnChanges = await this.computeRunChanges(startSnap, changed);
-      run.changes = this.mergeChanges(run.changes, turnChanges);
-      run.status = run.changes.length > 0 ? "review" : "done";
       run.messages = result.transcript;
     } catch (err) {
       this.appendLine(run, "error", "Agent stopped", asMessage(err));
       run.status = "error";
     } finally {
+      // B5: capture the diff HERE so error/aborted turns keep it too — a turn
+      // that threw at step 7/7 really changed 6 files, and Review/Diff/revert
+      // need them. Settle the async-delivered file.changed events BEFORE
+      // dropping the run-scoped subscription, then read `changed`.
+      await eventsSettled();
       unsub();
       this.repointRunDiff = undefined;
+      try {
+        const turnChanges = await this.computeRunChanges(startSnap, changed);
+        run.changes = this.mergeChanges(run.changes, turnChanges);
+        // Still "running" here ⇔ the turn succeeded (the catch above sets
+        // "error"): decide review/done AFTER the diff, so "review" actually
+        // triggers when the turn changed files.
+        if (run.status === "running") run.status = run.changes.length > 0 ? "review" : "done";
+      } catch (err) {
+        // A diff failure inside the finally must not wedge the studio
+        // (`running` would stay true forever) — surface it on the run instead
+        // and continue through the cleanup below.
+        this.appendLine(run, "error", "Could not compute this turn's file diff", asMessage(err));
+        if (run.status === "running") run.status = "error";
+      }
       this.running = false;
+      this.stopping = false;
+      this.runAbort = null;
       // Defensive: if the run threw while a prompt was open, drop it so the UI
       // doesn't show a stale approval for a run that is no longer executing.
       this.pendingApproval = null;
       await this.save();
-      await saveRuns(this.runs);
+      await this.flushRunsSave(); // also cancels the trace-append debounce timer
       this.scheduleFolderStateSave();
       this.notify();
     }
@@ -1181,6 +1448,12 @@ export class Studio {
   }
 
   async resetProject(): Promise<void> {
+    // Kill a pending debounced runs save first — firing between clearRuns and
+    // the reload would resurrect the just-cleared history on next boot.
+    if (this.runsSaveTimer) {
+      clearTimeout(this.runsSaveTimer);
+      this.runsSaveTimer = undefined;
+    }
     await this.store.delete(SNAPSHOT_ID);
     await clearRuns();
     location.reload();

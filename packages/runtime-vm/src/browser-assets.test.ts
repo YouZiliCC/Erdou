@@ -18,13 +18,27 @@ import { gzipSync } from "node:zlib";
 const STATE_RAW = new TextEncoder().encode("STATE-BYTES");
 const STATE_GZ = new Uint8Array(gzipSync(STATE_RAW));
 
-function fakeFetch(map: Record<string, Uint8Array>): typeof fetch {
+// Real Response objects: the state fetch streams via res.body.getReader(), so
+// a bare { ok, arrayBuffer } stub is no longer enough. Map values may also be
+// a Response factory for tests that need custom chunking/headers.
+function fakeFetch(map: Record<string, Uint8Array | (() => Response)>): typeof fetch {
   return (async (url: string) => {
     const key = String(url);
     const body = map[key.slice(key.lastIndexOf("/") + 1)];
-    if (!body) return { ok: false, status: 404, arrayBuffer: async () => new ArrayBuffer(0) } as Response;
-    return { ok: true, status: 200, arrayBuffer: async () => body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) } as Response;
+    if (!body) return new Response(null, { status: 404 });
+    return typeof body === "function" ? body() : new Response(body, { status: 200 });
   }) as unknown as typeof fetch;
+}
+
+/** A 200 Response whose body arrives as the given chunks (one read() each). */
+function chunkedResponse(chunks: Uint8Array[], contentLength?: number): Response {
+  const stream = new ReadableStream<Uint8Array>({
+    start(c) { for (const ch of chunks) c.enqueue(ch); c.close(); },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: contentLength !== undefined ? { "content-length": String(contentLength) } : {},
+  });
 }
 
 describe("loadBrowserInputs", () => {
@@ -181,5 +195,60 @@ describe("loadBrowserInputs", () => {
     });
     expect(fetchSpy.mock.calls.some((c) => String(c[0]).endsWith("state-base.meta.json"))).toBe(false);
     expect(idb.store.get("state:base:v1")).toEqual(STATE_GZ);
+  });
+
+  describe("state download progress (onStateDownload)", () => {
+    const gzChunks = [STATE_GZ.slice(0, 5), STATE_GZ.slice(5, 9), STATE_GZ.slice(9)];
+
+    it("streams the state blob and reports cumulative bytes with the Content-Length total", async () => {
+      const idb = fakeIdb();
+      const onStateDownload = vi.fn();
+      const inputs = await loadBrowserInputs({
+        baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", profile: "base", version: "v1",
+        fetchImpl: fakeFetch({ ...assets, "state-base.zst": () => chunkedResponse(gzChunks, STATE_GZ.byteLength) }),
+        idb, onStateDownload,
+      });
+      // one callback per chunk, cumulative bytes, constant total from Content-Length
+      expect(onStateDownload.mock.calls).toEqual([
+        [5, STATE_GZ.byteLength],
+        [9, STATE_GZ.byteLength],
+        [STATE_GZ.byteLength, STATE_GZ.byteLength],
+      ]);
+      // the streamed bytes reassemble losslessly: decompress + cache both see the full blob
+      expect(new Uint8Array(inputs.state!)).toEqual(STATE_RAW);
+      expect(idb.store.get("state:base:v1")).toEqual(STATE_GZ);
+    });
+
+    it("reports a null total when Content-Length is missing — bytes still stream intact", async () => {
+      const idb = fakeIdb();
+      const onStateDownload = vi.fn();
+      const inputs = await loadBrowserInputs({
+        baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", profile: "base", version: "v1",
+        fetchImpl: fakeFetch({ ...assets, "state-base.zst": () => chunkedResponse(gzChunks) }),
+        idb, onStateDownload,
+      });
+      expect(onStateDownload.mock.calls).toEqual([[5, null], [9, null], [STATE_GZ.byteLength, null]]);
+      expect(new Uint8Array(inputs.state!)).toEqual(STATE_RAW);
+      expect(idb.store.get("state:base:v1")).toEqual(STATE_GZ);
+    });
+
+    it("never fires on a cache hit (nothing is downloaded)", async () => {
+      const idb = fakeIdb();
+      idb.store.set("state:base:v1", STATE_GZ);
+      const onStateDownload = vi.fn();
+      await loadBrowserInputs({
+        baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", profile: "base", version: "v1",
+        fetchImpl: fakeFetch(assets), idb, onStateDownload,
+      });
+      expect(onStateDownload).not.toHaveBeenCalled();
+    });
+
+    it("fail-fasts with the URL when an ok response has no body stream", async () => {
+      const idb = fakeIdb();
+      await expect(loadBrowserInputs({
+        baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", profile: "base", version: "v1",
+        fetchImpl: fakeFetch({ ...assets, "state-base.zst": () => new Response(null, { status: 200 }) }), idb,
+      })).rejects.toThrow(/state-base\.zst -> 200 but the response has no body stream/);
+    });
   });
 });

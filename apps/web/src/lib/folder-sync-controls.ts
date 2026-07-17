@@ -1,5 +1,11 @@
 import type { FileSystemApi } from "@erdou/runtime-contract";
-import { loadFolderIntoVfs, saveVfsToFolder, type DirHandleLike, type MountMtimes } from "./local-mount.js";
+import {
+  loadFolderIntoVfs,
+  mirrorVfsToFolder,
+  type DirHandleLike,
+  type FolderMirrorResult,
+  type MountMtimes,
+} from "./local-mount.js";
 
 // Explicit, one-shot MANUAL folder-sync operations, kept separate from the
 // debounced auto-sync in studio.ts. Each is the "force it now" counterpart of
@@ -19,17 +25,23 @@ export async function pullDiskToWorkspace(
   return loadFolderIntoVfs(handle, fs, "/", mtimes);
 }
 
-/** Manual "Push to disk ↑": write the whole workspace back to the mounted
- *  folder now. `rootSkip` (VM_PRESERVE_DIRS on the VM kernel, `undefined` on the
- *  browser kernel) is honored exactly as the auto-save path does — image-owned
- *  skeleton/etc/root dirs at the workspace root never reach the user's disk. */
+/** Manual "Push to disk ↑": mirror the workspace onto the mounted folder now —
+ *  write/overwrite every workspace file AND delete disk entries absent from the
+ *  workspace (the debounced background auto-save stays additive; only this
+ *  deliberate Push deletes from the user's real disk). Files edited on disk
+ *  since the last sync are skipped as conflicts, and an empty workspace is
+ *  refused outright rather than emptying the folder. `rootSkip`
+ *  (VM_PRESERVE_DIRS on the VM kernel, `undefined` on the browser kernel) is
+ *  honored exactly as the auto-save path does — image-owned skeleton/etc/root
+ *  dirs at the workspace root never reach the user's disk. Returns what was
+ *  written / deleted / conflict-skipped so the UI can report honestly. */
 export async function pushWorkspaceToDisk(
   handle: DirHandleLike,
   fs: FileSystemApi,
   mtimes?: MountMtimes,
   rootSkip?: ReadonlySet<string>,
-): Promise<void> {
-  await saveVfsToFolder(fs, handle, "/", mtimes, rootSkip);
+): Promise<FolderMirrorResult> {
+  return mirrorVfsToFolder(fs, handle, mtimes, rootSkip);
 }
 
 /** Re-run the directory picker to choose a DIFFERENT folder, then hand it to

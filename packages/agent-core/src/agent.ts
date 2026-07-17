@@ -47,9 +47,21 @@ export class CodingAgent {
       ];
     }
 
+    const signal = this.opts.signal;
     for (let step = 1; step <= this.maxSteps; step++) {
+      // Abort checkpoint between steps: never issue another model call after
+      // the user stopped the run.
+      if (signal?.aborted) return this.finishAborted(step - 1, messages);
       this.emit({ type: "step", step });
-      const result = await this.opts.gateway.chat(this.opts.model, messages, { tools: this.toolSpecs });
+      let result;
+      try {
+        result = await this.opts.gateway.chat(this.opts.model, messages, { tools: this.toolSpecs, signal });
+      } catch (err) {
+        // A Stop while the HTTP request is in flight surfaces as the fetch
+        // AbortError — that is the user's stop, not a model failure.
+        if (signal?.aborted) return this.finishAborted(step - 1, messages);
+        throw err;
+      }
 
       if (result.toolCalls.length === 0) {
         // No tool call → the model considers the task done.
@@ -64,6 +76,13 @@ export class CodingAgent {
       if (result.content.length > 0) this.emit({ type: "assistant", content: result.content });
 
       for (const call of result.toolCalls) {
+        // Abort checkpoint before each tool execution. Skipped calls still get
+        // a tool message so the transcript stays model-valid (every tool call
+        // answered) and a later reply turn can continue the thread.
+        if (signal?.aborted) {
+          messages.push({ role: "tool", toolCallId: call.id, content: "Skipped — the run was stopped by the user." });
+          continue;
+        }
         let args: Record<string, unknown> = {};
         let parseError: string | null = null;
         try {
@@ -97,11 +116,20 @@ export class CodingAgent {
         this.emit({ type: "tool_result", name: call.name, ok, output });
         messages.push({ role: "tool", toolCallId: call.id, content: output });
       }
+      if (signal?.aborted) return this.finishAborted(step, messages);
     }
 
     const finalMessage = "Reached the maximum number of steps before completing the task.";
     this.emit({ type: "done", reason: "max_steps", summary: finalMessage });
     return { steps: this.maxSteps, finalMessage, stoppedReason: "max_steps", transcript: messages };
+  }
+
+  /** Clean abort exit — the user stopped the run. Not a failure: no throw,
+   *  and the transcript so far is returned so the thread stays continuable. */
+  private finishAborted(steps: number, messages: ChatMessage[]): AgentRunResult {
+    const finalMessage = "Stopped by the user.";
+    this.emit({ type: "done", reason: "aborted", summary: finalMessage });
+    return { steps, finalMessage, stoppedReason: "aborted", transcript: messages };
   }
 
   private async executeTool(

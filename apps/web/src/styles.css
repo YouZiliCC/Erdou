@@ -247,16 +247,25 @@ input, textarea { font-family: var(--mono); }
 
 .done { color: var(--amber); font-size: 12.5px; padding: 2px 0; margin-bottom: 16px; }
 .err { color: var(--red); font-size: 12.5px; padding: 2px 0; margin-bottom: 16px; }
+.err .err-detail { font-family: var(--mono); font-size: 11.5px; margin: 6px 0 0; padding-left: 18px; white-space: pre-wrap; word-break: break-word; color: color-mix(in srgb, var(--red) 72%, var(--muted)); }
 
 .empty-hero h4 { font-size: 17px; font-weight: 600; margin: 0; }
 .empty-hero p { color: var(--muted); font-size: 13px; margin: 8px 0 0; max-width: 380px; line-height: 1.5; }
 .empty-hero .ex { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-top: 14px; }
-.empty-hero .ex span { font-size: 11.5px; color: var(--muted); border: 1px solid var(--border); border-radius: 20px; padding: 3px 11px; }
+.empty-hero .ex button { font-size: 11.5px; color: var(--muted); background: transparent; border: 1px solid var(--border); border-radius: 20px; padding: 3px 11px; }
+.empty-hero .ex button:hover { color: var(--ink); border-color: var(--border2); background: var(--elev); }
+.empty-hero .ex button:active { background: var(--panel); }
 
 .syslog { max-width: 480px; width: 100%; color: var(--faint); font-size: 11.5px; font-family: var(--mono); display: flex; flex-direction: column; gap: 5px; }
 .sysline { display: flex; align-items: center; gap: 7px; }
 .sysline.err { color: var(--red); }
 .sysline .detail { color: var(--faint); }
+
+/* system-error strip: recent system-channel errors pinned between transcript and composer (audit B3) */
+.sysbar { flex: 0 0 auto; margin: 0 16px 8px; padding: 7px 11px; border: 1px solid color-mix(in srgb, var(--red) 32%, transparent); background: color-mix(in srgb, var(--red) 6%, var(--elev)); border-radius: 9px; font-family: var(--mono); font-size: 11.5px; display: flex; flex-direction: column; gap: 5px; }
+.sysbar .sysline { align-items: baseline; }
+.sysbar .sysline .dot { flex: 0 0 auto; background: var(--red); }
+.sysbar .sysline .detail { color: var(--muted); word-break: break-word; }
 
 /* ---- composer (Task 8) ---- */
 .composer { flex: 0 0 auto; margin: 0 16px 16px; border: 1px solid var(--border); background: var(--elev); border-radius: 11px; padding: 11px 13px; }

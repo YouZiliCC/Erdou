@@ -53,7 +53,10 @@ describe("ModelGateway", () => {
   });
 
   it("posts to the Anthropic endpoint with x-api-key and returns text", async () => {
-    const { fetch, captured } = jsonFetch(200, { content: [{ text: "hey" }] });
+    const { fetch, captured } = jsonFetch(200, {
+      content: [{ type: "text", text: "hey" }],
+      stop_reason: "end_turn",
+    });
     const gw = new ModelGateway({ fetch });
     const result = await gw.chat(anthropicConfig, [
       { role: "system", content: "be nice" },

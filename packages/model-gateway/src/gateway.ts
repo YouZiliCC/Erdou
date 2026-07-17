@@ -21,7 +21,7 @@ export class ModelGateway {
 
   chat(config: ModelConfig, messages: ChatMessage[], options?: ChatOptions): Promise<ChatResult> {
     return config.provider === "anthropic"
-      ? anthropicChat(config, messages, this.fetchFn)
+      ? anthropicChat(config, messages, this.fetchFn, options)
       : openaiChat(config, messages, this.fetchFn, options);
   }
 

@@ -45,10 +45,16 @@ export function FolderSyncControls({ studio }: { studio: Studio }) {
         <button
           className="btn ghost"
           disabled={busy || !mounted}
+          title="Mirror the workspace onto the mounted folder: write every workspace file AND delete disk files absent from the workspace. Files edited on disk since the last sync are skipped as conflicts — use Pull from disk to resolve."
           onClick={() =>
             void run("Pushing…", async () => {
-              await studio.pushFolderNow();
-              return "Pushed workspace to disk.";
+              const r = await studio.pushFolderNow();
+              if (!r) return "No folder mounted.";
+              const parts = [`${r.written.length} written`, `${r.deleted.length} deleted`];
+              if (r.conflicts.length > 0) {
+                parts.push(`${r.conflicts.length} conflict${r.conflicts.length === 1 ? "" : "s"} skipped — Pull from disk ↓ to resolve`);
+              }
+              return `Pushed to disk: ${parts.join(", ")}.`;
             })
           }
         >

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { Vfs, PipeStream } from "@erdou/runtime-browser";
 import type { ExecContext } from "@erdou/runtime-contract";
-import { createPythonRunners } from "./python.js";
+import { createPythonRunners, type PipInstallHooks } from "./python.js";
 import type { EmscriptenFS } from "./pyodide.js";
 
 // A minimal in-memory Emscripten-like FS for the mock.
@@ -128,6 +128,12 @@ function makeCtx(argv: string[], fs: Vfs): { ctx: ExecContext; stdout: PipeStrea
 }
 
 const makeRunners = (py: MockPyodide) => createPythonRunners({ load: async () => py });
+
+// Install hooks ride ON the loader (`load.pipInstalls`) — the only channel the
+// app's registration seam forwards end-to-end. These tests exercise that exact
+// channel, not a test-only shortcut.
+const makeHookedRunners = (py: MockPyodide, pipInstalls: PipInstallHooks) =>
+  createPythonRunners({ load: Object.assign(async () => py, { pipInstalls }) });
 
 describe("python runner (plumbing, mock Pyodide)", () => {
   it("reads a script from the fs, captures stdout, sets argv, returns exit code", async () => {
@@ -325,6 +331,73 @@ describe("pip runner (mock Pyodide)", () => {
     expect(await runners2.pip(makeCtx(["pip", "install", "numpy"], fs()).ctx)).toBe(0);
     expect(await runners2.python(makeCtx(["python", "-c", "1"], fs()).ctx)).toBe(0);
     expect(loads2).toBe(1);
+  });
+
+  it("prints the session-only notice and fires onInstall exactly once per successful install", async () => {
+    const py = new MockPyodide();
+    py.prebuilt.add("numpy");
+    py.pypi.add("cowsay");
+    const calls: string[][] = [];
+    const runners = makeHookedRunners(py, { onInstall: (p) => calls.push(p) });
+
+    const first = makeCtx(["pip", "install", "numpy", "cowsay"], new Vfs({ clock: () => 0 }));
+    expect(await runners.pip(first.ctx)).toBe(0);
+    first.stderr.end();
+    const err = await first.stderr.text();
+    expect(err.match(/session's Python only/g)).toHaveLength(1);
+    expect(err).toContain("VM kernel installs persist");
+    expect(calls).toEqual([["numpy", "cowsay"]]);
+
+    const second = makeCtx(["pip", "install", "numpy"], new Vfs({ clock: () => 0 }));
+    expect(await runners.pip(second.ctx)).toBe(0);
+    expect(calls).toEqual([["numpy", "cowsay"], ["numpy"]]);
+  });
+
+  it("failed installs and pip list neither print the notice nor fire onInstall", async () => {
+    const py = new MockPyodide(); // nothing prebuilt or on PyPI → install fails
+    const calls: string[][] = [];
+    const runners = makeHookedRunners(py, { onInstall: (p) => calls.push(p) });
+
+    const failed = makeCtx(["pip", "install", "nosuchpkg"], new Vfs({ clock: () => 0 }));
+    expect(await runners.pip(failed.ctx)).toBe(1);
+    failed.stderr.end();
+    expect(await failed.stderr.text()).not.toContain("session's Python only");
+
+    const list = makeCtx(["pip", "list"], new Vfs({ clock: () => 0 }));
+    expect(await runners.pip(list.ctx)).toBe(0);
+    list.stderr.end();
+    expect(await list.stderr.text()).toBe("");
+    expect(calls).toEqual([]);
+  });
+
+  it("prints the previous session's restore hint once, on the first run (python first)", async () => {
+    const py = new MockPyodide();
+    const runners = makeHookedRunners(py, { previousInstalls: ["numpy", "cowsay"] });
+
+    const first = makeCtx(["python", "-c", "1"], new Vfs({ clock: () => 0 }));
+    expect(await runners.python(first.ctx)).toBe(0);
+    first.stderr.end();
+    expect(await first.stderr.text()).toContain("pip install numpy cowsay");
+
+    const second = makeCtx(["pip", "list"], new Vfs({ clock: () => 0 }));
+    expect(await runners.pip(second.ctx)).toBe(0);
+    second.stderr.end();
+    expect(await second.stderr.text()).not.toContain("pip install numpy cowsay");
+  });
+
+  it("pip-first also prints the restore hint; without previousInstalls there is no hint", async () => {
+    const py = new MockPyodide();
+    const hinted = makeHookedRunners(py, { previousInstalls: ["numpy"] });
+    const first = makeCtx(["pip", "list"], new Vfs({ clock: () => 0 }));
+    expect(await hinted.pip(first.ctx)).toBe(0);
+    first.stderr.end();
+    expect(await first.stderr.text()).toContain("pip install numpy");
+
+    const bare = createPythonRunners({ load: async () => new MockPyodide() });
+    const run = makeCtx(["python", "-c", "1"], new Vfs({ clock: () => 0 }));
+    expect(await bare.python(run.ctx)).toBe(0);
+    run.stderr.end();
+    expect(await run.stderr.text()).toBe("");
   });
 
   it("serializes a pip run behind a pending python run; streams do not cross", async () => {

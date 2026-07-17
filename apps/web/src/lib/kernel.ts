@@ -1,3 +1,4 @@
+import type { PipPyodideLoader } from "@erdou/lang-python";
 import { BrowserRuntime } from "@erdou/runtime-browser";
 import type { FileSystemApi, Runtime } from "@erdou/runtime-contract";
 import type { PtySession } from "@erdou/runtime-vm";
@@ -88,13 +89,99 @@ export interface Kernel {
   shutdown?(): Promise<void>;
 }
 
+// Pyodide CDN location — MUST stay in lock-step with the same constants in
+// languages.ts. Duplicated deliberately: `registerLanguages` builds its default
+// CDN loader internally and exposes no way to attach the pip-manifest hooks to
+// it, so the app supplies its own hook-carrying copy through the `loadPyodide`
+// seam (see `appPyodideLoader`). If `RegisterLanguagesOptions` ever grows a
+// direct `pipInstalls` pass-through, delete these and pass the hooks plainly.
+const PYODIDE_VERSION = "0.26.4";
+const PYODIDE_URL = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
+
+/**
+ * The app's Pyodide loader: the same CDN load `registerLanguages` would default
+ * to, with the pip-manifest hooks attached to the function itself
+ * (`load.pipInstalls` — the one channel `registerLanguages` forwards into
+ * `createPythonRunners`; see `PipPyodideLoader` in @erdou/lang-python). The
+ * `typeof localStorage` guard covers storage-less contexts (node-side tests
+ * construct browser kernels): there installs simply carry no persistence while
+ * the session-only stderr notice still prints.
+ */
+function appPyodideLoader(): PipPyodideLoader {
+  const load: PipPyodideLoader = async () => {
+    const mod = await import(/* @vite-ignore */ `${PYODIDE_URL}pyodide.mjs`);
+    return mod.loadPyodide({ indexURL: PYODIDE_URL });
+  };
+  if (typeof localStorage !== "undefined") load.pipInstalls = pipInstallPersistence(localStorage);
+  return load;
+}
+
 export function createBrowserKernel(): Kernel {
   const runtime = new BrowserRuntime();
-  registerLanguages(runtime);
+  registerLanguages(runtime, { loadPyodide: appPyodideLoader() });
   return {
     kind: "browser",
     runtime,
     fs: runtime.fs,
     openShell: () => runtime.openShell(),
+  };
+}
+
+/** localStorage key for the browser-kernel pip manifest: the requirement
+ *  strings `pip install` successfully ensured last session. Browser-kernel
+ *  installs live in the in-memory Pyodide only (deliberately not snapshotted)
+ *  and die with the page — the manifest lets the next session print a one-line
+ *  `pip install <names>` restore hint (no automatic re-download). */
+const PIP_MANIFEST_KEY = "erdou:pip-installs";
+
+/** The two `Storage` methods the pip manifest uses — injected so node-side
+ *  unit tests run without a DOM (`localStorage` satisfies it in the browser). */
+export interface PipManifestStore {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+}
+
+/**
+ * Storage side of browser-kernel pip install transparency, shaped exactly for
+ * lang-python's `PythonRuntimeOptions` (`previousInstalls` + `onInstall` —
+ * that package stays storage-agnostic per the layering invariant).
+ *
+ * `previousInstalls` is read once, at creation (= session start): it must
+ * reflect the PREVIOUS session, not installs made during this one. The first
+ * `onInstall` of a session REPLACES the manifest (names the user chose not to
+ * reinstall age out instead of accumulating forever); later ones append,
+ * deduplicated.
+ *
+ * A corrupt/legacy manifest entry reads as empty — it is a convenience hint,
+ * not state worth failing the kernel over (same localStorage tolerance as
+ * layout-state); the next successful install overwrites it with valid JSON.
+ *
+ * Wired in `createBrowserKernel` through `appPyodideLoader`: the hooks ride on
+ * the `loadPyodide` function (`load.pipInstalls`) because `registerLanguages`
+ * forwards only the loader into `createPythonRunners`.
+ */
+export function pipInstallPersistence(store: PipManifestStore): {
+  previousInstalls: string[];
+  onInstall: (packages: string[]) => void;
+} {
+  const read = (): string[] => {
+    const raw = store.getItem(PIP_MANIFEST_KEY);
+    if (raw === null) return [];
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.every((p) => typeof p === "string")) return parsed as string[];
+    } catch {
+      // Unparsable manifest — treated exactly like a wrong-shaped one below.
+    }
+    return [];
+  };
+  let replacedThisSession = false;
+  return {
+    previousInstalls: read(),
+    onInstall: (packages) => {
+      const base = replacedThisSession ? read() : [];
+      replacedThisSession = true;
+      store.setItem(PIP_MANIFEST_KEY, JSON.stringify([...new Set([...base, ...packages])]));
+    },
   };
 }

@@ -51,4 +51,11 @@ export class MockDir implements DirHandleLike {
     }
     return f as MockFile;
   }
+  async removeEntry(name: string, opts?: { recursive?: boolean }): Promise<void> {
+    const e = this.children.get(name);
+    if (!e) throw new Error("ENOENT");
+    if (e instanceof MockDir && e.children.size > 0 && !opts?.recursive)
+      throw new Error("InvalidModificationError: directory not empty");
+    this.children.delete(name);
+  }
 }

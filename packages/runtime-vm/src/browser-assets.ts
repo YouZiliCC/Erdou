@@ -19,6 +19,11 @@ export interface BrowserAssetOptions {
    *  new key forever. Cache hits skip the check (validated when written). */
   expectedStateVersion?: string;
   memoryMB?: number;    // default 512 (must equal the baked state's)
+  /** Byte progress for the state-blob download (cache-miss path only): called
+   *  after every network chunk with cumulative bytes received; totalBytes is
+   *  the Content-Length, or null when the server omits it. Not throttled —
+   *  UI-facing callers rate-limit their own rendering. */
+  onStateDownload?: (loadedBytes: number, totalBytes: number | null) => void;
   fetchImpl?: typeof fetch;
   idb?: IdbBlobStore;   // default openIdbBlobStore()
 }
@@ -33,6 +38,35 @@ async function fetchBytes(f: typeof fetch, url: string): Promise<Uint8Array> {
   const r = await f(url);
   if (!r.ok) throw new Error(`fetch ${url} -> ${r.status}`);
   return new Uint8Array(await r.arrayBuffer());
+}
+
+/** Stream a large download chunk-by-chunk, reporting cumulative bytes so a
+ *  40-90MB state blob shows byte progress instead of a silent arrayBuffer()
+ *  stall. Fail-fast on a bodyless response — this path MUST stream. */
+async function fetchStateBytes(
+  f: typeof fetch,
+  url: string,
+  onChunk?: (loadedBytes: number, totalBytes: number | null) => void,
+): Promise<Uint8Array> {
+  const r = await f(url);
+  if (!r.ok) throw new Error(`fetch ${url} -> ${r.status}`);
+  if (!r.body) throw new Error(`fetch ${url} -> ${r.status} but the response has no body stream to read`);
+  const rawLen = r.headers.get("content-length");
+  const total = rawLen !== null && /^\d+$/.test(rawLen) ? Number(rawLen) : null;
+  const reader = r.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let loaded = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    loaded += value.byteLength;
+    onChunk?.(loaded, total);
+  }
+  const out = new Uint8Array(loaded);
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.byteLength; }
+  return out;
 }
 
 /** Load browser boot inputs: state-<profile>.zst is cache-first (IndexedDB, by
@@ -79,7 +113,7 @@ export async function loadBrowserInputs(opts: BrowserAssetOptions): Promise<V86B
         );
       }
     }
-    stateGz = await fetchBytes(f, `${opts.baseUrl}/${stateFile}.zst`);
+    stateGz = await fetchStateBytes(f, `${opts.baseUrl}/${stateFile}.zst`, opts.onStateDownload);
     state = await decompressGzip(stateGz);
     await idb.put(stateKey, stateGz).catch(() => {}); // caching is best-effort
     for (const k of await idb.keys().catch(() => [])) {

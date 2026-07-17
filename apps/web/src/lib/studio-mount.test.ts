@@ -145,7 +145,9 @@ describe("Studio mount watcher", () => {
 
 describe("Studio.reselectFolder — a folder swap REPLACES the workspace (data safety)", () => {
   beforeEach(() => {
-    vi.stubGlobal("document", { hidden: false });
+    // boot() installs the A4 unload-flush handlers, so the document stub needs
+    // addEventListener alongside the watcher's `hidden` read.
+    vi.stubGlobal("document", { hidden: false, addEventListener: vi.fn(), visibilityState: "visible" });
     vi.stubGlobal("window", { addEventListener: vi.fn(), removeEventListener: vi.fn() });
   });
   afterEach(() => {
@@ -190,5 +192,58 @@ describe("Studio.reselectFolder — a folder swap REPLACES the workspace (data s
     expect(folderB.children.has("a-only.txt")).toBe(false);
     expect(folderB.children.has("b-only.txt")).toBe(true);
     expect(folderB.children.has("notes.txt")).toBe(true);
+  });
+});
+
+describe("Studio.mountFolder — the INITIAL mount replaces a restored workspace (A2 data safety)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("document", { hidden: false, addEventListener: vi.fn(), visibilityState: "visible" });
+    vi.stubGlobal("window", { addEventListener: vi.fn(), removeEventListener: vi.fn() });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("mounting into a non-empty (boot-restored) workspace clears it first — the old project never unions onto the folder's disk", async () => {
+    // Session 1: a project lives in the browser and is snapshotted to IndexedDB.
+    const prev = new Studio();
+    await prev.boot();
+    prev.fs.writeFile("/old-project.txt", enc.encode("stale"));
+    await prev.save();
+
+    // Session 2: boot restores that project into the VFS, THEN the user mounts
+    // a real folder (e.g. a freshly cloned git repo).
+    const studio = new Studio();
+    await studio.boot();
+    expect(studio.fs.exists("/old-project.txt")).toBe(true);
+
+    const repo = new MockDir("repo");
+    repo.children.set("repo.txt", new MockFile(enc.encode("repo"), 1000));
+    vi.useFakeTimers();
+    await studio.mountFolder(repo);
+
+    // The workspace is the folder alone — NOT old ∪ folder.
+    expect(studio.fs.exists("/old-project.txt")).toBe(false);
+    expect(await studio.readFileText("/repo.txt")).toBe("repo");
+    // The replacement was surfaced to the user.
+    expect(studio.systemLog.some((l) => l.text.startsWith("Replaced the in-browser workspace"))).toBe(true);
+
+    // Keep working: the debounced folder auto-save mirrors the workspace back
+    // to the mounted disk — exactly when a leaked old file would corrupt the repo.
+    studio.fs.writeFile("/notes.txt", enc.encode("new work"));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(repo.children.has("old-project.txt")).toBe(false);
+    expect(repo.children.has("repo.txt")).toBe(true);
+    expect(repo.children.has("notes.txt")).toBe(true);
+  });
+
+  it("mounting into an EMPTY workspace loads additively and stays quiet (no replacement log)", async () => {
+    const studio = new Studio(); // no boot → nothing restored, VFS empty
+    const folder = new MockDir("fresh");
+    folder.children.set("f.txt", new MockFile(enc.encode("x"), 1000));
+    await studio.mountFolder(folder);
+    expect(await studio.readFileText("/f.txt")).toBe("x");
+    expect(studio.systemLog.some((l) => l.text.startsWith("Replaced the in-browser workspace"))).toBe(false);
   });
 });

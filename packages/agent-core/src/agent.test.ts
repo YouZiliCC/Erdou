@@ -256,6 +256,117 @@ describe("extra tools", () => {
   });
 });
 
+describe("abort (user stop)", () => {
+  it("aborting between steps exits promptly with stoppedReason 'aborted' and no further gateway calls", async () => {
+    const runtime = await freshRuntime();
+    const controller = new AbortController();
+    // A model that never finishes: every step returns another tool call.
+    let i = 0;
+    const chat = vi.fn().mockImplementation(async () => ({
+      content: "",
+      toolCalls: [{ id: `c${i++}`, name: "list_dir", arguments: JSON.stringify({ path: "/" }) }],
+    }));
+    const gateway = { chat } as unknown as ModelGateway;
+    const events: AgentEvent[] = [];
+    const agent = new CodingAgent({
+      runtime,
+      gateway,
+      model,
+      maxSteps: 10,
+      signal: controller.signal,
+      onEvent: (e) => {
+        events.push(e);
+        if (e.type === "tool_result") controller.abort(); // stop after the 1st step's tool ran
+      },
+    });
+    const result = await agent.run("loop forever");
+
+    expect(result.stoppedReason).toBe("aborted");
+    expect(result.steps).toBe(1);
+    expect(chat).toHaveBeenCalledTimes(1); // no model call after the abort
+    expect(events.some((e) => e.type === "done" && e.reason === "aborted" && e.summary === "Stopped by the user.")).toBe(
+      true,
+    );
+  });
+
+  it("aborting mid-batch skips the remaining tool calls but answers each with a tool message", async () => {
+    const runtime = await freshRuntime();
+    const controller = new AbortController();
+    const chat = vi.fn().mockResolvedValue({
+      content: "",
+      toolCalls: [
+        { id: "a", name: "write_file", arguments: JSON.stringify({ path: "/one.txt", content: "1" }) },
+        { id: "b", name: "write_file", arguments: JSON.stringify({ path: "/two.txt", content: "2" }) },
+      ],
+    });
+    const gateway = { chat } as unknown as ModelGateway;
+    const events: AgentEvent[] = [];
+    const agent = new CodingAgent({
+      runtime,
+      gateway,
+      model,
+      signal: controller.signal,
+      onEvent: (e) => {
+        events.push(e);
+        if (e.type === "tool_result") controller.abort(); // abort after the FIRST of the two calls
+      },
+    });
+    const result = await agent.run("two writes");
+
+    expect(result.stoppedReason).toBe("aborted");
+    expect(runtime.fs.exists("/one.txt")).toBe(true); // ran before the abort
+    expect(runtime.fs.exists("/two.txt")).toBe(false); // never executed
+    // The skipped call emitted no tool_call event but still has a tool message,
+    // so the transcript stays valid for a later reply turn.
+    expect(events.filter((e) => e.type === "tool_call")).toHaveLength(1);
+    const toolMsgs = result.transcript.filter((m) => m.role === "tool");
+    expect(toolMsgs.map((m) => m.toolCallId)).toEqual(["a", "b"]);
+    expect(toolMsgs[1]?.content).toContain("stopped by the user");
+    expect(chat).toHaveBeenCalledTimes(1);
+  });
+
+  it("a pre-aborted signal exits before the first gateway call", async () => {
+    const runtime = await freshRuntime();
+    const controller = new AbortController();
+    controller.abort();
+    const chat = vi.fn();
+    const agent = new CodingAgent({ runtime, gateway: { chat } as unknown as ModelGateway, model, signal: controller.signal });
+    const result = await agent.run("never starts");
+
+    expect(result.stoppedReason).toBe("aborted");
+    expect(result.steps).toBe(0);
+    expect(chat).not.toHaveBeenCalled();
+  });
+
+  it("an abort surfaced while parked on approval (approve resolves deny) exits without another step", async () => {
+    const runtime = await freshRuntime();
+    const controller = new AbortController();
+    // The Studio stop path: the user clicks Stop while a Confirm prompt is
+    // parked — the abort fires AND the parked approval settles as "deny".
+    const approve = vi.fn(async () => {
+      controller.abort();
+      return "deny" as const;
+    });
+    const chat = vi.fn().mockResolvedValue({
+      content: "",
+      toolCalls: [{ id: "c1", name: "run_shell", arguments: JSON.stringify({ command: "echo hi > /x.txt" }) }],
+    });
+    const agent = new CodingAgent({
+      runtime,
+      gateway: { chat } as unknown as ModelGateway,
+      model,
+      maxSteps: 5,
+      signal: controller.signal,
+      approve,
+    });
+    const result = await agent.run("gated");
+
+    expect(result.stoppedReason).toBe("aborted");
+    expect(runtime.fs.exists("/x.txt")).toBe(false); // the denied command never ran
+    expect(chat).toHaveBeenCalledTimes(1); // and no further model call followed
+  });
+});
+
 describe("approval gate", () => {
   it("does not run a gated command when denied", async () => {
     const runtime = new BrowserRuntime();

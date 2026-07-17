@@ -8,7 +8,7 @@ import { TitleBar } from "./components/TitleBar.js";
 import { KernelToggle } from "./components/KernelToggle.js";
 import { TaskSidebar } from "./components/TaskSidebar.js";
 import { Conversation } from "./components/Conversation.js";
-import { Composer } from "./components/Composer.js";
+import { Composer, type ComposerPrefill } from "./components/Composer.js";
 import { ReviewPane } from "./components/ReviewPane.js";
 import { ResizableShell } from "./components/ResizableShell.js";
 import { SecureContextBanner } from "./components/SecureContextBanner.js";
@@ -19,6 +19,9 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [mode, setMode] = useState<ApprovalMode>(() => loadApprovalMode());
   const [layout, setLayout] = useState<LayoutState>(() => loadLayout());
+  // Empty-state example chips seed the composer through this; the nonce makes
+  // re-clicking the same chip take effect again (Composer keys its effect on it).
+  const [prefill, setPrefill] = useState<ComposerPrefill>({ text: "", nonce: 0 });
 
   const configured = model.apiKey.trim().length > 0;
 
@@ -151,13 +154,20 @@ export function App() {
               <span className="t">{studio.activeRun?.title ?? "New task"}</span>
               {studio.activeRun && <span className={"chip " + studio.activeRun.status}>{studio.activeRun.status}</span>}
             </div>
-            <Conversation studio={studio} />
+            <Conversation
+              studio={studio}
+              onExample={(task) => setPrefill((p) => ({ text: task, nonce: p.nonce + 1 }))}
+            />
             <Composer
               running={studio.running || studio.activeRun?.status === "running" || !!studio.switchingKernel}
+              canStop={studio.running}
+              stopping={studio.stopping}
               replying={studio.activeRun !== undefined}
               mode={mode}
+              prefill={prefill}
               onModeChange={changeMode}
               onRun={runTask}
+              onStop={() => studio.stopRun()}
             />
           </section>
         }

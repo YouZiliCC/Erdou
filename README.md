@@ -23,10 +23,25 @@ Erdou builds a browser-native operating environment — a virtual filesystem, pr
 
 ```bash
 pnpm install
-pnpm --filter @erdou/web dev     # open the printed URL, click "Model", paste your key
+pnpm --filter @erdou/web dev     # open the printed URL, click "Settings", set a model + API key
 ```
 
 Everything runs in your browser; only the model API call leaves it (proxied in dev to avoid CORS). See [`apps/web`](./apps/web).
+
+### Enable the Linux VM (optional)
+
+The browser-native kernel works out of the box — nothing to bake. The Alpine **Linux VM** environments do **not**: their machine images are baked artifacts (gitignored, never committed), so on a fresh clone every VM option in the environment picker shows "— not baked" until you bake it yourself:
+
+```bash
+pnpm --filter @erdou/runtime-vm bake --profile base   # or: node | sci | --all
+```
+
+The bake needs two inputs:
+
+1. **Network access to the Alpine CDN** (`dl-cdn.alpinelinux.org`) — it fetches the pinned Alpine 3.24.1 x86 minirootfs plus each profile's apk packages (a few MiB for `base`, tens of MiB for `node`/`sci`).
+2. **Three boot blobs in `packages/runtime-vm/assets/`** — `kernel.bin`, `seabios.bin`, `vgabios.bin` (the v86 buildroot bzImage + SeaBIOS/VGABIOS). These have **no pinned public download URL yet**: `pnpm --filter @erdou/runtime-vm download-assets` only verifies files already staged there, so for now you must copy the three files from an existing checkout that has them (sha256 pins live in `packages/runtime-vm/assets/manifest.json`). Once URLs are filled into that manifest, `download-assets` can fetch them from scratch.
+
+Each bake takes well under a minute and writes `assets/state-<profile>.zst` (roughly 48–84 MB per profile, downloaded once by the browser and then cached).
 
 ## Architecture invariant
 

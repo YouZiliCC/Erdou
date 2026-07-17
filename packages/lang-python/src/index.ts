@@ -2,6 +2,8 @@ export {
   createPythonRunners,
   type PythonRunners,
   type PythonRuntimeOptions,
+  type PipInstallHooks,
+  type PipPyodideLoader,
   type PyodidePackages,
   type PipPyodide,
 } from "./python.js";

@@ -38,13 +38,20 @@ export function wirePtyTerminal(
   const gate = makePtyInputGate();
   term.onData((str) => gate.input(enc.encode(str)));
   term.write("\x1b[2mconnecting…\x1b[0m");
-  void openPty({ cols: term.cols, rows: term.rows }).then((s) => {
+  const openedCols = term.cols;
+  const openedRows = term.rows;
+  void openPty({ cols: openedCols, rows: openedRows }).then((s) => {
     if (disposed) { void s.dispose(); return; }
     session = s;
     term.write("\r\x1b[2K"); // erase the connecting… hint before guest output lands
     s.onData((d) => term.write(d)); // wire output BEFORE flushing input, so echoes render
     gate.open((b) => s.write(b));
     term.onResize(({ cols, rows }) => s.resize(cols, rows));
+    // A fit() that landed while openPty was in flight (e.g. the hidden Terminal
+    // tab shown mid-connect) resized xterm before this onResize listener
+    // existed — sync the guest to the terminal's CURRENT size, or the pty
+    // stays at its open-time dimensions until the next real resize.
+    if (term.cols !== openedCols || term.rows !== openedRows) s.resize(term.cols, term.rows);
   }).catch((err) => {
     gate.close(); // drop queued keystrokes — there is no session to deliver them to
     if (!disposed) term.write(`\r\x1b[2K[pty error] ${String(err)}\r\n`);

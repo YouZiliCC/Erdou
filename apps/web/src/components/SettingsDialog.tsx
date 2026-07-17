@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { ModelConfig } from "@erdou/model-gateway";
-import type { ApprovalMode } from "../lib/model-config.js";
+import { switchProvider, type ApprovalMode } from "../lib/model-config.js";
 import { Select } from "./ui/Select.js";
 
 const PROVIDER_OPTIONS: { value: ModelConfig["provider"]; label: string }[] = [
@@ -41,7 +41,7 @@ export function SettingsDialog({
             className="block"
             value={cfg.provider}
             options={PROVIDER_OPTIONS}
-            onChange={(provider) => patch({ provider })}
+            onChange={(provider) => setCfg((c) => switchProvider(c, provider))}
             ariaLabel="Provider"
           />
         </div>
@@ -83,8 +83,10 @@ export function SettingsDialog({
           </button>
         </div>
         <p className="note">
-          The default base URL <code>/llm/v1</code> is proxied by the dev server to your provider, avoiding browser CORS.
-          Point it elsewhere with the VITE_LLM_TARGET env var.
+          The default <code>/llm/v1</code> is a dev-server proxy whose target is <code>yunwu.ai</code> unless{" "}
+          <code>VITE_LLM_TARGET=&lt;url&gt;</code> is set when the dev server starts. A direct provider URL also works
+          when the provider permits browser requests: Anthropic does (<code>https://api.anthropic.com</code>, via its
+          browser-access header); some OpenAI-compatible providers allow CORS, but <code>api.openai.com</code> does not.
         </p>
       </div>
     </div>

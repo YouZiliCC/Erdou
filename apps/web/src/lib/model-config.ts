@@ -19,13 +19,36 @@ export function saveApprovalMode(mode: ApprovalMode): void {
   localStorage.setItem(APPROVAL_KEY, mode);
 }
 
+/**
+ * Sensible baseUrl per provider:
+ * - openai-compatible: the dev-server proxy path (its target is yunwu.ai
+ *   unless VITE_LLM_TARGET is set at dev-server start — see vite.config.ts).
+ * - anthropic: the API host directly; Anthropic permits browser requests via
+ *   its browser-access header, so no proxy is needed.
+ */
+export const PROVIDER_DEFAULT_BASE_URL: Record<ModelConfig["provider"], string> = {
+  "openai-compatible": "/llm/v1",
+  anthropic: "https://api.anthropic.com",
+};
+
 export const DEFAULT_MODEL: ModelConfig = {
   provider: "openai-compatible",
-  // Same-origin path proxied by the dev server to the model provider (see vite.config.ts).
-  baseUrl: "/llm/v1",
+  baseUrl: PROVIDER_DEFAULT_BASE_URL["openai-compatible"],
   apiKey: "",
   model: "gpt-4o-mini",
 };
+
+/**
+ * Switch a config to another provider. If baseUrl still holds the outgoing
+ * provider's default, swap it to the new provider's default; a user-customized
+ * baseUrl is never clobbered.
+ */
+export function switchProvider(cfg: ModelConfig, provider: ModelConfig["provider"]): ModelConfig {
+  if (provider === cfg.provider) return cfg;
+  const baseUrl =
+    cfg.baseUrl === PROVIDER_DEFAULT_BASE_URL[cfg.provider] ? PROVIDER_DEFAULT_BASE_URL[provider] : cfg.baseUrl;
+  return { ...cfg, provider, baseUrl };
+}
 
 export function loadModel(): ModelConfig {
   try {
