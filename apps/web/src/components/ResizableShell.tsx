@@ -1,5 +1,12 @@
 import { useRef, type ReactNode, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
-import { clampSidebar, clampReview, CENTER_MIN, REVIEW_MIN, SIDEBAR_MIN } from "../lib/layout-state.js";
+import {
+  clampSidebar,
+  clampReview,
+  maxSidebarForCenter,
+  maxReviewForCenter,
+  REVIEW_MIN,
+  SIDEBAR_MIN,
+} from "../lib/layout-state.js";
 
 /**
  * The resizable 3-column app shell: sidebar | center | review, with two thin
@@ -49,14 +56,13 @@ export function ResizableShell({
     if (d.kind === "sidebar") {
       // Dragging right widens the sidebar; keep the center at >= CENTER_MIN.
       let w = clampSidebar(d.startW + dx);
-      const maxByCenter = vw - reviewWidth - CENTER_MIN;
+      const maxByCenter = maxSidebarForCenter(reviewWidth, vw);
       if (w > maxByCenter) w = Math.max(SIDEBAR_MIN, maxByCenter);
       onSidebarWidthChange(w);
     } else {
       // The review handle sits on the pane's LEFT edge: dragging left widens it.
       let w = clampReview(d.startW - dx, vw);
-      const sidebarSpace = collapsed ? 0 : sidebarWidth;
-      const maxByCenter = vw - sidebarSpace - CENTER_MIN;
+      const maxByCenter = maxReviewForCenter(sidebarWidth, collapsed, vw);
       if (w > maxByCenter) w = Math.max(REVIEW_MIN, maxByCenter);
       onReviewWidthChange(w);
     }

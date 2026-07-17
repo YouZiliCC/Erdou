@@ -21,8 +21,40 @@ export const REVIEW_MIN = 300;
 export const REVIEW_MAX_FRACTION = 0.6;
 // The center column must never be squeezed below this.
 export const CENTER_MIN = 320;
+// Fixed chrome between the columns (must match styles.css): each vertical
+// splitter is 5px, and a collapsed sidebar is replaced by a 34px rail. The
+// center-preservation math has to reserve these so CENTER_MIN isn't undershot.
+export const SPLITTER_WIDTH = 5;
+export const RAIL_WIDTH = 34;
 
 const KEY = "erdou:layout";
+
+/** Width consumed by everything to the left of the center column plus the two
+ *  inter-column splitters: the sidebar (or, when collapsed, the 34px rail) and
+ *  both 5px splitters. (A collapsed sidebar drops its own splitter, so counting
+ *  two is a 5px-conservative reserve — it can only keep the center slightly
+ *  wider, never strand it.) */
+function leftChrome(sidebarWidth: number, collapsed: boolean): number {
+  return (collapsed ? RAIL_WIDTH : sidebarWidth) + 2 * SPLITTER_WIDTH;
+}
+
+/** Largest review width that still leaves the center column at least CENTER_MIN,
+ *  for the given sidebar geometry and viewport. Shared by clampLayout (load /
+ *  resize) and the review-splitter drag so both reserve the same chrome. */
+export function maxReviewForCenter(
+  sidebarWidth: number,
+  collapsed: boolean,
+  viewportWidth: number,
+): number {
+  return viewportWidth - leftChrome(sidebarWidth, collapsed) - CENTER_MIN;
+}
+
+/** Largest sidebar width that still leaves the center column at least CENTER_MIN,
+ *  for the given review width and viewport (sidebar drags are only reachable
+ *  while expanded, so both splitters are always present). */
+export function maxSidebarForCenter(reviewWidth: number, viewportWidth: number): number {
+  return viewportWidth - reviewWidth - 2 * SPLITTER_WIDTH - CENTER_MIN;
+}
 
 export const DEFAULT_LAYOUT: LayoutState = {
   sidebarWidth: 238,
@@ -59,8 +91,7 @@ export function clampLayout(state: LayoutState, viewportWidth?: number): LayoutS
   const sidebarWidth = clampSidebar(state.sidebarWidth);
   let reviewWidth = clampReview(state.reviewWidth, viewportWidth);
   if (viewportWidth && viewportWidth > 0) {
-    const sidebarSpace = sidebarCollapsed ? 0 : sidebarWidth;
-    const maxByCenter = viewportWidth - sidebarSpace - CENTER_MIN;
+    const maxByCenter = maxReviewForCenter(sidebarWidth, sidebarCollapsed, viewportWidth);
     if (maxByCenter >= REVIEW_MIN && reviewWidth > maxByCenter) reviewWidth = maxByCenter;
   }
   return { sidebarWidth, reviewWidth, sidebarCollapsed };
@@ -68,22 +99,32 @@ export function clampLayout(state: LayoutState, viewportWidth?: number): LayoutS
 
 /** Read the persisted layout, filling missing/garbage fields with defaults and
  *  clamping everything to valid bounds. Corrupt JSON or an absent value yields
- *  a fresh copy of DEFAULT_LAYOUT (never throws). */
+ *  a fresh copy of DEFAULT_LAYOUT (never throws).
+ *
+ *  Clamps against the CURRENT viewport (window.innerWidth): a review width that
+ *  was valid on a wide screen but is too wide for this one is reduced to keep
+ *  the center column at CENTER_MIN, so reloading on a narrower window can never
+ *  strand the Conversation + Composer to 0px. Read-only — the persisted
+ *  (desired) width is left intact so re-widening the window restores it. */
 export function loadLayout(): LayoutState {
+  const viewportWidth = typeof window !== "undefined" ? window.innerWidth : undefined;
   try {
     const raw = localStorage.getItem(KEY);
-    if (!raw) return { ...DEFAULT_LAYOUT };
+    if (!raw) return clampLayout({ ...DEFAULT_LAYOUT }, viewportWidth);
     const parsed = JSON.parse(raw) as Partial<LayoutState>;
-    return clampLayout({
-      sidebarWidth:
-        typeof parsed.sidebarWidth === "number" ? parsed.sidebarWidth : DEFAULT_LAYOUT.sidebarWidth,
-      reviewWidth:
-        typeof parsed.reviewWidth === "number" ? parsed.reviewWidth : DEFAULT_LAYOUT.reviewWidth,
-      sidebarCollapsed:
-        typeof parsed.sidebarCollapsed === "boolean"
-          ? parsed.sidebarCollapsed
-          : DEFAULT_LAYOUT.sidebarCollapsed,
-    });
+    return clampLayout(
+      {
+        sidebarWidth:
+          typeof parsed.sidebarWidth === "number" ? parsed.sidebarWidth : DEFAULT_LAYOUT.sidebarWidth,
+        reviewWidth:
+          typeof parsed.reviewWidth === "number" ? parsed.reviewWidth : DEFAULT_LAYOUT.reviewWidth,
+        sidebarCollapsed:
+          typeof parsed.sidebarCollapsed === "boolean"
+            ? parsed.sidebarCollapsed
+            : DEFAULT_LAYOUT.sidebarCollapsed,
+      },
+      viewportWidth,
+    );
   } catch {
     return { ...DEFAULT_LAYOUT };
   }

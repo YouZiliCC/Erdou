@@ -37,6 +37,26 @@ export function App() {
     });
   }
 
+  // Re-clamp the layout whenever the window shrinks: a review width valid on a
+  // wide screen would otherwise strand the center column (.review is flex:0 0
+  // with min-width, so .center shrinks to 0). loadLayout() re-derives from the
+  // PERSISTED (desired) width clamped to the new viewport without overwriting
+  // it, so shrinking never hides the chat and re-widening restores the width.
+  useEffect(() => {
+    function onResize() {
+      setLayout((prev) => {
+        const next = loadLayout();
+        return next.sidebarWidth === prev.sidebarWidth &&
+          next.reviewWidth === prev.reviewWidth &&
+          next.sidebarCollapsed === prev.sidebarCollapsed
+          ? prev
+          : next;
+      });
+    }
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
   // Composer selector and Settings share this one persisted value.
   function changeMode(next: ApprovalMode) {
     setMode(next);

@@ -5,11 +5,15 @@ import {
   clampLayout,
   clampSidebar,
   clampReview,
+  maxReviewForCenter,
+  maxSidebarForCenter,
   DEFAULT_LAYOUT,
   SIDEBAR_MIN,
   SIDEBAR_MAX,
   REVIEW_MIN,
   CENTER_MIN,
+  RAIL_WIDTH,
+  SPLITTER_WIDTH,
   type LayoutState,
 } from "./layout-state.js";
 
@@ -61,6 +65,15 @@ describe("layout-state persistence", () => {
     expect(loadLayout().reviewWidth).toBe(REVIEW_MIN);
   });
 
+  it("clamps a persisted review width too wide for the CURRENT viewport on load", () => {
+    // A width valid on a wide screen must be reduced against THIS viewport so the
+    // center column keeps CENTER_MIN — otherwise the chat UI is stranded to 0px.
+    vi.stubGlobal("window", { innerWidth: 1000 });
+    localStorage.setItem(KEY, JSON.stringify({ sidebarWidth: 238, reviewWidth: 1500, sidebarCollapsed: false }));
+    // 1000 - 238 sidebar - 10 splitters - 320 center = 432 (< the 600 60%-ceiling)
+    expect(loadLayout().reviewWidth).toBe(1000 - 238 - 2 * SPLITTER_WIDTH - CENTER_MIN);
+  });
+
   it("tolerates corrupt JSON by falling back to defaults", () => {
     localStorage.setItem(KEY, "{ not valid json");
     expect(loadLayout()).toEqual(DEFAULT_LAYOUT);
@@ -96,17 +109,39 @@ describe("layout-state clamping helpers", () => {
     expect(clampReview(400, 1000)).toBe(400);
   });
 
-  it("clampLayout shrinks the review pane to preserve CENTER_MIN for the center column", () => {
-    // viewport 1000, sidebar 300 → maxByCenter = 380 (>= REVIEW_MIN) so review 500 → 380
+  it("clampLayout shrinks the review pane to preserve CENTER_MIN (incl. splitter chrome)", () => {
+    // viewport 1000, sidebar 300, two 5px splitters → maxByCenter = 370 so review 500 → 370
     const out = clampLayout({ sidebarWidth: 300, reviewWidth: 500, sidebarCollapsed: false }, 1000);
-    expect(out.reviewWidth).toBe(1000 - 300 - CENTER_MIN); // 380
-    expect(out.sidebarWidth + out.reviewWidth + CENTER_MIN).toBeLessThanOrEqual(1000);
+    expect(out.reviewWidth).toBe(1000 - 300 - 2 * SPLITTER_WIDTH - CENTER_MIN); // 370
+    expect(out.sidebarWidth + 2 * SPLITTER_WIDTH + out.reviewWidth + CENTER_MIN).toBeLessThanOrEqual(1000);
   });
 
-  it("clampLayout ignores the collapsed sidebar's width when reserving center space", () => {
-    // collapsed → sidebar takes no room, so review may stay larger
+  it("clampLayout reserves the collapsed rail + splitter (not 0) when preserving center", () => {
+    // collapsed still consumes the 34px rail + review splitter, so at a tight
+    // viewport the review pane must yield those pixels too (not treat sidebar as 0).
+    const out = clampLayout({ sidebarWidth: 400, reviewWidth: 600, sidebarCollapsed: true }, 900);
+    // clampReview first caps at the 60% ceiling (540); center floor then bites:
+    // 900 - 34 rail - 10 splitters - 320 center = 536 (would be 540 if the rail were ignored)
+    expect(out.reviewWidth).toBe(900 - RAIL_WIDTH - 2 * SPLITTER_WIDTH - CENTER_MIN); // 536
+  });
+
+  it("clampLayout leaves the collapsed layout untouched when there is ample room", () => {
+    // At a wide viewport the 60% ceiling binds, not the center floor, so review stays put.
     const out = clampLayout({ sidebarWidth: 400, reviewWidth: 600, sidebarCollapsed: true }, 1200);
-    // 60% of 1200 = 720 ceiling; center floor: 1200 - 0 - 320 = 880 → review 600 unchanged
     expect(out.reviewWidth).toBe(600);
+  });
+});
+
+describe("layout-state center-preservation math (shared by ResizableShell drags)", () => {
+  it("maxReviewForCenter subtracts sidebar + two splitters + CENTER_MIN when expanded", () => {
+    expect(maxReviewForCenter(300, false, 1000)).toBe(1000 - 300 - 2 * SPLITTER_WIDTH - CENTER_MIN); // 370
+  });
+
+  it("maxReviewForCenter subtracts the rail (not the sidebar width) when collapsed", () => {
+    expect(maxReviewForCenter(400, true, 1200)).toBe(1200 - RAIL_WIDTH - 2 * SPLITTER_WIDTH - CENTER_MIN); // 836
+  });
+
+  it("maxSidebarForCenter subtracts review + two splitters + CENTER_MIN", () => {
+    expect(maxSidebarForCenter(460, 1000)).toBe(1000 - 460 - 2 * SPLITTER_WIDTH - CENTER_MIN); // 210
   });
 });
