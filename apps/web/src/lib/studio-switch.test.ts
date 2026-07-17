@@ -1,8 +1,9 @@
 import "fake-indexeddb/auto";
 import { describe, it, expect, vi } from "vitest";
-import { Studio } from "./studio.js";
+import { Studio, eventsSettled } from "./studio.js";
 import { Vfs } from "@erdou/runtime-browser";
 import { DEFAULT_MODEL } from "./model-config.js";
+import type { Runtime, RuntimeEvent } from "@erdou/runtime-contract";
 
 vi.mock("./local-mount.js", async (o) => ({
   ...(await o<typeof import("./local-mount.js")>()),
@@ -154,5 +155,69 @@ describe("Studio.switchKernel", () => {
     expect(makeKernel).not.toHaveBeenCalled();
     expect(studio.kernelKind).toBe("vm");
     expect(studio.fs).toBe(vmFs);
+  });
+});
+
+// The incoming stub only needs `subscribe` — that's all subscribeRuntime /
+// setPreviewRuntime touch post-swap.
+const stubRuntime = (): Runtime => ({ subscribe: () => () => {} }) as unknown as Runtime;
+
+describe("Studio.switchKernel port hygiene", () => {
+  it("kills the tracked serve pid and closes tracked ports on the OUTGOING runtime, then clears them", async () => {
+    const studio = new Studio();
+    await studio.boot();
+    const oldRuntime = studio.runtime;
+    await oldRuntime.exposePort(8000); // emits port.opened → a chip in openPorts
+    await eventsSettled();
+    expect(studio.openPorts).toEqual([{ port: 8000 }]);
+    studio.servePid = 123; // what PreviewPanel records after a detached VM serve
+
+    const kill = vi.spyOn(oldRuntime, "kill").mockResolvedValue(undefined);
+    const close = vi.spyOn(oldRuntime, "closePort");
+
+    await studio.switchKernel("vm", {
+      makeKernel: async () => ({ kind: "vm" as const, runtime: stubRuntime(), fs: new Vfs(), openShell: () => studio.shell }),
+    });
+
+    expect(studio.kernelKind).toBe("vm");
+    expect(kill).toHaveBeenCalledWith(123);   // killed on the OLD runtime, pre-swap
+    expect(close).toHaveBeenCalledWith(8000); // freed for a later switch-back re-serve
+    expect(studio.servePid).toBeNull();
+    expect(studio.openPorts).toEqual([]);     // no stale chips from the other kernel
+  });
+
+  it("port events from the NEW kernel repopulate openPorts after the switch", async () => {
+    const studio = new Studio();
+    await studio.boot();
+    const listeners = new Set<(e: RuntimeEvent) => void>();
+    const vmRuntime = {
+      subscribe: (l: (e: RuntimeEvent) => void) => { listeners.add(l); return () => listeners.delete(l); },
+    } as unknown as Runtime;
+    await studio.switchKernel("vm", {
+      makeKernel: async () => ({ kind: "vm" as const, runtime: vmRuntime, fs: new Vfs(), openShell: () => studio.shell }),
+    });
+    for (const l of listeners) l({ type: "port.opened", port: 5000, url: "/__port__/5000/" });
+    expect(studio.openPorts).toEqual([{ port: 5000 }]);
+  });
+
+  it("an aborted swap (run started mid-boot) leaves openPorts and servePid untouched", async () => {
+    const studio = new Studio();
+    await studio.boot();
+    await studio.runtime.exposePort(8000);
+    await eventsSettled();
+    studio.servePid = 123;
+    const kill = vi.spyOn(studio.runtime, "kill").mockResolvedValue(undefined);
+
+    let resolveMake: (k: unknown) => void = () => {};
+    const pending = new Promise((res) => { resolveMake = res; });
+    const switchPromise = studio.switchKernel("vm", { makeKernel: async () => pending as any });
+    (studio as unknown as { running: boolean }).running = true;
+    resolveMake({ kind: "vm" as const, runtime: stubRuntime(), fs: new Vfs(), openShell: () => studio.shell });
+    await switchPromise;
+
+    expect(studio.kernelKind).toBe("browser");
+    expect(kill).not.toHaveBeenCalled();        // still-current kernel's preview untouched
+    expect(studio.servePid).toBe(123);
+    expect(studio.openPorts).toEqual([{ port: 8000 }]);
   });
 });

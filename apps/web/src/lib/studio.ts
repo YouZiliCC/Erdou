@@ -132,6 +132,11 @@ export class Studio {
    *  tracked from `port.opened`/`port.closed` — not persisted; a fresh session
    *  starts with nothing served until something runs. */
   openPorts: { port: number }[] = [];
+  /** The Preview panel's detached serve process (`RunServeResult.pid`, VM path
+   *  only — `null` on the browser kernel). Owned here, not in the panel, so
+   *  `switchKernel` can kill it on the OUTGOING kernel pre-swap, and so it
+   *  survives the panel's tab unmount/remount. */
+  servePid: number | null = null;
   /** Bumped on every change so React's useSyncExternalStore re-renders. */
   version = 0;
   /** Bumped ONLY when `mountFolder` hydrates a persisted config from a mounted
@@ -302,6 +307,15 @@ export class Studio {
         this.logSystem("system", "Kernel switch cancelled — a run started during boot.");
         return;
       }
+      // Kernel-switch port hygiene (deferred T6a + stale chips): the preview
+      // surface does not follow the kernel. Runs BEFORE the swap, while
+      // `this.runtime` still targets the outgoing kernel — killing the detached
+      // server frees its real guest socket (an orphan would EADDRINUSE the next
+      // serve after a switch-back; the VM's closePort is pure bookkeeping), and
+      // closing tracked ports frees the browser kernel's virtual-port registry
+      // the same way. The old server is unreachable post-swap anyway: the SW
+      // proxy is re-aimed below, and the old fs is a frozen mirror.
+      await this.stopTrackedServe();
       // copy the current workspace into the target kernel so the project follows
       copyWorkspace(this.kernel.fs, next.fs);
       // swap: unsubscribe old runtime events, point at the new kernel, re-subscribe
@@ -742,6 +756,18 @@ export class Studio {
    *  allows to be asynchronous — via the boot-time subscription. */
   closePort(port: number): Promise<void> {
     return this.runtime.closePort(port);
+  }
+
+  /** Kill the tracked detached server and close every tracked port on the
+   *  ACTIVE runtime, then clear the tracking. `switchKernel` calls this
+   *  pre-swap; the kill's catch is for an already-exited pid (ESRCH). */
+  private async stopTrackedServe(): Promise<void> {
+    if (this.servePid !== null) {
+      await this.runtime.kill(this.servePid).catch(() => {});
+      this.servePid = null;
+    }
+    for (const { port } of this.openPorts) await this.runtime.closePort(port);
+    this.openPorts = [];
   }
 
   async resetProject(): Promise<void> {
