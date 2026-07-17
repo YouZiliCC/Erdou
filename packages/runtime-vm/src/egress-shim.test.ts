@@ -1,0 +1,167 @@
+import { describe, it, expect, afterEach } from "vitest";
+import { wrapEgressFetch, installEgressShim, EGRESS_SHIM_MARKER, type UpstreamResponse } from "./egress-shim.js";
+
+// Simple-API JSON body as pypi.org serves it: file (and PEP-658 metadata) URLs
+// point at https://files.pythonhosted.org, project URLs at https://pypi.org.
+const SIMPLE_JSON =
+  '{"files":[{"filename":"six-1.17.0-py2.py3-none-any.whl",' +
+  '"url":"https://files.pythonhosted.org/packages/b7/six-1.17.0-py2.py3-none-any.whl"}],' +
+  '"meta":{"api-version":"1.3"},"project":"https://pypi.org/simple/six/"}';
+
+const SIMPLE_HTML =
+  '<a href="https://files.pythonhosted.org/packages/b7/six-1.17.0.tar.gz">six-1.17.0.tar.gz</a>';
+
+interface FakeRes extends UpstreamResponse {
+  textReads: number;
+}
+
+function fakeRes(opts: { url: string; contentType?: string; status?: number; body?: string; failText?: Error }): FakeRes {
+  const res: FakeRes = {
+    status: opts.status ?? 200,
+    statusText: "OK",
+    url: opts.url,
+    redirected: false,
+    headers: new Headers(opts.contentType ? { "content-type": opts.contentType } : {}),
+    body: null,
+    textReads: 0,
+    text: async () => {
+      res.textReads += 1;
+      if (opts.failText) throw opts.failText;
+      return opts.body ?? "";
+    },
+    arrayBuffer: async () => new TextEncoder().encode(opts.body ?? "").buffer,
+  };
+  return res;
+}
+
+function makeUpstream(res: FakeRes) {
+  const calls: { url: string; init?: unknown }[] = [];
+  const fetchFn = async (url: string, init?: unknown): Promise<UpstreamResponse> => {
+    calls.push({ url, init });
+    return res;
+  };
+  return { fetchFn, calls };
+}
+
+const decode = async (r: { arrayBuffer(): Promise<ArrayBufferLike> }): Promise<string> =>
+  new TextDecoder().decode(new Uint8Array(await r.arrayBuffer()));
+
+const stubWindow = (protocol: string): void => {
+  (globalThis as { window?: unknown }).window = { location: { protocol } };
+};
+
+describe("egress shim: https upgrade", () => {
+  afterEach(() => { delete (globalThis as { window?: unknown }).window; });
+
+  it("upgrades http:// to https:// when there is no window (Node harness)", async () => {
+    const { fetchFn, calls } = makeUpstream(fakeRes({ url: "https://registry.npmjs.org/left-pad" }));
+    await wrapEgressFetch(fetchFn)("http://registry.npmjs.org/left-pad");
+    expect(calls.map((c) => c.url)).toEqual(["https://registry.npmjs.org/left-pad"]);
+  });
+
+  it("does NOT upgrade on an https-served page — v86's NAT already does it (no double-upgrade)", async () => {
+    stubWindow("https:");
+    const { fetchFn, calls } = makeUpstream(fakeRes({ url: "http://registry.npmjs.org/left-pad" }));
+    await wrapEgressFetch(fetchFn)("http://registry.npmjs.org/left-pad");
+    expect(calls.map((c) => c.url)).toEqual(["http://registry.npmjs.org/left-pad"]);
+  });
+
+  it("upgrades on an http-served dev page (v86's upgrade branch is https-page-only)", async () => {
+    stubWindow("http:");
+    const { fetchFn, calls } = makeUpstream(fakeRes({ url: "https://pypi.org/simple/six/", contentType: "application/octet-stream" }));
+    await wrapEgressFetch(fetchFn)("http://pypi.org/simple/six/");
+    expect(calls.map((c) => c.url)).toEqual(["https://pypi.org/simple/six/"]);
+  });
+});
+
+describe("egress shim: pypi simple-API link rewrite", () => {
+  it("rewrites https pypi links to http in a simple-API JSON body", async () => {
+    const res = fakeRes({
+      url: "https://pypi.org/simple/six/",
+      contentType: "application/vnd.pypi.simple.v1+json",
+      body: SIMPLE_JSON,
+    });
+    const out = await wrapEgressFetch(makeUpstream(res).fetchFn)("http://pypi.org/simple/six/");
+    const text = await decode(out);
+    expect(text).toContain("http://files.pythonhosted.org/packages/b7/six-1.17.0-py2.py3-none-any.whl");
+    expect(text).toContain("http://pypi.org/simple/six/");
+    expect(text).not.toContain("https://");
+    // Response-like shape the relay consumes; original headers pass through
+    // (the relay itself strips content-length, so the length change is safe).
+    expect(out.status).toBe(200);
+    expect(out.statusText).toBe("OK");
+    expect(out.url).toBe("https://pypi.org/simple/six/");
+    expect(out.redirected).toBe(false);
+    expect(out.headers).toBe(res.headers);
+    expect(out.body).toBeNull();
+  });
+
+  it("rewrites the text/html simple-API fallback too (charset parameter tolerated)", async () => {
+    const res = fakeRes({ url: "https://pypi.org/simple/six/", contentType: "text/html; charset=utf-8", body: SIMPLE_HTML });
+    const out = await wrapEgressFetch(makeUpstream(res).fetchFn)("http://pypi.org/simple/six/");
+    expect(await decode(out)).toContain('href="http://files.pythonhosted.org/packages/b7/six-1.17.0.tar.gz"');
+  });
+
+  it("passes non-pypi hosts through byte-identical — npm registry bodies untouched", async () => {
+    const res = fakeRes({
+      url: "https://registry.npmjs.org/left-pad",
+      contentType: "application/json",
+      body: '{"tarball":"https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"}',
+    });
+    const out = await wrapEgressFetch(makeUpstream(res).fetchFn)("http://registry.npmjs.org/left-pad");
+    expect(out).toBe(res); // the very same response object — body never consumed
+    expect(res.textReads).toBe(0);
+  });
+
+  it("passes wheel bytes from files.pythonhosted.org through untouched (only simple-API documents rewrite)", async () => {
+    const res = fakeRes({
+      url: "https://files.pythonhosted.org/packages/b7/six-1.17.0-py2.py3-none-any.whl",
+      contentType: "application/octet-stream",
+      body: "PK...zipbytes",
+    });
+    const out = await wrapEgressFetch(makeUpstream(res).fetchFn)(
+      "http://files.pythonhosted.org/packages/b7/six-1.17.0-py2.py3-none-any.whl",
+    );
+    expect(out).toBe(res);
+    expect(res.textReads).toBe(0);
+  });
+
+  it("skips 304 responses — empty body, and pip's HTTP cache already stores the rewritten page", async () => {
+    const res = fakeRes({ url: "https://pypi.org/simple/six/", contentType: "application/vnd.pypi.simple.v1+json", status: 304 });
+    const out = await wrapEgressFetch(makeUpstream(res).fetchFn)("http://pypi.org/simple/six/");
+    expect(out).toBe(res);
+    expect(res.textReads).toBe(0);
+  });
+
+  it("forwards the request init verbatim (pip's Accept negotiation must reach pypi)", async () => {
+    const { fetchFn, calls } = makeUpstream(fakeRes({ url: "https://pypi.org/simple/six/" }));
+    const init = { method: "GET", headers: new Headers({ accept: "application/vnd.pypi.simple.v1+json" }) };
+    await wrapEgressFetch(fetchFn)("http://pypi.org/simple/six/", init);
+    expect(calls[0]!.init).toBe(init);
+  });
+
+  it("rethrows shim failures with context (url + cause) instead of masking them", async () => {
+    const boom = new Error("boom");
+    const res = fakeRes({ url: "https://pypi.org/simple/six/", contentType: "text/html", body: "x", failText: boom });
+    const err = await wrapEgressFetch(makeUpstream(res).fetchFn)("http://pypi.org/simple/six/")
+      .then(() => null, (e: unknown) => e as Error & { cause?: unknown });
+    expect(err).toBeInstanceOf(Error);
+    expect(err!.message).toMatch(/egress-shim/);
+    expect(err!.message).toContain("https://pypi.org/simple/six/");
+    expect(err!.message).toContain("boom");
+    expect(err!.cause).toBe(boom);
+  });
+});
+
+describe("installEgressShim", () => {
+  it("replaces adapter.fetch with a marked wrapper and is idempotent (no double wrap)", () => {
+    const { fetchFn } = makeUpstream(fakeRes({ url: "https://pypi.org/simple/six/" }));
+    const adapter = { fetch: fetchFn };
+    installEgressShim(adapter);
+    const wrapped = adapter.fetch as typeof adapter.fetch & { [EGRESS_SHIM_MARKER]?: true };
+    expect(wrapped).not.toBe(fetchFn);
+    expect(wrapped[EGRESS_SHIM_MARKER]).toBe(true);
+    installEgressShim(adapter);
+    expect(adapter.fetch).toBe(wrapped);
+  });
+});

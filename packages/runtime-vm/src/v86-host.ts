@@ -1,6 +1,7 @@
 import { V86 } from "v86";
 import type { GuestChannel } from "./guestd-client.js";
 import type { Fs9p } from "./fs-bridge.js";
+import { installEgressShim, type EgressFetch, type UpstreamFetch } from "./egress-shim.js";
 
 /** v86's in-JS TCP stream from FetchNetworkAdapter.connect(). The handshake is
  *  async — always write from the "connect" event, never immediately. The "close"
@@ -24,6 +25,9 @@ export interface TcpConn {
 export interface NetworkAdapter {
   tcp_probe(port: number): Promise<boolean>;
   connect(port: number): TcpConn;
+  /** Instance-property fetch the NAT relay uses for guest HTTP egress —
+   *  wrapped by the pypi egress shim at boot (Round 13). */
+  fetch: EgressFetch;
 }
 
 /** Pre-loaded boot assets — produced by a Node or browser loader, consumed by V86Host.
@@ -112,6 +116,13 @@ export class V86Host {
     };
     if (inputs.state) opt.initial_state = { buffer: inputs.state };
     this.emulator = this.makeEmulator(opt);
+    // Package egress (Round 13): wrap the NAT's fetch with the pypi shim —
+    // https upgrade in non-https contexts + simple-API link rewrite (pypi.org
+    // 403s plain http and links https wheels the NAT can't relay). The adapter
+    // is constructed synchronously for relay_url "fetch", so no request can
+    // beat the install; test fakes that model no NIC have nothing to wrap.
+    const net = this.emulator.network_adapter as { fetch?: UpstreamFetch } | undefined;
+    if (net && typeof net.fetch === "function") installEgressShim(net as { fetch: UpstreamFetch });
 
     const timeoutMs = opts.bootTimeoutMs ?? DEFAULT_BOOT_TIMEOUT_MS;
     await new Promise<void>((resolve, reject) => {
