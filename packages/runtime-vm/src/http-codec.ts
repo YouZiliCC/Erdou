@@ -104,6 +104,16 @@ export function parseHttpResponse(bytes: Uint8Array): HttpResponse {
   } else {
     body = rest;
   }
+  // Framing headers describe the WIRE encoding, which the parse just consumed:
+  // chunked bodies are de-chunked above, and a body shorter than Content-Length
+  // is clamped (subarray). Keeping them would let a consumer re-frame a body
+  // that no longer matches — e.g. the preview SW's
+  // `new Response(body, { headers })` would declare a Content-Length the body
+  // can't honor or a chunked encoding the body no longer has. Keys are already
+  // lowercased by parseHeaderLines, so these deletes are case-insensitively
+  // complete.
+  delete headers["content-length"];
+  delete headers["transfer-encoding"];
   return { status, headers, body };
 }
 
