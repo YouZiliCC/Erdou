@@ -6,6 +6,12 @@
 # conformance run (packages/runtime-vm/src/vm-runtime.conformance.test.ts).
 import os, json, struct, subprocess, threading, signal, shutil, time, traceback
 
+# The chroot boots guestd with no login env, so HOME is unset — pip's user-site
+# install and npm's cache both need one. /root lives on the 9p workspace, so
+# whatever lands there persists. Set here (not per-exec) so PTY shells inherit
+# it too; a host-supplied exec env still overrides (run_command updates last).
+os.environ["HOME"] = "/root"
+
 fd = os.open("/dev/hvc0", os.O_RDWR)
 import tty
 tty.setraw(fd)                       # we HOLD fd → raw sticks (spike B/C gotcha)
