@@ -10,6 +10,11 @@ import { V86 } from "v86";
 import { fetchBuf, parseApkIndex, resolve, installApks, unpackMinirootfs } from "./lib/apk.mjs";
 import { setupSplitFs, GUEST_SETUP_CMD, PYCACHE_WARMUP_CMD, REMOUNT_RO_CMD, LAUNCH_GUESTD_CMD } from "./lib/preload.mjs";
 
+// Must equal `version`/`expectedStateVersion` in apps/web/src/lib/vm-assets.ts
+// (bump both on re-bake): stamped into state.meta.json so loadBrowserInputs can
+// fail-fast when the on-disk state.zst is from an older bake than the app expects.
+const STATE_VERSION = "alpine-3.24.1-r12-lo-baked";
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const assets = path.join(here, "..", "assets");
 const tmp = path.join(here, "..", ".bake-tmp");
@@ -101,12 +106,24 @@ await sh(GUEST_SETUP_CMD, "SETUPDONE"); console.log("  marker: SETUPDONE (bind m
 await sh(PYCACHE_WARMUP_CMD, "WARMED"); console.log("  marker: WARMED (pycache warmed, rw)");         // warm pycache into sys-root (rw) once
 await sh(REMOUNT_RO_CMD, "ROREADY"); console.log("  marker: ROREADY (system view frozen read-only)");            // freeze system view read-only
 await sh(LAUNCH_GUESTD_CMD, "GDLAUNCHED"); console.log("  marker: GDLAUNCHED (resident guestd launched)");      // resident guestd inside the workspace chroot
-// 4.5/6 bring eth0 up + DHCP so the saved state boots with 192.168.86.100
-// already assigned (buildroot busybox ships udhcpc — no apk change). The
-// marker string is real command output, not appended text (quote-split like
-// the other markers so the tty echo can't self-match it).
-await sh("ip link set eth0 up; udhcpc -i eth0 -n -q 2>&1; ip -o addr show eth0 2>&1; echo NETU''P", "NETUP", 30000);
-console.log("  marker: NETUP (eth0 up + DHCP lease 192.168.86.100)");
+// 4.5/6 networking, baked into the saved state so restores need ZERO per-boot
+// setup: eth0 up + DHCP (192.168.86.100 via v86's fetch NAT) AND loopback up
+// (a lo left down bakes an image where 127.0.0.1 servers die EADDRNOTAVAIL).
+// Guest-side grep emits quote-split success/failure markers (same convention
+// as BINDFAIL/ROFAIL) and the host ASSERTS them: a silent DHCP or lo failure
+// fails the bake loudly instead of shipping a broken-networking image.
+const netStart = sbuf.length;
+await sh(
+  "ip link set eth0 up; udhcpc -i eth0 -n -q 2>&1; " +
+  "ip -o addr show eth0 | grep -q 192.168.86.100 && echo ETH_O''K || echo ETH_F''AIL; " +
+  "ip addr add 127.0.0.1/8 dev lo 2>&1; ip link set lo up 2>&1; " +
+  "ip -o link show lo | grep -q ,UP && echo LO_O''K || echo LO_F''AIL; " +
+  "echo NETD''ONE",
+  "NETDONE", 30000);
+const netOut = sbuf.slice(netStart);
+if (!netOut.includes("ETH_OK")) throw new Error(`bake: eth0 did not get the NAT address 192.168.86.100 (silent DHCP failure) — refusing to save a broken-networking state; serial tail=${JSON.stringify(netOut.slice(-400))}`);
+if (!netOut.includes("LO_OK")) throw new Error(`bake: loopback (lo) did not come up — refusing to save; serial tail=${JSON.stringify(netOut.slice(-400))}`);
+console.log("  marker: NETDONE (asserted: eth0=192.168.86.100 via DHCP, lo up)");
 await new Promise((r) => setTimeout(r, 1500));  // let guestd reach its read loop
 
 console.log("5/6 save_state (self-contained: 9p FS rides inside)");
@@ -117,7 +134,7 @@ console.log("6/6 zstd-compress → assets/state.zst");
 // gzip is fine for the MVP if zstd bindings aren't present; keep the extension honest.
 const compressed = zlib.gzipSync(state, { level: 9 });
 fs.writeFileSync(path.join(assets, "state.zst"), compressed);
-fs.writeFileSync(path.join(assets, "state.meta.json"), JSON.stringify({ rawBytes: state.length, compressedBytes: compressed.length, alpine: ver, codec: "gzip", net: true }, null, 2));
+fs.writeFileSync(path.join(assets, "state.meta.json"), JSON.stringify({ version: STATE_VERSION, rawBytes: state.length, compressedBytes: compressed.length, alpine: ver, codec: "gzip", net: true }, null, 2));
 // assets.ts decompresses state.zst -> state.bin and caches it (only writes if
 // absent). Drop the stale cache now so a rebake's new state.zst is the one
 // that actually gets loaded, not a leftover decompression of the old one.

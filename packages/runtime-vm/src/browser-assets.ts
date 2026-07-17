@@ -11,6 +11,12 @@ export interface BrowserAssetOptions {
   baseUrl: string;      // dir holding seabios.bin/vgabios.bin/kernel.bin/state.zst
   wasmUrl: string;      // served v86.wasm (pass new URL("...v86.wasm", import.meta.url).href)
   version: string;      // cache key for the state blob; bump on re-bake
+  /** When set, a cache-miss fetch first checks (baseUrl)/state.meta.json and
+   *  throws unless its `version` equals this — binds the fetched BYTES to the
+   *  cache key, so a stale on-disk state.zst (assets are gitignored) fail-fasts
+   *  instead of being cached under the new key forever. Cache hits skip the
+   *  check (validated when written). */
+  expectedStateVersion?: string;
   memoryMB?: number;    // default 512 (must equal the baked state's)
   fetchImpl?: typeof fetch;
   idb?: IdbBlobStore;   // default openIdbBlobStore()
@@ -46,6 +52,23 @@ export async function loadBrowserInputs(opts: BrowserAssetOptions): Promise<V86B
     }
   }
   if (!stateGz) {
+    if (opts.expectedStateVersion !== undefined) {
+      let meta: { version?: string };
+      try {
+        meta = JSON.parse(new TextDecoder().decode(await fetchBytes(f, `${opts.baseUrl}/state.meta.json`))) as { version?: string };
+      } catch (e) { // 404 / SPA index fallback must still explain the fix, not just fail
+        throw new Error(
+          `cannot verify state.zst version — state.meta.json unreadable (${e instanceof Error ? e.message : String(e)}): ` +
+          "stale or unlinked assets — re-run `pnpm --filter @erdou/runtime-vm bake` before booting",
+        );
+      }
+      if (meta.version !== opts.expectedStateVersion) {
+        throw new Error(
+          `state.meta.json version ${JSON.stringify(meta.version ?? null)} != expected ${JSON.stringify(opts.expectedStateVersion)}: ` +
+          "stale state.zst on disk — re-run `pnpm --filter @erdou/runtime-vm bake` before booting",
+        );
+      }
+    }
     stateGz = await fetchBytes(f, `${opts.baseUrl}/state.zst`);
     state = await decompressGzip(stateGz);
     await idb.put(stateKey, stateGz).catch(() => {}); // caching is best-effort

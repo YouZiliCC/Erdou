@@ -3,8 +3,12 @@
 // index.html into the guest workspace via the xterm PTY, serves it with a real
 // `python3 -m http.server --bind 0.0.0.0` from the Preview panel, and asserts
 // the preview iframe (SW reverse-proxy -> VmRuntime.dispatch -> v86 NAT ->
-// guest server -> response) renders the marker. Signal-safe cleanup +
-// dev-server process group mirror scripts/app-vm-e2e/run.mjs.
+// guest server -> response) renders the marker. A second scenario then writes
+// a bundle entry (/src/main.ts) via the PTY and clicks Bundle & Run, asserting
+// the panel constructs a GUEST-runnable serve command (staticServeCommand's
+// python3 http.server on 8080 — the `erdou` builtin does not exist in the
+// guest) and the bundled output renders. Signal-safe cleanup + dev-server
+// process group mirror scripts/app-vm-e2e/run.mjs.
 import { createRequire } from "node:module";
 import { spawn, execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -21,6 +25,12 @@ const { chromium } = require("playwright-core");
 // PASS: the marker only exists because THIS run wrote it into the guest.
 const MARKER = "erdou-preview-marker-" + Math.random().toString(36).slice(2, 8);
 const PORT = 8000;
+// Scenario 2's marker is embedded in a JS regex literal typed over the PTY
+// (see the entry write below), so it sticks to [a-z0-9_] — no dashes, nothing
+// shell- or regex-special.
+const BUNDLE_MARKER = "erdou_bundle_" + Math.random().toString(36).slice(2, 8);
+// staticServeCommand's fixed VM port (mirrors the erdou builtin's default).
+const BUNDLE_PORT = 8080;
 
 // Hoisted so a signal handler (below) can reach them: the vitest wrapper's
 // execFileSync timeout sends SIGTERM directly to this process, and with no
@@ -141,12 +151,6 @@ async function main() {
       args: ["--no-sandbox", "--disable-dev-shm-usage", "--no-proxy-server"],
     });
     const page = await browser.newPage();
-    // The app pulls Google Fonts via a render-blocking <link>. In this
-    // sandboxed headless browser (no network) that request hangs on DNS ~30s
-    // before ERR_ABORTED, stalling first paint and delaying the kernel button
-    // (and triggering spurious reloads). Abort font requests instantly so
-    // nothing render-blocks on an unreachable host.
-    await page.route(/fonts\.(googleapis|gstatic)\.com/, (r) => r.abort());
     page.on("pageerror", (e) => console.log(`[pageerror] ${e.message}`));
     page.on("requestfailed", (r) => console.log(`[requestfailed] ${r.url()} ${r.failure()?.errorText}`));
     page.on("response", (r) => {
@@ -246,27 +250,29 @@ async function main() {
     // that prompt first.
     await waitForXterm("$", 15_000);
 
-    // Write + verify the marker file, retried because the freshly-booted guest
+    // Write + verify a guest file, retried because the freshly-booted guest
     // can drop the leading bytes of an interactive command. Two deliberate
     // choices make the retries clean:
-    //   - NO quotes anywhere (MARKER is base36-safe): a dropped leading byte
-    //     then just yields "cmd not found" — never an unclosed quote that traps
-    //     the shell in a PS2 continuation that further input only worsens.
+    //   - NO quotes anywhere in `writeCmd` (markers are [a-z0-9_-]-safe): a
+    //     dropped leading byte then just yields "cmd not found" — never an
+    //     unclosed quote that traps the shell in a PS2 continuation that
+    //     further input only worsens.
     //   - A Ctrl-C before each attempt aborts any partial/continuation line,
     //     resetting to a clean PS1 prompt.
     // `echo WROTE:$?` prints the write's exit status — the ECHOED command line
     // shows the literal `$?`, only the OUTPUT shows `WROTE:0`, so matching
     // "WROTE:0" confirms the write actually ran (exit 0), not the mere echo.
-    // Then `cat` (whose command line contains no marker) confirms the file
-    // really holds it — guarding the rare drop that leaves an empty redirect.
-    const writeAndVerify = async (attempts = 4) => {
+    // Then `verifyCmd` (a cat whose command line contains no marker) confirms
+    // the file really holds `needle` — guarding the rare drop that leaves an
+    // empty redirect.
+    const writeAndVerify = async (writeCmd, verifyCmd, needle, attempts = 4) => {
       let lastErr;
       for (let i = 0; i < attempts; i++) {
         if (i > 0) console.warn(`[app-vm-preview-e2e] PTY write retry: attempt ${i + 1}`);
         await page.keyboard.press("Control+C");
         await new Promise((r) => setTimeout(r, 250));
         const b0 = (await xtermText()).length;
-        await typeCmd(`echo ${MARKER} > index.html; echo WROTE:$?`);
+        await typeCmd(`${writeCmd}; echo WROTE:$?`);
         try {
           await waitForXterm("WROTE:0", 8_000, b0); // write ran, exit 0 (output only)
         } catch (e) {
@@ -274,9 +280,9 @@ async function main() {
           continue; // typing was dropped/garbled — reset + retype
         }
         const b1 = (await xtermText()).length; // after the write → excludes echoed marker
-        await typeCmd("cat index.html");
+        await typeCmd(verifyCmd);
         try {
-          return await waitForXterm(MARKER, 6_000, b1); // genuine cat-output match
+          return await waitForXterm(needle, 6_000, b1); // genuine cat-output match
         } catch (e) {
           lastErr = e; // file empty/unwritten — retry the whole write
         }
@@ -284,7 +290,7 @@ async function main() {
       throw lastErr;
     };
     try {
-      await writeAndVerify();
+      await writeAndVerify(`echo ${MARKER} > index.html`, "cat index.html", MARKER);
       pass("guest-index-written", true);
     } catch (e) {
       pass("guest-index-written", false, String(e?.message ?? e));
@@ -320,19 +326,106 @@ async function main() {
 
     // 5) Assert the preview iframe renders the guest-served content — the full
     // path: SW reverse-proxy → dispatch → v86 NAT → guest server → response.
-    const previewText = async () => {
-      const frame = page.frames().find((f) => f.url().includes(`__preview__/${PORT}`));
+    const previewText = async (port) => {
+      const frame = page.frames().find((f) => f.url().includes(`__preview__/${port}`));
       if (!frame) return "";
       return await frame.evaluate(() => document.body?.textContent ?? "").catch(() => "");
     };
-    let text = "";
-    const deadline = Date.now() + 50_000; // SW → dispatch → guest round-trip
-    while (Date.now() < deadline) {
-      text = await previewText();
-      if (text.includes(MARKER)) break;
-      await new Promise((r) => setTimeout(r, 500));
-    }
+    // Poll the iframe body for `needle` until `timeoutMs`; returns the last
+    // body text seen (for the failure detail) — never throws.
+    const waitForPreviewText = async (port, needle, timeoutMs) => {
+      let text = "";
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        text = await previewText(port);
+        if (text.includes(needle)) return text;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      return text;
+    };
+    const text = await waitForPreviewText(PORT, MARKER, 50_000); // SW → dispatch → guest round-trip
     pass("preview-renders-guest-content", text.includes(MARKER), `body=${JSON.stringify(text.slice(0, 160))}`);
+
+    // ---- Scenario 2 (R12 follow-up): Bundle & Run must construct a
+    // KERNEL-AWARE serve command. Regression anchor: reverting PreviewPanel's
+    // staticServeCommand(kernelKind, "/dist") to the old hard-coded
+    // `erdou serve dist --spa` fails this scenario ("erdou: not found" in the
+    // guest — port 8080 never opens) while every hermetic gate stays green.
+
+    // 6) Back to the Terminal. Tab switches unmount panels, so this remounts
+    // PtyTerminal → a NEW pty session + fresh xterm buffer (the helpers read
+    // the live DOM, so they carry over; re-wait for focus + prompt). Write a
+    // dependency-free bundle entry: /src/main.ts is in the bundler's
+    // ENTRY_CANDIDATES, and scenario 1's marker index.html has no module
+    // <script>, so findEntry falls through to it. The regex-literal `.source`
+    // trick renders the marker as body text without needing quotes OR parens
+    // in the typed command — quotes break the retry idiom above, and parens
+    // are shell syntax errors unquoted.
+    await page.locator("button.tab", { hasText: "Terminal" }).click();
+    await page.waitForSelector(".xterm", { timeout: 10_000 });
+    await page.click(".xterm");
+    await page
+      .waitForFunction(() => document.activeElement?.classList?.contains("xterm-helper-textarea"), undefined, {
+        timeout: 5_000,
+      })
+      .catch(() => {});
+    await waitForXterm("$", 15_000);
+    try {
+      await writeAndVerify(
+        `mkdir -p src; echo document.body.textContent=/${BUNDLE_MARKER}/.source > src/main.ts`,
+        "cat src/main.ts",
+        BUNDLE_MARKER,
+      );
+      pass("bundle-entry-written", true);
+    } catch (e) {
+      pass("bundle-entry-written", false, String(e?.message ?? e));
+    }
+
+    // 7) Bundle & Run from a freshly mounted Preview panel. It bundles /dist
+    // host-side (esbuild-wasm reads the guest-written entry back through the
+    // same 9p filer) and must pick the guest-runnable python3 serve command.
+    // The button enables once hasBundleEntry sees /src/main.ts (computed at
+    // mount); Playwright's click auto-waits for it. Selector is variant-blind
+    // (`button.btn` matches .primary and .ghost): on the VM kernel the run
+    // input has NO prefill (run-detect returns null pre-bundle), so the
+    // button renders `.btn.primary` here.
+    await page.locator("button.tab", { hasText: "Preview" }).click();
+    await page.locator(".preview-bar button.btn", { hasText: "Bundle & Run" }).click({ timeout: 20_000 });
+
+    // esbuild-wasm cold init + guest python cold start (~16s) + watcher poll.
+    try {
+      await page.waitForSelector(`.port-chip:has-text("port ${BUNDLE_PORT}")`, { timeout: 90_000 });
+      pass("bundle-port-opened", true, `port ${BUNDLE_PORT}`);
+    } catch (e) {
+      // Surface the panel's error verbatim — e.g. "erdou: not found".
+      const err = await page.locator(".build-errors pre").textContent().catch(() => "");
+      pass(
+        "bundle-port-opened",
+        false,
+        `${String(e?.message ?? e)}${err ? ` build-errors=${JSON.stringify(err.slice(0, 200))}` : ""}`,
+      );
+    }
+
+    // The panel auto-selects the run's first opened port; click View
+    // defensively in case selection lagged (mirrors check 4).
+    await page
+      .locator(".port-chip", { hasText: `port ${BUNDLE_PORT}` })
+      .locator("button", { hasText: "view" })
+      // Short timeout: on the regression path there is no chip at all, and the
+      // default 30s here would push the whole run past the vitest wrapper cap.
+      .click({ timeout: 2_000 })
+      .catch(() => {});
+
+    // 8) The iframe at /__preview__/8080/ loads the bundled shell
+    // (/dist/index.html), whose module script (/dist/app.js) sets
+    // body.textContent to the marker — proving esbuild-wasm → 9p /dist →
+    // guest python3 → NAT → SW proxy in one pass.
+    const bundleText = await waitForPreviewText(BUNDLE_PORT, BUNDLE_MARKER, 40_000);
+    pass(
+      "bundle-preview-renders-marker",
+      bundleText.includes(BUNDLE_MARKER),
+      `body=${JSON.stringify(bundleText.slice(0, 160))}`,
+    );
   } finally {
     await cleanup();
   }

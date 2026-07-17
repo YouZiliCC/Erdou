@@ -51,6 +51,33 @@ describe("parseHttpResponse", () => {
     expect(res.status).toBe(204);
     expect(res.body.length).toBe(0);
   });
+
+  it("strips content-length: the materialized body is the framing", () => {
+    const res = parseHttpResponse(bytes("HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello"));
+    expect(res.headers["content-length"]).toBeUndefined();
+    expect(res.headers["content-type"]).toBe("text/plain"); // non-framing headers survive
+    expect(dec.decode(res.body)).toBe("hello");
+  });
+
+  it("strips transfer-encoding after de-chunking (the returned body has no chunk framing to describe)", () => {
+    const res = parseHttpResponse(bytes("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"));
+    expect(res.headers["transfer-encoding"]).toBeUndefined();
+    expect(dec.decode(res.body)).toBe("hello");
+  });
+
+  it("T3a: a body truncated below Content-Length is clamped AND carries no contradicting content-length header", () => {
+    // Guest died / idle-completion fired mid-body: only 5 of 100 bytes arrived.
+    const res = parseHttpResponse(bytes("HTTP/1.0 200 OK\r\nContent-Length: 100\r\n\r\nhello"));
+    expect(res.status).toBe(200);
+    expect(dec.decode(res.body)).toBe("hello"); // clamped, not padded
+    expect(res.headers["content-length"]).toBeUndefined(); // framing can no longer lie
+  });
+
+  it("strips framing headers regardless of wire-case (CONTENT-LENGTH / Transfer-ENCODING)", () => {
+    const res = parseHttpResponse(bytes("HTTP/1.0 200 OK\r\nCONTENT-LENGTH: 2\r\n\r\nokEXTRA"));
+    expect(res.headers["content-length"]).toBeUndefined();
+    expect(dec.decode(res.body)).toBe("ok"); // the value was still honored for clamping
+  });
 });
 
 describe("responseComplete", () => {

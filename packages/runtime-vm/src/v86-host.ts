@@ -54,6 +54,22 @@ export function assertFs9pSymbols(fs9p: unknown): void {
   if (missing.length) throw new Error(`v86 fs9p missing required method(s): ${missing.join(", ")} — v86 upgrade may have renamed them`);
 }
 
+// Linux fill_queue posts PAGE_SIZE (4096-byte) RX buffers, one per ring slot; v86's
+// set_next_blob TRUNCATES a blob larger than one chain. 2048 leaves margin.
+const VIRTIO_INPUT_CHUNK = 2048;
+
+/** Fail-fast if a v86 upgrade moved the virtio-console internals the
+ *  capacity-aware input sender depends on (FU2). */
+export function assertVirtioConsoleQueue(q: unknown, queueId: number): { count_requests(): number; avail_addr: number } {
+  const o = q as Record<string, unknown> | null;
+  if (!o || typeof o.count_requests !== "function" || typeof o.avail_addr !== "number") {
+    throw new Error(
+      `v86 virtio_console.virtio.queues[${queueId}] missing count_requests/avail_addr — v86 upgrade may have changed internals`,
+    );
+  }
+  return q as { count_requests(): number; avail_addr: number };
+}
+
 const DEFAULT_BOOT_TIMEOUT_MS = 60_000;
 
 export class V86Host {
@@ -68,6 +84,11 @@ export class V86Host {
   }
 
   async boot(inputs: V86BootInputs, opts: { bootTimeoutMs?: number } = {}): Promise<void> {
+    // VmRuntime re-boots the SAME host after shutdown(): lift the destroy latch and
+    // drop cached senders — their closures hold the previous guest's unflushed pending,
+    // which must not leak into the new guest's consoles.
+    this.destroyed = false;
+    this.inputSenders.clear();
     const opt: Record<string, unknown> = {
       wasm_path: inputs.wasmUrl,
       bios: { buffer: inputs.bios },
@@ -109,9 +130,59 @@ export class V86Host {
 
   run(): void { this.emulator.run(); }
 
+  private readonly inputSenders = new Map<number, (b: Uint8Array) => void>();
+  private readonly flushTimers = new Set<ReturnType<typeof setTimeout>>();
+  private destroyed = false;
+
+  /** Capacity-aware, coalescing sender for virtio-console input (FU2). v86's
+   *  "-input-bytes" handler consumes ONE guest RX-ring slot (of 16) per bus.send
+   *  regardless of payload size and SILENTLY DROPS input when the ring is empty;
+   *  a burst of per-keystroke sends with no emulated-CPU slice in between (a busy
+   *  browser tab flushing queued key events) loses every byte past the 16th —
+   *  the first-command garble/drop. Coalesce pending bytes into bounded chunks
+   *  and send only while the ring has free slots; otherwise retry on a short
+   *  timer (v86 ignores the guest's RX replenish kick — no event to hook).
+   *  Cached per port so a re-opened pty keeps one FIFO (byte order preserved). */
+  private inputSender(port: 0 | 1 | 2 | 3): (b: Uint8Array) => void {
+    const existing = this.inputSenders.get(port);
+    if (existing) return existing;
+    const queueId = port === 0 ? 0 : 2 * port + 2;
+    const event = `virtio-console${port}-input-bytes`;
+    let pending = new Uint8Array(0);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const flush = (): void => {
+      timer = undefined;
+      if (this.destroyed) return; // never re-arm (or touch the emulator) after teardown
+      const q = assertVirtioConsoleQueue(
+        this.emulator.v86?.cpu?.devices?.virtio_console?.virtio?.queues?.[queueId], queueId);
+      while (pending.length && q.avail_addr && q.count_requests() > 0) {
+        const chunk = pending.subarray(0, VIRTIO_INPUT_CHUNK);
+        pending = pending.subarray(chunk.length);
+        this.emulator.bus.send(event, chunk);
+      }
+      if (pending.length) {
+        const t = setTimeout(() => { this.flushTimers.delete(t); flush(); }, 2);
+        timer = t;
+        this.flushTimers.add(t);
+      }
+    };
+    const send = (b: Uint8Array): void => {
+      // Dead host: drop, don't buffer — buffered bytes could resurface in a
+      // later boot through a stale sender reference.
+      if (this.destroyed || b.length === 0) return;
+      const merged = new Uint8Array(pending.length + b.length);
+      merged.set(pending, 0);
+      merged.set(b, pending.length);
+      pending = merged;
+      if (!timer) flush();
+    };
+    this.inputSenders.set(port, send);
+    return send;
+  }
+
   channel(): GuestChannel {
     return {
-      send: (bytes: Uint8Array) => this.emulator.bus.send("virtio-console0-input-bytes", bytes),
+      send: this.inputSender(0),
       subscribe: (cb: (bytes: Uint8Array) => void) => this.emulator.add_listener("virtio-console0-output-bytes", cb),
     };
   }
@@ -119,7 +190,7 @@ export class V86Host {
   terminal(port: 1 | 2 | 3): { send(b: Uint8Array): void; subscribe(cb: (b: Uint8Array) => void): () => void; resize(c: number, r: number): void } {
     const event = `virtio-console${port}-output-bytes`;
     return {
-      send: (b) => this.emulator.bus.send(`virtio-console${port}-input-bytes`, b),
+      send: this.inputSender(port),
       // Returns an unsubscribe fn — v86's bus pairs add_listener/remove_listener;
       // callers MUST detach so a reused port (1-3) doesn't deliver a disposed
       // session's data into a new one (I4).
@@ -155,6 +226,9 @@ export class V86Host {
   }
 
   async destroy(): Promise<void> {
+    this.destroyed = true; // an in-flight flush() must not re-arm past this point
+    for (const t of this.flushTimers) clearTimeout(t);
+    this.flushTimers.clear();
     if (this.emulator) await this.emulator.destroy();
   }
 }

@@ -1,4 +1,7 @@
 import type { FileSystemApi } from "@erdou/runtime-contract";
+import type { Kernel } from "./kernel.js";
+
+type KernelKind = Kernel["kind"];
 
 const SKIP_DIRS = new Set([".git", "node_modules"]);
 
@@ -32,17 +35,48 @@ function findWsgiEntry(fs: FileSystemApi, dir: string): string | null {
 }
 
 /**
+ * The static-serve command for `dir` (an ABSOLUTE contract path) on `kind`:
+ *  - browser: the `erdou serve` builtin (registers an HTTP handler on a
+ *    virtual port; `--spa` falls back to index.html for client routes).
+ *  - vm: the guest has no `erdou` binary. python3 IS baked in (guestd needs
+ *    it), so serve with its stdlib http.server, bound 0.0.0.0 — a loopback
+ *    bind is unreachable through the v86 NAT (run-serve's loopback hint).
+ *    Port 8080 mirrors the browser builtin's default. No SPA fallback on the
+ *    VM: the preview iframe always enters at `/`, and client-side routing
+ *    (pushState) never re-fetches — an accepted, documented loss for the
+ *    bundled single-index.html case, not a bug.
+ * The contract path maps 1:1 to the guest chroot path (fs-bridge: "/x" <->
+ * "workspace/x", guestd runs chrooted at /workspace), so `dir` needs no
+ * translation.
+ */
+export function staticServeCommand(kind: KernelKind, dir: string): string {
+  return kind === "vm"
+    ? `python3 -m http.server 8080 --bind 0.0.0.0 -d ${dir}`
+    : `erdou serve ${dir} --spa`;
+}
+
+/**
  * Suggest a run command for the project currently in `fs`, tried in order:
- *  1. A `.py` file anywhere (VCS/`node_modules` excluded) that looks like a
- *     Flask/WSGI app -> `python <file>`.
- *  2. A static site with `/index.html` at the root -> `erdou serve . --spa`.
- *  3. A built static site at `/dist/index.html` -> `erdou serve dist --spa`.
+ *  1. (browser only) A `.py` file anywhere (VCS/`node_modules` excluded) that
+ *     looks like a Flask/WSGI app -> `python <file>`.
+ *  2. (browser only) A static site with `/index.html` at the root ->
+ *     staticServeCommand "/".
+ *  3. A built static site at `/dist/index.html` -> staticServeCommand "/dist".
  *  4. Otherwise `null` — nothing to prefill, the user types their own command.
  */
-export function detectRunCommand(fs: FileSystemApi): string | null {
-  const wsgiEntry = findWsgiEntry(fs, "/");
-  if (wsgiEntry) return `python ${wsgiEntry}`;
-  if (fs.exists("/index.html")) return "erdou serve . --spa";
-  if (fs.exists("/dist/index.html")) return "erdou serve dist --spa";
+export function detectRunCommand(fs: FileSystemApi, kind: KernelKind = "browser"): string | null {
+  if (kind !== "vm") {
+    // The erdou.serve/Flask shim is pyodide-only; the guest's bare python3 has
+    // no flask and no egress, so a WSGI prefill on the vm is guaranteed-broken.
+    const wsgiEntry = findWsgiEntry(fs, "/");
+    if (wsgiEntry) return `python ${wsgiEntry}`;
+  }
+  if (fs.exists("/index.html") && kind !== "vm") {
+    // Only /dist is safe to advertise in the guest: contract "/" IS the chroot
+    // root, so serving it would expose the skeleton dirs (/bin, /usr, ...) and
+    // live /dev device nodes through the preview proxy.
+    return staticServeCommand(kind, "/");
+  }
+  if (fs.exists("/dist/index.html")) return staticServeCommand(kind, "/dist");
   return null;
 }

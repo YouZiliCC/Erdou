@@ -80,4 +80,75 @@ describe("loadBrowserInputs", () => {
     expect(idb.store.has("state:old")).toBe(false); // old version evicted
     expect(idb.store.has("state:v1")).toBe(true);
   });
+
+  const metaOf = (m: object): Uint8Array => new TextEncoder().encode(JSON.stringify(m));
+
+  it("fail-fasts on a meta version mismatch (stale state.zst) without caching anything", async () => {
+    const idb = fakeIdb();
+    await expect(loadBrowserInputs({
+      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", version: "v2", expectedStateVersion: "v2",
+      fetchImpl: fakeFetch({ ...assets, "state.meta.json": metaOf({ version: "v1-old-bake" }) }), idb,
+    })).rejects.toThrow(/stale state\.zst on disk.*pnpm --filter @erdou\/runtime-vm bake/);
+    expect(idb.store.size).toBe(0); // the old bytes must NOT land under the new key
+  });
+
+  it("fail-fasts when state.meta.json has no version field and expectedStateVersion is set", async () => {
+    const idb = fakeIdb();
+    await expect(loadBrowserInputs({
+      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", version: "v2", expectedStateVersion: "v2",
+      fetchImpl: fakeFetch({ ...assets, "state.meta.json": metaOf({ alpine: "3.24.1" }) }), idb,
+    })).rejects.toThrow(/stale state\.zst on disk/);
+    expect(idb.store.size).toBe(0);
+  });
+
+  it("surfaces the instructive re-bake error when the meta fetch 404s (unlinked/misconfigured assets)", async () => {
+    const idb = fakeIdb();
+    await expect(loadBrowserInputs({
+      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", version: "v2", expectedStateVersion: "v2",
+      fetchImpl: fakeFetch(assets), idb, // no state.meta.json served -> fetch 404s
+    })).rejects.toThrow(/re-run `pnpm --filter @erdou\/runtime-vm bake`/);
+    expect(idb.store.size).toBe(0);
+  });
+
+  it("surfaces the instructive re-bake error when the meta body is not JSON (SPA index fallback)", async () => {
+    const idb = fakeIdb();
+    await expect(loadBrowserInputs({
+      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", version: "v2", expectedStateVersion: "v2",
+      fetchImpl: fakeFetch({ ...assets, "state.meta.json": new TextEncoder().encode("<!doctype html>") }), idb,
+    })).rejects.toThrow(/re-run `pnpm --filter @erdou\/runtime-vm bake`/);
+    expect(idb.store.size).toBe(0);
+  });
+
+  it("caches and boots as before when the meta version matches", async () => {
+    const idb = fakeIdb();
+    const inputs = await loadBrowserInputs({
+      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", version: "v2", expectedStateVersion: "v2",
+      fetchImpl: fakeFetch({ ...assets, "state.meta.json": metaOf({ version: "v2" }) }), idb,
+    });
+    expect(new Uint8Array(inputs.state!)).toEqual(STATE_RAW);
+    expect(idb.store.get("state:v2")).toEqual(STATE_GZ);
+  });
+
+  it("skips the meta check on a cache hit (validated when written)", async () => {
+    const idb = fakeIdb();
+    idb.store.set("state:v2", STATE_GZ);
+    const fetchSpy = vi.fn(fakeFetch(assets)); // no state.meta.json served — a meta fetch would 404-throw
+    const inputs = await loadBrowserInputs({
+      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", version: "v2", expectedStateVersion: "v2",
+      fetchImpl: fetchSpy as unknown as typeof fetch, idb,
+    });
+    expect(new Uint8Array(inputs.state!)).toEqual(STATE_RAW);
+    expect(fetchSpy.mock.calls.some((c) => String(c[0]).endsWith("state.meta.json"))).toBe(false);
+  });
+
+  it("does not fetch state.meta.json when expectedStateVersion is not set (old behavior)", async () => {
+    const idb = fakeIdb();
+    const fetchSpy = vi.fn(fakeFetch(assets)); // no state.meta.json served
+    await loadBrowserInputs({
+      baseUrl: "https://x/assets", wasmUrl: "https://x/v86.wasm", version: "v1",
+      fetchImpl: fetchSpy as unknown as typeof fetch, idb,
+    });
+    expect(fetchSpy.mock.calls.some((c) => String(c[0]).endsWith("state.meta.json"))).toBe(false);
+    expect(idb.store.get("state:v1")).toEqual(STATE_GZ);
+  });
 });

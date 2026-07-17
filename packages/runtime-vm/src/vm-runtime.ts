@@ -72,11 +72,8 @@ export class VmRuntime implements Runtime {
     this.guestd = new GuestdClient(this.host.channel());
     this.guestd.onPortEvent((e) => this.onGuestPortEvent(e));                    // real /proc/net/tcp watcher → port.opened/closed + loopback hint
     await this.guestd.ready({ deadlineMs: this.bootTimeoutMs ?? 60_000 });      // first hvc0 frame is the kick; guestd replies READY
-    // The baked state brings eth0 up (DHCP) but never configures lo, so guest
-    // servers binding 127.0.0.1 fail with EADDRNOTAVAIL. Bring loopback up here
-    // so localhost dev servers can bind (and the loopback-only "bind 0.0.0.0"
-    // hint is reachable). busybox provides `ip` as an applet in the exec chroot.
-    await (await this.guestd.exec("busybox ip addr add 127.0.0.1/8 dev lo 2>/dev/null; busybox ip link set lo up 2>/dev/null")).wait();
+    // Networking (eth0 DHCP + loopback) is fully baked into the saved state
+    // (bake step 4.5 asserts both) — no per-boot setup.
     this.booted = true;
   }
 

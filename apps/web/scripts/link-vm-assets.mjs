@@ -9,7 +9,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 const pub = join(here, "..", "public", "vm-assets");
 const assetsDir = join(here, "..", "..", "..", "packages", "runtime-vm", "assets");
 mkdirSync(pub, { recursive: true });
-for (const f of ["kernel.bin", "seabios.bin", "vgabios.bin", "state.zst"]) {
+// state.meta.json must be served: loadBrowserInputs fetches it on cache miss
+// to verify the bake version (expectedStateVersion) before caching state.zst.
+for (const f of ["kernel.bin", "seabios.bin", "vgabios.bin", "state.zst", "state.meta.json"]) {
   const target = join(assetsDir, f);
   const link = join(pub, f);
   if (!existsSync(target)) { console.warn(`[link-vm-assets] missing ${target} — run \`pnpm --filter @erdou/runtime-vm bake\``); continue; }
