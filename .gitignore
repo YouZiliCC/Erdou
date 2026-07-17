@@ -4,3 +4,5 @@ dist/
 coverage/
 .DS_Store
 .superpowers/
+# Rendered from apps/web/docs/help.md at predev/prebuild (render-help.mjs).
+apps/web/public/help.html

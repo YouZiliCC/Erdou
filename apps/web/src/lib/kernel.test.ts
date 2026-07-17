@@ -1,5 +1,25 @@
 import { describe, it, expect } from "vitest";
-import { createBrowserKernel } from "./kernel.js";
+import { createBrowserKernel, environmentId, parseEnvironmentId } from "./kernel.js";
+
+describe("environment ids", () => {
+  it("formats browser and vm:<profile> ids", () => {
+    expect(environmentId({ kind: "browser" })).toBe("browser");
+    expect(environmentId({ kind: "vm", profile: "base" })).toBe("vm:base");
+    expect(environmentId({ kind: "vm", profile: "node" })).toBe("vm:node");
+    expect(environmentId({ kind: "vm", profile: "sci" })).toBe("vm:sci");
+  });
+
+  it("round-trips every id back into its environment", () => {
+    for (const id of ["browser", "vm:base", "vm:node", "vm:sci"]) {
+      expect(environmentId(parseEnvironmentId(id))).toBe(id);
+    }
+  });
+
+  it("fails loud (fail-fast) on an unknown id", () => {
+    expect(() => parseEnvironmentId("vm:gpu")).toThrow(/vm:gpu/);
+    expect(() => parseEnvironmentId("nonsense")).toThrow();
+  });
+});
 
 describe("createBrowserKernel", () => {
   it("wires a browser runtime with languages provisioned and a working sync fs", async () => {

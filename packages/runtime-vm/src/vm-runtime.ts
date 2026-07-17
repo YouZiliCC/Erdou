@@ -10,6 +10,7 @@ import { Fs9pBridge } from "./fs-bridge.js";
 import { GuestdClient, type GuestProcess } from "./guestd-client.js";
 import { snapshotWorkspace, restoreWorkspace } from "./workspace-snapshot.js";
 import { vmCapabilities } from "./capabilities.js";
+import { PROFILE_META, type VmProfile } from "./profiles.js";
 import { openPtySession, type PtySession } from "./pty.js";
 import { SyncFs9pFs } from "./sync-fs.js";
 import { serializeHttpRequest, parseHttpResponse, responseComplete } from "./http-codec.js";
@@ -43,16 +44,22 @@ export class VmRuntime implements Runtime {
   private readonly procs = new Map<number, ProcRecord>();
   private readonly clock: () => number;
   private readonly bootTimeoutMs: number | undefined;
+  /** Which baked image this runtime was constructed for — drives getCapabilities
+   *  so the agent is told the truth about the running image (node reports node/npm,
+   *  not a hardcoded python3). Passed in `opts` to preserve the (loader, opts)
+   *  shape existing call sites use; defaults to "base" for single-image callers. */
+  private readonly profile: VmProfile;
   private booted = false;
   private readonly ptyPorts = new Set<number>();
 
   constructor(
     private readonly loadInputs: () => Promise<import("./v86-host.js").V86BootInputs>,
-    opts: { clock?: () => number; bootTimeoutMs?: number } = {},
+    opts: { clock?: () => number; bootTimeoutMs?: number; profile?: VmProfile } = {},
   ) {
     this.host = new V86Host();
     this.clock = opts.clock ?? (() => Date.now());
     this.bootTimeoutMs = opts.bootTimeoutMs;
+    this.profile = opts.profile ?? "base";
   }
 
   private emit(e: RuntimeEvent): void { for (const l of this.listeners) { try { l(e); } catch (err) { console.error("VmRuntime listener threw:", err); } } }
@@ -292,6 +299,11 @@ export class VmRuntime implements Runtime {
   }
   async closePort(port: number): Promise<void> { this.emitClosed(port); }
 
-  async getCapabilities(): Promise<RuntimeCapabilities> { return vmCapabilities(["python3"]); }
+  async getCapabilities(): Promise<RuntimeCapabilities> {
+    // Per-profile, not hardcoded: report exactly what this image bakes so a run
+    // started on vm:node surfaces node/npm (PROFILE_META is the single source of truth).
+    const meta = PROFILE_META[this.profile];
+    return vmCapabilities(meta.interpreters, meta.packageManagers);
+  }
   subscribe(l: RuntimeEventListener): Unsubscribe { this.listeners.add(l); return () => this.listeners.delete(l); }
 }

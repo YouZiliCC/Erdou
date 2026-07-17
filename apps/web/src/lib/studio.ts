@@ -1,11 +1,22 @@
 import { IndexedDbSnapshotStore } from "@erdou/runtime-browser";
 import { ModelGateway, type ModelConfig, type ChatMessage } from "@erdou/model-gateway";
 import { CodingAgent, type AgentEvent, type ApprovalRequest } from "@erdou/agent-core";
+import { createSwitchEnvironmentTool } from "@erdou/agent-tools";
+import { ENVIRONMENTS, environmentById } from "./environments.js";
 import { loadApprovalMode, saveApprovalMode, loadModel, saveModel, type ApprovalMode } from "./model-config.js";
 import { getTheme, applyTheme } from "./theme.js";
 import type { RuntimeEvent, ProcessInfo, Snapshot, Runtime, FileSystemApi, Unsubscribe } from "@erdou/runtime-contract";
 import { AGENT_LANGUAGES, AGENT_COMMANDS } from "./languages.js";
-import { createBrowserKernel, SKELETON_DIRS, type Kernel, type RpcShellSession } from "./kernel.js";
+import {
+  createBrowserKernel,
+  VM_PRESERVE_DIRS,
+  environmentId,
+  parseEnvironmentId,
+  type Environment,
+  type VmProfile,
+  type Kernel,
+  type RpcShellSession,
+} from "./kernel.js";
 import { loadRuns, saveRuns, clearRuns } from "./runs-store.js";
 import { SnapshotReader, buildFileChanges } from "./snapshot-read.js";
 import { startPreviewProxy, setPreviewRuntime } from "./preview-bridge.js";
@@ -104,6 +115,10 @@ export class Studio {
    *  reuses the same guest instead of booting a second one (~40 MB + ~2 s). */
   private vmKernel: Kernel | null = null;
   private _browserBooted = false;
+  /** Bumped every time `this.kernel` is re-pointed by a successful swap. The
+   *  terminal keys its `<PtyTerminal>` on it so a vm→vm profile switch (which
+   *  keeps `kernelKind === "vm"`) still remounts the PTY onto the new guest. */
+  kernelGeneration = 0;
   /** Progress state for the kernel-switch UI; `null` when no switch is in flight. */
   switchingKernel: { phase: string } | null = null;
   private readonly gateway = new ModelGateway();
@@ -113,10 +128,55 @@ export class Studio {
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
   private _shell?: RpcShellSession;
   private _unsubRuntime?: Unsubscribe;
+  /** Re-points the run-scoped diff subscription onto the active kernel after a
+   *  mid-run environment switch (set only while a run is in flight). */
+  private repointRunDiff?: () => void;
+
+  /**
+   * The STABLE `Runtime` handed to the agent at construction (S4 critical fix
+   * M1). Every method forwards to `this.kernel.runtime` AT CALL TIME, so a
+   * sanctioned mid-run `switchEnvironmentForRun` re-points which concrete
+   * runtime the agent's tools execute against. Passing `this.runtime` (a getter
+   * evaluated ONCE) would pin every post-switch tool to the OLD kernel.
+   * agent-tools only uses readFile/writeFile/readdir/mkdir/rm/exec, but the
+   * full 22-method contract is forwarded for type-completeness. (Studio's own
+   * subscriptions stay on concrete runtimes; a facade-made subscription would
+   * bind to the then-current runtime — agent-tools makes none.)
+   */
+  private readonly agentRuntime: Runtime = {
+    boot: () => this.kernel.runtime.boot(),
+    shutdown: () => this.kernel.runtime.shutdown(),
+    spawn: (o) => this.kernel.runtime.spawn(o),
+    exec: (c, o) => this.kernel.runtime.exec(c, o),
+    kill: (p, s) => this.kernel.runtime.kill(p, s),
+    wait: (p) => this.kernel.runtime.wait(p),
+    getProcesses: () => this.kernel.runtime.getProcesses(),
+    readFile: (p) => this.kernel.runtime.readFile(p),
+    writeFile: (p, d, o) => this.kernel.runtime.writeFile(p, d, o),
+    readdir: (p) => this.kernel.runtime.readdir(p),
+    mkdir: (p, o) => this.kernel.runtime.mkdir(p, o),
+    rm: (p, o) => this.kernel.runtime.rm(p, o),
+    rename: (f, t) => this.kernel.runtime.rename(f, t),
+    stat: (p) => this.kernel.runtime.stat(p),
+    createSnapshot: () => this.kernel.runtime.createSnapshot(),
+    restoreSnapshot: (s) => this.kernel.runtime.restoreSnapshot(s),
+    listen: (p) => this.kernel.runtime.listen(p),
+    exposePort: (p) => this.kernel.runtime.exposePort(p),
+    dispatch: (p, r) => this.kernel.runtime.dispatch(p, r),
+    closePort: (p) => this.kernel.runtime.closePort(p),
+    getCapabilities: () => this.kernel.runtime.getCapabilities(),
+    subscribe: (l) => this.kernel.runtime.subscribe(l),
+  };
 
   /** `"browser"` or `"vm"` — which kernel is currently active. */
   get kernelKind(): Kernel["kind"] {
     return this.kernel.kind;
+  }
+
+  /** The active environment's string id (`browser` | `vm:<profile>`) — the
+   *  selector's current value and the switch handle. */
+  get currentEnvId(): string {
+    return this.kernel.kind === "vm" ? `vm:${this.kernel.profile ?? "base"}` : "browser";
   }
 
   /** The contract-typed runtime of the active kernel. */
@@ -268,82 +328,234 @@ export class Studio {
     });
   }
 
-  /**
-   * Switch the active kernel between the fast browser kernel and the real
-   * Alpine VM kernel. Lazily constructs+boots the VM kernel on first use (with
-   * progress via `switchingKernel`), copies the current workspace into the
-   * target kernel, re-subscribes runtime events, resets the persistent shell,
-   * and re-aims the preview bridge. Both kernels are kept alive once booted so
-   * either direction of the toggle is instant on a later switch.
-   */
+  /** True when `target` is already the active environment (kind + profile). */
+  private sameEnv(target: Environment): boolean {
+    if (target.kind !== this.kernel.kind) return false;
+    if (target.kind === "browser") return true;
+    return (this.kernel.profile ?? "base") === target.profile;
+  }
+
+  /** Back-compat: the binary browser/vm toggle, mapped onto `switchEnvironment`.
+   *  `switchKernel("vm")` targets the default `base` profile. Retained for the
+   *  paths (and tests) that predate per-profile environments. */
   async switchKernel(
     kind: "browser" | "vm",
     opts: { makeKernel?: (o: { onProgress?: (p: string) => void }) => Promise<Kernel> } = {},
   ): Promise<void> {
-    // Plan-review I2: never switch mid-run — a swap during an agent turn would
-    // corrupt the run's diff capture and mis-target autosave. The toggle is also
-    // disabled in the UI while running, but guard here too (defense in depth).
-    if (kind === this.kernel.kind || this.switchingKernel || this.running) return;
-    const makeKernel = opts.makeKernel ?? (async (o) => (await import("./vm-kernel.js")).createVmKernel(o));
+    const envId = kind === "vm" ? "vm:base" : "browser";
+    const userMake = opts.makeKernel;
+    return userMake
+      ? this.switchEnvironment(envId, { makeKernel: ({ onProgress }) => userMake({ onProgress }) })
+      : this.switchEnvironment(envId);
+  }
+
+  /**
+   * Switch the active environment: the fast browser kernel, or a per-profile
+   * Alpine VM kernel (`browser` | `vm:<profile>`). Lazily constructs+boots the
+   * target guest (with progress via `switchingKernel`), copies the current
+   * workspace across, re-subscribes runtime events, resets the persistent
+   * shell, remounts the terminal, and re-aims the preview bridge.
+   *
+   * One-VM-alive (S6 §3 / T7 amendment): at most one VM guest runs at a time.
+   *  - Boot target B FIRST while the outgoing A stays functional (a failed boot
+   *    leaves the user on a working kernel; a run can still start during the
+   *    cold-boot await, in which case we abort).
+   *  - The outgoing VM is torn down LAST, and ONLY when a VM is replaced by a
+   *    DIFFERENT VM profile. `vm→browser` KEEPS the VM cached alive for an
+   *    instant switch-back; the browser kernel is never shut down.
+   */
+  async switchEnvironment(
+    envId: string,
+    opts: { makeKernel?: (o: { profile: VmProfile; onProgress?: (p: string) => void }) => Promise<Kernel> } = {},
+  ): Promise<void> {
+    const target = parseEnvironmentId(envId);
+    // Plan-review I2: the USER-driven switch never runs mid-run — a swap during
+    // an agent turn would corrupt the run's diff capture and mis-target
+    // autosave. (The agent's own `switchEnvironmentForRun` IS allowed mid-run;
+    // it re-points the diff subscription instead.) Also a no-op when already on
+    // the target env or a switch is already in flight.
+    if (this.sameEnv(target) || this.switchingKernel || this.running) return;
+    const makeKernel = opts.makeKernel ?? this.defaultMakeKernel;
     this.switchingKernel = { phase: "Starting…" };
     this.notify();
     try {
-      let next: Kernel;
-      if (kind === "browser") {
-        next = this.browserKernel;
-      } else if (this.vmKernel) {
-        next = this.vmKernel; // plan-review I4: reuse the already-booted guest
-      } else {
-        next = await makeKernel({
-          onProgress: (p) => {
-            this.switchingKernel = { phase: p };
-            this.notify();
-          },
-        });
-        this.vmKernel = next; // cache for the next switch back to vm
-      }
-      if (kind === "browser" && !this._browserBooted) {
-        await next.runtime.boot(); // (browser boots once; see note)
-      }
-      // Final-review Fix 1: re-check AFTER the boot/cache-resolution await window —
-      // the entry guard above only catches a run already in progress when the
-      // switch was requested; a run can still START while we were awaiting the
-      // cold VM boot (the Composer stays enabled during that window). If so,
-      // cancel the swap instead of copying the workspace mid-run; `next` (e.g. a
-      // freshly booted VM) stays cached in `this.vmKernel` so the boot isn't wasted.
-      if (this.running) {
-        this.logSystem("system", "Kernel switch cancelled — a run started during boot.");
-        return;
-      }
-      // Kernel-switch port hygiene (deferred T6a + stale chips): the preview
-      // surface does not follow the kernel. Runs BEFORE the swap, while
-      // `this.runtime` still targets the outgoing kernel — killing the detached
-      // server frees its real guest socket (an orphan would EADDRINUSE the next
-      // serve after a switch-back; the VM's closePort is pure bookkeeping), and
-      // closing tracked ports frees the browser kernel's virtual-port registry
-      // the same way. The old server is unreachable post-swap anyway: the SW
-      // proxy is re-aimed below, and the old fs is a frozen mirror.
-      await this.stopTrackedServe();
-      // copy the current workspace into the target kernel so the project follows
-      copyWorkspace(this.kernel.fs, next.fs);
-      // swap: unsubscribe old runtime events, point at the new kernel, re-subscribe
-      this._unsubRuntime?.();
-      this.kernel = next;
-      this._shell = undefined; // the `shell` getter re-opens on the new kernel
-      this.subscribeRuntime();
-      setPreviewRuntime(this.runtime); // plan-review I5: re-aim the (already-installed) preview bridge
-      this.fsVersion++;
-      // Note (plan-review M1): persistence uses one shared SNAPSHOT_ID across both
-      // kernels — intentionally last-writer-wins, since there is one logical
-      // project that follows the toggle. A snapshot saved by either kernel is a
-      // contract-level `Snapshot`, restorable by the other on next boot.
-      this.logSystem("system", `Switched to the ${kind === "vm" ? "Linux VM" : "browser"} kernel.`);
+      await this.performSwitch(target, makeKernel, { fromRun: false });
     } catch (err) {
-      this.logSystem("error", `Failed to switch to the ${kind} kernel`, asMessage(err));
+      this.logSystem("error", `Failed to switch to ${envId}`, asMessage(err));
     } finally {
       this.switchingKernel = null;
       this.notify();
     }
+  }
+
+  /**
+   * The sanctioned mid-run environment switch — the ONLY switch permitted while
+   * `running`, callable exclusively from the switch_environment tool callback.
+   * The agent loop is parked awaiting this tool between calls, so the runtime is
+   * idle. Sets `switchingKernel` FIRST (inheriting runServe's refuse + the
+   * stale-settle poison path, and blocking a foreign startRun/replyToRun),
+   * flushes the VM's coalesced guest `file.changed` batch into the run's diff
+   * set before the old subscription is dropped, then runs the T7 swap sequence —
+   * `performSwitch` re-points the run-scoped diff subscription so post-switch
+   * edits are still captured. Returns the new environment's brief (the model's
+   * only in-band update, since the system prompt was built once at run start).
+   * On failure it clears state, leaves the current kernel intact, and throws so
+   * the tool reports ok:false and the model continues on the old environment.
+   */
+  private async switchEnvironmentForRun(
+    target: string,
+    makeKernel: (o: { profile: VmProfile; onProgress?: (p: string) => void }) => Promise<Kernel> = this.defaultMakeKernel,
+  ): Promise<string> {
+    const env = parseEnvironmentId(target); // fail-fast on an unknown id
+    if (this.switchingKernel) throw new Error("A kernel switch is already in progress; try again after it settles.");
+    if (this.sameEnv(env)) return this.environmentBrief(target); // already there — report the facts, no switch
+    this.switchingKernel = { phase: "Starting…" };
+    this.notify();
+    try {
+      // S4 §2c: flush the coalesced guest file.changed batch into the run's
+      // `changed` set BEFORE `performSwitch` drops the old subscription.
+      await eventsSettled();
+      // performSwitch stops the outgoing serve, mirrors the workspace, swaps the
+      // kernel, and re-points the run-scoped diff subscription (fromRun: true
+      // skips the mid-boot "run started" abort — the run IS us).
+      await this.performSwitch(env, makeKernel, { fromRun: true });
+      return this.environmentBrief(target);
+    } catch (err) {
+      this.logSystem("error", `Failed to switch to ${target}`, asMessage(err));
+      throw err instanceof Error ? err : new Error(String(err));
+    } finally {
+      this.switchingKernel = null;
+      this.notify();
+    }
+  }
+
+  /** The default kernel factory: lazily imports vm-kernel (its v86 chunk stays
+   *  out of the main bundle). Shared by the user switch and the run switch. */
+  private readonly defaultMakeKernel = async (o: {
+    profile: VmProfile;
+    onProgress?: (p: string) => void;
+  }): Promise<Kernel> => (await import("./vm-kernel.js")).createVmKernel(o);
+
+  /**
+   * The shared swap core (S6 §3 / T7 sequence), driven by both the user switch
+   * and the run-initiated switch. Boots/resolves target B while the outgoing A
+   * stays functional, then — unless a user switch aborts because a run started
+   * during the cold boot — stops the outgoing serve, mirrors the workspace,
+   * swaps the kernel (re-pointing runtime events, the persistent shell, the PTY
+   * generation, the run-scoped diff subscription and the preview bridge), and
+   * retires the outgoing VM LAST when a VM is replaced by a DIFFERENT VM profile.
+   */
+  private async performSwitch(
+    target: Environment,
+    makeKernel: (o: { profile: VmProfile; onProgress?: (p: string) => void }) => Promise<Kernel>,
+    opts: { fromRun: boolean },
+  ): Promise<void> {
+    const outgoing = this.kernel;
+    const outgoingIsVm = outgoing.kind === "vm";
+    // ---- resolve/boot the target kernel B (A untouched) ----
+    let next: Kernel;
+    let bootedNew = false;
+    if (target.kind === "browser") {
+      next = this.browserKernel;
+      if (!this._browserBooted) {
+        await next.runtime.boot(); // (browser boots once)
+        this._browserBooted = true;
+      }
+    } else if (this.vmKernel && (this.vmKernel.profile ?? "base") === target.profile) {
+      next = this.vmKernel; // plan-review I4: reuse the already-booted guest for this profile
+    } else {
+      // Booting a NEW guest for `target.profile`.
+      if (!outgoingIsVm && this.vmKernel) {
+        // Browser is active and a DIFFERENT-profile VM is cached — it is a
+        // stale mirror (the browser fs is the live truth), so retire it FIRST
+        // to avoid ever holding two guests at once (S6 §3 bullet 1).
+        await this.vmKernel.shutdown?.().catch((e) => this.logSystem("system", "VM shutdown error", asMessage(e)));
+        this.vmKernel = null;
+      }
+      next = await makeKernel({
+        profile: target.profile,
+        onProgress: (p) => {
+          this.switchingKernel = { phase: p };
+          this.notify();
+        },
+      });
+      bootedNew = true;
+      // Browser-active boot: cache eagerly so an abort (below) still keeps the
+      // booted guest for next time. A VM-active boot keeps the cache pointing
+      // at the OUTGOING guest until the swap succeeds (one-VM-alive on abort).
+      if (!outgoingIsVm) this.vmKernel = next;
+    }
+    // Final-review Fix 1: re-check AFTER the boot/reuse await window — a run can
+    // START while we were awaiting the cold VM boot. This applies ONLY to a
+    // user switch; a run-initiated switch IS the run (`this.running` is true by
+    // construction), so it must not abort here. Abort: a freshly-booted VM that
+    // would strand a second guest is torn down; otherwise it stays cached.
+    if (!opts.fromRun && this.running) {
+      this.logSystem("system", "Kernel switch cancelled — a run started during boot.");
+      if (bootedNew && outgoingIsVm) await next.shutdown?.().catch(() => {});
+      return;
+    }
+    // Kernel-switch port hygiene (deferred T6a + stale chips): the preview
+    // surface does not follow the kernel. Runs BEFORE the swap, while
+    // `this.runtime` still targets the OUTGOING kernel — killing the detached
+    // server frees its real guest socket (an orphan would EADDRINUSE the next
+    // serve after a switch-back; the VM's closePort is pure bookkeeping), and
+    // closing tracked ports frees the browser kernel's virtual-port registry
+    // the same way. The old server is unreachable post-swap anyway: the SW
+    // proxy is re-aimed below, and the old fs is a frozen mirror. (Placed after
+    // the boot so a failed boot leaves the outgoing serve untouched — the
+    // run-initiated switch's failure path relies on this to keep A pristine.)
+    await this.stopTrackedServe();
+    // copy the current workspace into the target kernel so the project follows.
+    // MUST precede A's shutdown: a VM's SyncFs reads die with its host.destroy().
+    copyWorkspace(outgoing.fs, next.fs);
+    // swap: unsubscribe old runtime events, point at the new kernel, re-subscribe
+    this._unsubRuntime?.();
+    this.kernel = next;
+    this._shell = undefined; // the `shell` getter re-opens on the new kernel
+    this.kernelGeneration++; // C2: remount the PTY terminal onto the new guest
+    this.subscribeRuntime();
+    // Re-point the run-scoped diff subscription onto the new runtime (no-op
+    // outside a run — a user switch can't happen mid-run). AFTER copyWorkspace
+    // so the copy's synchronous file.changed events stay out of the run's diff.
+    this.repointRunDiff?.();
+    setPreviewRuntime(this.runtime); // plan-review I5: re-aim the (already-installed) preview bridge
+    this.fsVersion++;
+    // One-VM-alive: retire the outgoing VM LAST (after the swap, so a shutdown
+    // failure can't strand the UI), and ONLY when it is being replaced by a
+    // DIFFERENT VM profile. `vm→browser` KEEPS the VM cached (instant back).
+    if (outgoingIsVm && next.kind === "vm") {
+      await outgoing.shutdown?.().catch((e) => this.logSystem("system", "VM shutdown error", asMessage(e)));
+      this.vmKernel = next;
+    }
+    // Note (plan-review M1): persistence uses one shared SNAPSHOT_ID across both
+    // kernels — intentionally last-writer-wins, since there is one logical
+    // project that follows the toggle. A snapshot saved by either kernel is a
+    // contract-level `Snapshot`, restorable by the other on next boot.
+    this.logSystem(
+      "system",
+      target.kind === "vm" ? `Switched to the Linux VM (${target.profile}).` : "Switched to the browser kernel.",
+    );
+  }
+
+  /** A full-facts brief of an environment for the switch tool's result — the
+   *  model's only in-band update after a mid-run switch (the system prompt was
+   *  built once at run start; reply turns do not rebuild it). Covers the
+   *  interpreters, package managers, network egress and install recipes. */
+  private environmentBrief(envId: string): string {
+    const env = environmentById(envId);
+    const egress =
+      env.kernel === "vm"
+        ? "Network egress: real — pip/npm reach live registries through the package gateway (CORS-bound)."
+        : "Network egress: none for shell commands; micropip fetches pure-Python wheels from PyPI only.";
+    return [
+      `Switched to ${env.label} (${env.id}). Your workspace was copied over.`,
+      `Interpreters: ${env.interpreters.join(", ")}.`,
+      `Package managers: ${env.packageManagers.join(", ")}.`,
+      egress,
+      `Speed: ${env.speed}.`,
+      ...env.installRecipes.map((r) => `Install: ${r}`),
+    ].join("\n");
   }
 
   async mountFolder(handle: DirHandleLike): Promise<void> {
@@ -476,13 +688,16 @@ export class Studio {
     if (!this.mount) return;
     try {
       // The VM kernel's readdir("/") exposes its skeleton bind-mount stub dirs
-      // (bin/lib/usr/proc/dev/tmp) — never write those into the user's real folder.
+      // (bin/lib/usr/proc/dev/tmp) AND its baked config dirs (/etc pip.conf +
+      // resolv.conf, /root .npmrc) — never write those image-owned dirs into
+      // the user's real folder (R12.5 IMP2 class). VM_PRESERVE_DIRS = skeleton
+      // + etc + root; SKELETON_DIRS alone would dump /etc/pip.conf onto disk.
       await saveVfsToFolder(
         this.fs,
         this.mount,
         "/",
         this.mountMtimes,
-        this.kernelKind === "vm" ? new Set(SKELETON_DIRS) : undefined,
+        this.kernelKind === "vm" ? new Set(VM_PRESERVE_DIRS) : undefined,
       );
     } catch (err) {
       this.logSystem("error", "Failed to sync to local folder", asMessage(err));
@@ -605,15 +820,23 @@ export class Studio {
 
     // Capture the VFS at turn start, then collect every path the agent
     // touches via a run-scoped subscription (separate from the boot-time
-    // save handler).
+    // save handler). `unsub` is re-pointed by `repointRunDiff` if the agent
+    // switches environments mid-run, so post-switch edits are still captured.
     const startSnap = await this.runtime.createSnapshot();
     const changed = new Set<string>();
-    const unsub = this.runtime.subscribe((e) => {
+    const collect = (e: RuntimeEvent): void => {
       if (e.type === "file.changed") changed.add(e.path);
-    });
+    };
+    let unsub = this.runtime.subscribe(collect);
+    this.repointRunDiff = () => {
+      unsub();
+      unsub = this.runtime.subscribe(collect);
+    };
 
     const agent = new CodingAgent({
-      runtime: this.runtime,
+      // The delegating facade (M1), NOT `this.runtime` — a mid-run switch
+      // re-points which concrete runtime the agent's tools hit at call time.
+      runtime: this.agentRuntime,
       gateway: this.gateway,
       model,
       maxSteps: 25,
@@ -622,7 +845,34 @@ export class Studio {
         commands: AGENT_COMMANDS,
         notes:
           "You can build & preview web apps: write a React/TS project (e.g. /src/main.tsx) and the user can Bundle & Run it (bundled in-browser, npm deps from a CDN), `erdou serve <dir>` a static site, or `erdou.serve(app, port)` a Python WSGI app — any of these serves it on a port to preview.",
+        // The environments catalog: which env the agent is in now + every env
+        // it can switch into (interpreters, package managers, install recipes,
+        // switch guidance). Without this, agent-core's environmentsCatalogSection
+        // returns "" and the R13 "ENVIRONMENTS & PACKAGES" brief is dead in
+        // production (final-switch.md FINDING 1). Duck-typed projection: each
+        // EnvironmentDescriptor structurally satisfies agent-core's
+        // EnvironmentBrief — no cross-import, keeps layering (apps/web → agent-core).
+        catalog: {
+          current: this.currentEnvId,
+          available: ENVIRONMENTS.map((e) => ({
+            id: e.id,
+            label: e.label,
+            interpreters: e.interpreters,
+            packageManagers: e.packageManagers,
+            installRecipes: e.installRecipes,
+            switchGuidance: e.switchGuidance,
+            speed: e.speed,
+          })),
+        },
       },
+      // The agent can move itself to an environment with the interpreter /
+      // package manager the task needs; the callback performs the sanctioned
+      // mid-run switch and returns the new-env brief for the model.
+      extraTools: [
+        createSwitchEnvironmentTool((t) => this.switchEnvironmentForRun(t), {
+          environments: ENVIRONMENTS.map((e) => e.id),
+        }),
+      ],
       onEvent: (e) => this.onAgentEvent(run, e),
       approve: this.makeApprove(approvalMode),
     });
@@ -643,6 +893,7 @@ export class Studio {
       run.status = "error";
     } finally {
       unsub();
+      this.repointRunDiff = undefined;
       this.running = false;
       // Defensive: if the run threw while a prompt was open, drop it so the UI
       // doesn't show a stale approval for a run that is no longer executing.

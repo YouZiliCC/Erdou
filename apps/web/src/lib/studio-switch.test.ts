@@ -1,7 +1,7 @@
 import "fake-indexeddb/auto";
 import { describe, it, expect, vi } from "vitest";
 import { Studio, eventsSettled } from "./studio.js";
-import { Vfs } from "@erdou/runtime-browser";
+import { Vfs, BrowserRuntime } from "@erdou/runtime-browser";
 import { DEFAULT_MODEL } from "./model-config.js";
 import type { Runtime, RuntimeEvent } from "@erdou/runtime-contract";
 
@@ -70,6 +70,96 @@ describe("Studio.switchKernel", () => {
     await studio.switchKernel("vm", { makeKernel });
     expect(makeKernel).not.toHaveBeenCalled();
     expect(studio.fs).toBe(vmFs);
+  });
+
+  it("vm→vm (one-VM-alive): boots B, shuts the outgoing VM down LAST, copies the workspace, remounts the terminal", async () => {
+    const studio = new Studio();
+    await studio.boot();
+
+    const baseFs = new Vfs();
+    const baseShutdown = vi.fn(async () => {});
+    const fakeBase = {
+      kind: "vm" as const,
+      profile: "base" as const,
+      runtime: stubRuntime(),
+      fs: baseFs,
+      openShell: () => studio.shell,
+      openPty: async () => ({}) as any,
+      shutdown: baseShutdown,
+    };
+    await studio.switchEnvironment("vm:base", { makeKernel: async () => fakeBase });
+    expect(studio.currentEnvId).toBe("vm:base");
+    studio.fs.writeFile("/w.txt", "carried");
+    const genBefore = studio.kernelGeneration;
+
+    const nodeFs = new Vfs();
+    const nodeShutdown = vi.fn(async () => {});
+    const fakeNode = {
+      kind: "vm" as const,
+      profile: "node" as const,
+      runtime: stubRuntime(),
+      fs: nodeFs,
+      openShell: () => studio.shell,
+      openPty: async () => ({}) as any,
+      shutdown: nodeShutdown,
+    };
+    const makeNode = vi.fn(async ({ profile }: { profile: string }) => {
+      expect(profile).toBe("node"); // switchEnvironment resolves the target profile
+      return fakeNode;
+    });
+    await studio.switchEnvironment("vm:node", { makeKernel: makeNode });
+
+    expect(studio.currentEnvId).toBe("vm:node");
+    expect(studio.kernelKind).toBe("vm");
+    expect(makeNode).toHaveBeenCalledTimes(1);
+    expect(baseShutdown).toHaveBeenCalledTimes(1); // outgoing VM torn down (one-VM-alive)
+    expect(nodeShutdown).not.toHaveBeenCalled(); // the incoming VM stays alive
+    // the workspace followed A → B
+    expect(new TextDecoder().decode(studio.fs.readFile("/w.txt"))).toBe("carried");
+    expect(studio.fs).toBe(nodeFs);
+    // C2: the PTY remount key advances so TerminalPanel re-opens on the new guest.
+    expect(studio.kernelGeneration).toBeGreaterThan(genBefore);
+  });
+
+  it("vm→browser KEEPS the VM cached alive (no shutdown), then reuses it on switch-back", async () => {
+    const studio = new Studio();
+    await studio.boot();
+    const vmFs = new Vfs();
+    const vmShutdown = vi.fn(async () => {});
+    const fakeVm = {
+      kind: "vm" as const,
+      profile: "base" as const,
+      runtime: stubRuntime(),
+      fs: vmFs,
+      openShell: () => studio.shell,
+      shutdown: vmShutdown,
+    };
+    const makeVm = vi.fn(async () => fakeVm);
+    await studio.switchEnvironment("vm:base", { makeKernel: makeVm });
+    await studio.switchEnvironment("browser");
+    expect(studio.kernelKind).toBe("browser");
+    expect(vmShutdown).not.toHaveBeenCalled(); // vm→browser must not tear the guest down
+
+    await studio.switchEnvironment("vm:base", { makeKernel: makeVm });
+    expect(makeVm).toHaveBeenCalledTimes(1); // reused the cached guest (no re-boot)
+    expect(studio.fs).toBe(vmFs);
+    expect(vmShutdown).not.toHaveBeenCalled();
+  });
+
+  it("an unbaked profile fails LOUD at boot and keeps the user on the working kernel", async () => {
+    const studio = new Studio();
+    await studio.boot();
+    const before = studio.kernelKind;
+    // makeKernel is where the missing-asset boot lives — simulate its loud failure.
+    await studio.switchEnvironment("vm:sci", {
+      makeKernel: async () => {
+        throw new Error("state-sci.zst not found — run: pnpm --filter @erdou/runtime-vm bake --profile sci");
+      },
+    });
+    expect(studio.kernelKind).toBe(before); // unchanged — the existing catch keeps us here
+    expect(studio.switchingKernel).toBeNull();
+    const log = studio.systemLog.map((l) => `${l.text} ${l.detail ?? ""}`).join("\n");
+    expect(log).toMatch(/bake --profile sci/);
   });
 
   it("is a no-op when a run is active, when already on the target kernel, or mid-switch", async () => {
@@ -161,6 +251,43 @@ describe("Studio.switchKernel", () => {
 // The incoming stub only needs `subscribe` — that's all subscribeRuntime /
 // setPreviewRuntime touch post-swap.
 const stubRuntime = (): Runtime => ({ subscribe: () => () => {} }) as unknown as Runtime;
+
+// M1 (S4 critical): the agent is handed a STABLE delegating Runtime whose every
+// method forwards to `this.kernel.runtime` at CALL time. Capturing the concrete
+// `this.runtime` once at construction (the bug) would keep every post-switch
+// tool hitting the OLD kernel.
+describe("Studio agent-runtime facade", () => {
+  it("forwards to the active kernel at call time, not the kernel captured at construction", async () => {
+    const studio = new Studio();
+    await studio.boot();
+    const facade = (studio as unknown as { agentRuntime: Runtime }).agentRuntime;
+
+    // On the browser kernel: a write through the facade lands in the browser fs.
+    await facade.writeFile("/on-browser.txt", "b");
+    expect(studio.fs.exists("/on-browser.txt")).toBe(true);
+
+    // Switch to a fake VM kernel with its OWN runtime + fs.
+    const vmRt = new BrowserRuntime();
+    await vmRt.boot();
+    const vmWrite = vi.spyOn(vmRt, "writeFile");
+    await studio.switchEnvironment("vm:base", {
+      makeKernel: async () => ({
+        kind: "vm" as const,
+        profile: "base" as const,
+        runtime: vmRt,
+        fs: vmRt.fs,
+        openShell: () => vmRt.openShell(),
+        shutdown: async () => {},
+      }),
+    });
+
+    // The SAME facade object now forwards to the NEW kernel's runtime.
+    await facade.writeFile("/after-switch.txt", "v");
+    expect(vmWrite.mock.calls.some((c) => c[0] === "/after-switch.txt" && c[1] === "v")).toBe(true);
+    expect(vmRt.fs.exists("/after-switch.txt")).toBe(true);
+    expect(studio.fs).toBe(vmRt.fs);
+  });
+});
 
 describe("Studio.switchKernel port hygiene", () => {
   it("kills the tracked serve pid and closes tracked ports on the OUTGOING runtime, then clears them", async () => {

@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "predev": "node scripts/link-vm-assets.mjs",
+    "predev": "node scripts/link-vm-assets.mjs && node scripts/render-help.mjs",
     "dev": "vite",
-    "prebuild": "node scripts/link-vm-assets.mjs",
+    "prebuild": "node scripts/link-vm-assets.mjs && node scripts/render-help.mjs",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"

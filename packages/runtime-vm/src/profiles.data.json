@@ -1,0 +1,23 @@
+{
+  "base": {
+    "version": "alpine-3.24.1-r13-base",
+    "label": "Python",
+    "packages": ["python3", "py3-pip"],
+    "interpreters": ["python3"],
+    "packageManagers": ["apk", "pip"]
+  },
+  "node": {
+    "version": "alpine-3.24.1-r13-node",
+    "label": "Node.js",
+    "packages": ["python3", "py3-pip", "nodejs", "npm"],
+    "interpreters": ["python3", "node"],
+    "packageManagers": ["apk", "pip", "npm"]
+  },
+  "sci": {
+    "version": "alpine-3.24.1-r13-sci",
+    "label": "NumPy/Pandas",
+    "packages": ["python3", "py3-pip", "py3-numpy", "py3-pandas"],
+    "interpreters": ["python3"],
+    "packageManagers": ["apk", "pip"]
+  }
+}

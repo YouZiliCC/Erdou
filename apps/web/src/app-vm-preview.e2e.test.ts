@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const assetsPresent = existsSync(join(here, "..", "..", "..", "packages", "runtime-vm", "assets", "state.zst"));
+const assetsPresent = existsSync(join(here, "..", "..", "..", "packages", "runtime-vm", "assets", "state-base.zst"));
 const chromium = ["/usr/bin/chromium-browser", "/usr/bin/chromium"].find(existsSync);
 const RUN = assetsPresent && process.env.ERDOU_VM_E2E === "1" && !!chromium;
 

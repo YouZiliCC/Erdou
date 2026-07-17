@@ -42,6 +42,8 @@ export function TitleBar({
       >
         Reset
       </button>
+      {/* /help.html is rendered from docs/help.md at predev/prebuild (render-help.mjs). */}
+      <button className="btn ghost" onClick={() => window.open("/help.html")}>Help</button>
       <button className="btn ghost" onClick={onSettings}>Settings</button>
     </header>
   );

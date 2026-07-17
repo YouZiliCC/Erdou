@@ -42,6 +42,19 @@ describe("Studio approval plumbing", () => {
     expect(studio.pendingApproval).toBeNull();
   });
 
+  it("Confirm: switch_environment is parked for approval like other gated tools", async () => {
+    const studio = new Studio();
+    (studio as unknown as Internals).autoAllow = new Set();
+    const approve = (studio as unknown as Internals).makeApprove("confirm")!;
+
+    const decision = approve({ tool: "switch_environment", args: { target: "vm:node" } });
+    expect(studio.pendingApproval?.req.tool).toBe("switch_environment");
+    expect(studio.pendingApproval?.req.args).toEqual({ target: "vm:node" });
+    studio.pendingApproval!.resolve("allow");
+    expect(await decision).toBe("allow");
+    expect(studio.pendingApproval).toBeNull();
+  });
+
   it("Confirm: Always allow remembers the tool for the rest of the run", async () => {
     const studio = new Studio();
     (studio as unknown as Internals).autoAllow = new Set();

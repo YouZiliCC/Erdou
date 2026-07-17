@@ -13,10 +13,16 @@ interface Block {
 
 /** Dispatches to the VM kernel's streaming PTY terminal or the browser kernel's
  *  block terminal — hookless so the two branches don't fight React's rules of
- *  hooks (each render path owns its own component + hook set). */
+ *  hooks (each render path owns its own component + hook set).
+ *
+ *  C2: the PTY is keyed on `studio.kernelGeneration` so a vm→vm profile switch —
+ *  which keeps `kernelKind === "vm"`, so this component would NOT otherwise
+ *  remount — re-opens the PtySession on the new guest instead of streaming into
+ *  the disposed one. (App re-renders this subtree on every notify, and a swap
+ *  bumps the generation then notifies, so the new key takes effect.) */
 export function TerminalPanel({ studio }: { studio: Studio }) {
   if (studio.kernelKind === "vm" && studio.kernel.openPty) {
-    return <PtyTerminal studio={studio} />;
+    return <PtyTerminal key={studio.kernelGeneration} studio={studio} />;
   }
   return <BlockTerminal studio={studio} />;
 }

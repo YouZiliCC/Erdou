@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { BrowserRuntime } from "@erdou/runtime-browser";
 import { ModelGateway, type ModelConfig, type ChatMessage } from "@erdou/model-gateway";
+import { createSwitchEnvironmentTool, type ToolDef } from "@erdou/agent-tools";
 import { CodingAgent } from "./agent.js";
 import type { AgentEvent } from "./types.js";
 
@@ -187,6 +188,71 @@ describe("multi-turn continuation", () => {
     expect(result.transcript[0]?.role).toBe("system");
     expect(result.transcript[1]).toEqual({ role: "user", content: "fresh task" });
     expect(result.transcript.filter((m) => m.role === "system")).toHaveLength(1);
+  });
+});
+
+const echoTool: ToolDef = {
+  name: "echo_env",
+  description: "Test-only extra tool.",
+  parameters: { type: "object", properties: {} },
+  execute: async () => ({ ok: true, output: "echoed" }),
+};
+
+describe("extra tools", () => {
+  it("appends extraTools after the built-ins without duplicating them", async () => {
+    const runtime = await freshRuntime();
+    const chat = vi.fn().mockResolvedValue({ content: "done", toolCalls: [] });
+    const gateway = { chat } as unknown as ModelGateway;
+    const agent = new CodingAgent({ runtime, gateway, model, extraTools: [echoTool] });
+    await agent.run("t");
+
+    const specs = chat.mock.calls[0]?.[2]?.tools as { name: string }[];
+    const names = specs.map((s) => s.name);
+    expect(names).toContain("run_shell"); // built-ins retained
+    expect(names[names.length - 1]).toBe("echo_env"); // appended after them
+    expect(new Set(names).size).toBe(names.length); // no duplicates
+  });
+
+  it("gates switch_environment behind approve; a non-gated extra tool runs unapproved", async () => {
+    const runtime = await freshRuntime();
+    const switchCb = vi.fn(async (target: string) => `switched to ${target}`);
+    const switchTool = createSwitchEnvironmentTool(switchCb, { environments: ["browser", "vm:node"] });
+    const approve = vi.fn(async () => "allow" as const);
+    const gateway = scriptedGateway([
+      toolCall("switch_environment", { target: "vm:node" }),
+      toolCall("echo_env", {}, "c2"),
+      final("done"),
+    ]);
+    const agent = new CodingAgent({ runtime, gateway, model, extraTools: [switchTool, echoTool], approve });
+    await agent.run("switch then echo");
+
+    expect(approve).toHaveBeenCalledTimes(1);
+    expect(approve).toHaveBeenCalledWith(expect.objectContaining({ tool: "switch_environment" }));
+    expect(switchCb).toHaveBeenCalledWith("vm:node");
+  });
+
+  it("a denied switch_environment never invokes the switch callback", async () => {
+    const runtime = await freshRuntime();
+    const switchCb = vi.fn(async () => "switched");
+    const switchTool = createSwitchEnvironmentTool(switchCb, { environments: ["vm:node"] });
+    const gateway = scriptedGateway([toolCall("switch_environment", { target: "vm:node" }), final("ok")]);
+    const events: AgentEvent[] = [];
+    const agent = new CodingAgent({
+      runtime,
+      gateway,
+      model,
+      extraTools: [switchTool],
+      approve: async () => "deny",
+      onEvent: (e) => events.push(e),
+    });
+    await agent.run("switch");
+
+    expect(switchCb).not.toHaveBeenCalled();
+    expect(
+      events.some(
+        (e) => e.type === "tool_result" && e.name === "switch_environment" && !e.ok && e.output === "Denied by the user.",
+      ),
+    ).toBe(true);
   });
 });
 

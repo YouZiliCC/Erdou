@@ -1,6 +1,7 @@
 import { V86 } from "v86";
 import type { GuestChannel } from "./guestd-client.js";
 import type { Fs9p } from "./fs-bridge.js";
+import { installEgressShim, type EgressFetch, type UpstreamFetch } from "./egress-shim.js";
 
 /** v86's in-JS TCP stream from FetchNetworkAdapter.connect(). The handshake is
  *  async — always write from the "connect" event, never immediately. The "close"
@@ -24,6 +25,9 @@ export interface TcpConn {
 export interface NetworkAdapter {
   tcp_probe(port: number): Promise<boolean>;
   connect(port: number): TcpConn;
+  /** Instance-property fetch the NAT relay uses for guest HTTP egress —
+   *  wrapped by the pypi egress shim at boot (Round 13). */
+  fetch: EgressFetch;
 }
 
 /** Pre-loaded boot assets — produced by a Node or browser loader, consumed by V86Host.
@@ -112,6 +116,11 @@ export class V86Host {
     };
     if (inputs.state) opt.initial_state = { buffer: inputs.state };
     this.emulator = this.makeEmulator(opt);
+    // Package egress (Round 13): wrap the NAT's fetch with the pypi shim —
+    // https upgrade in non-https contexts + simple-API link rewrite (pypi.org
+    // 403s plain http and links https wheels the NAT can't relay). Install now
+    // for the no-restore path; test fakes that model no NIC have nothing to wrap.
+    this.installEgress();
 
     const timeoutMs = opts.bootTimeoutMs ?? DEFAULT_BOOT_TIMEOUT_MS;
     await new Promise<void>((resolve, reject) => {
@@ -124,11 +133,26 @@ export class V86Host {
       );
       this.emulator.add_listener("emulator-ready", () => { clearTimeout(timer); resolve(); });
     });
+    // Re-install after emulator-ready. OBSERVED: at this point the live adapter's
+    // fetch is bare — the pre-ready wrap above did not reach the object the relay
+    // actually uses, so without this pip 403s (npm masks it via 301). The exact
+    // v86 internal cause (adapter not yet built at line 123 / reconstructed while
+    // restoring initial_state) is not asserted here — only the bare-after-ready
+    // symptom, which this re-install fixes. Idempotent (marker guard), so when the
+    // pre-ready object IS the live one this is a no-op. Found by the Round-13
+    // net-e2e acceptance suite; covered hermetically by v86-host.egress.test.ts.
+    this.installEgress();
     assertFs9pSymbols(this.emulator.fs9p);
     (this as { fs9p: Fs9p }).fs9p = this.emulator.fs9p as Fs9p;
   }
 
   run(): void { this.emulator.run(); }
+
+  /** Wrap the live NAT adapter's fetch with the pypi egress shim (idempotent). */
+  private installEgress(): void {
+    const net = this.emulator.network_adapter as { fetch?: UpstreamFetch } | undefined;
+    if (net && typeof net.fetch === "function") installEgressShim(net as { fetch: UpstreamFetch });
+  }
 
   private readonly inputSenders = new Map<number, (b: Uint8Array) => void>();
   private readonly flushTimers = new Set<ReturnType<typeof setTimeout>>();

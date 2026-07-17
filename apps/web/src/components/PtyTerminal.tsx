@@ -6,9 +6,12 @@ import { wirePtyTerminal } from "../lib/pty-terminal-wiring.js";
 
 /** An xterm.js terminal bound to a VM PtySession (streaming). Keystrokes → pty;
  *  pty output → xterm; resize propagates to the guest. The session is opened on
- *  mount and disposed on unmount. All session wiring (including the FU1 input
- *  gate) lives in lib/pty-terminal-wiring.ts; this component only owns the
- *  Terminal's lifecycle. */
+ *  mount (against whatever kernel `studio` points at THEN) and disposed on
+ *  unmount. On a vm→vm profile switch the guest changes but `studio` is stable,
+ *  so TerminalPanel keys this component on `studio.kernelGeneration` to force a
+ *  fresh mount → the effect re-runs and rebinds to the new guest's PTY. All
+ *  session wiring (including the FU1 input gate) lives in
+ *  lib/pty-terminal-wiring.ts; this component only owns the Terminal's lifecycle. */
 export function PtyTerminal({ studio }: { studio: Studio }) {
   const elRef = useRef<HTMLDivElement>(null);
   useEffect(() => {

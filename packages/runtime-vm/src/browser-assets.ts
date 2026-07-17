@@ -8,14 +8,15 @@ export interface IdbBlobStore {
 }
 
 export interface BrowserAssetOptions {
-  baseUrl: string;      // dir holding seabios.bin/vgabios.bin/kernel.bin/state.zst
+  baseUrl: string;      // dir holding seabios.bin/vgabios.bin/kernel.bin/state-<profile>.zst
   wasmUrl: string;      // served v86.wasm (pass new URL("...v86.wasm", import.meta.url).href)
+  profile: string;      // VM image profile — selects state-<profile>.zst and its cache lineage
   version: string;      // cache key for the state blob; bump on re-bake
-  /** When set, a cache-miss fetch first checks (baseUrl)/state.meta.json and
-   *  throws unless its `version` equals this — binds the fetched BYTES to the
-   *  cache key, so a stale on-disk state.zst (assets are gitignored) fail-fasts
-   *  instead of being cached under the new key forever. Cache hits skip the
-   *  check (validated when written). */
+  /** When set, a cache-miss fetch first checks (baseUrl)/state-<profile>.meta.json
+   *  and throws unless its `version` (and stamped `profile`) equal these — binds
+   *  the fetched BYTES to the cache key, so a stale or cross-linked on-disk state
+   *  image (assets are gitignored) fail-fasts instead of being cached under the
+   *  new key forever. Cache hits skip the check (validated when written). */
   expectedStateVersion?: string;
   memoryMB?: number;    // default 512 (must equal the baked state's)
   fetchImpl?: typeof fetch;
@@ -34,12 +35,14 @@ async function fetchBytes(f: typeof fetch, url: string): Promise<Uint8Array> {
   return new Uint8Array(await r.arrayBuffer());
 }
 
-/** Load browser boot inputs: state.zst is cache-first (IndexedDB, by version) then
- *  gzip-decompressed; bios/kernel are small and fetched fresh each boot. */
+/** Load browser boot inputs: state-<profile>.zst is cache-first (IndexedDB, by
+ *  profile:version) then gzip-decompressed; bios/kernel are small and fetched
+ *  fresh each boot. */
 export async function loadBrowserInputs(opts: BrowserAssetOptions): Promise<V86BootInputs> {
   const f = opts.fetchImpl ?? fetch;
   const idb = opts.idb ?? openIdbBlobStore();
-  const stateKey = `state:${opts.version}`;
+  const stateFile = `state-${opts.profile}`;
+  const stateKey = `state:${opts.profile}:${opts.version}`;
 
   let stateGz = await idb.get(stateKey);
   let state: Uint8Array | undefined;
@@ -52,28 +55,40 @@ export async function loadBrowserInputs(opts: BrowserAssetOptions): Promise<V86B
     }
   }
   if (!stateGz) {
+    const bakeHint = `re-run \`pnpm --filter @erdou/runtime-vm bake --profile ${opts.profile}\` before booting`;
     if (opts.expectedStateVersion !== undefined) {
-      let meta: { version?: string };
+      let meta: { version?: string; profile?: string };
       try {
-        meta = JSON.parse(new TextDecoder().decode(await fetchBytes(f, `${opts.baseUrl}/state.meta.json`))) as { version?: string };
+        meta = JSON.parse(new TextDecoder().decode(await fetchBytes(f, `${opts.baseUrl}/${stateFile}.meta.json`))) as { version?: string; profile?: string };
       } catch (e) { // 404 / SPA index fallback must still explain the fix, not just fail
         throw new Error(
-          `cannot verify state.zst version — state.meta.json unreadable (${e instanceof Error ? e.message : String(e)}): ` +
-          "stale or unlinked assets — re-run `pnpm --filter @erdou/runtime-vm bake` before booting",
+          `cannot verify ${stateFile}.zst version — ${stateFile}.meta.json unreadable (${e instanceof Error ? e.message : String(e)}): ` +
+          `stale or unlinked assets — ${bakeHint}`,
         );
       }
       if (meta.version !== opts.expectedStateVersion) {
         throw new Error(
-          `state.meta.json version ${JSON.stringify(meta.version ?? null)} != expected ${JSON.stringify(opts.expectedStateVersion)}: ` +
-          "stale state.zst on disk — re-run `pnpm --filter @erdou/runtime-vm bake` before booting",
+          `${stateFile}.meta.json version ${JSON.stringify(meta.version ?? null)} != expected ${JSON.stringify(opts.expectedStateVersion)}: ` +
+          `stale ${stateFile}.zst on disk — ${bakeHint}`,
+        );
+      }
+      if (meta.profile !== opts.profile) { // bakes stamp their profile — catches cross-linked files
+        throw new Error(
+          `${stateFile}.meta.json is a profile ${JSON.stringify(meta.profile ?? null)} bake, expected ${JSON.stringify(opts.profile)}: ` +
+          `cross-linked assets — ${bakeHint}`,
         );
       }
     }
-    stateGz = await fetchBytes(f, `${opts.baseUrl}/state.zst`);
+    stateGz = await fetchBytes(f, `${opts.baseUrl}/${stateFile}.zst`);
     state = await decompressGzip(stateGz);
     await idb.put(stateKey, stateGz).catch(() => {}); // caching is best-effort
-    for (const k of await idb.keys().catch(() => [])) { // evict other versions
-      if (k.startsWith("state:") && k !== stateKey) await idb.delete(k).catch(() => {});
+    for (const k of await idb.keys().catch(() => [])) {
+      // Evict ONLY this profile's stale versions — sibling profiles' ~40MB blobs
+      // survive a cross-profile switch (per-lineage cache, ≤3 blobs by design).
+      // Also a one-time sweep of the pre-R13 2-part `state:<version>` key, which
+      // would otherwise pin ~40MB forever.
+      const stale = (k.startsWith(`state:${opts.profile}:`) && k !== stateKey) || /^state:[^:]+$/.test(k);
+      if (stale) await idb.delete(k).catch(() => {});
     }
   }
   const [bios, vga, kernel] = await Promise.all([
