@@ -143,4 +143,23 @@ describe.skipIf(!RUN)("VmRuntime (gated e2e)", () => {
     expect(events.some((e) => e.type === "port.opened" && e.port === 8001)).toBe(false);
     await rt.shutdown();
   }, 60_000);
+
+  it("pty survives a synchronous per-keystroke burst larger than the 16-slot virtio RX ring (FU2)", async () => {
+    const rt = new VmRuntime(makeInputs);
+    await rt.boot();
+    const session = await rt.openPty();
+    let out = "";
+    const dec = new TextDecoder();
+    session.onData((d) => { out += dec.decode(d, { stream: true }); });
+    await waitFor(() => out.includes("$"), 15_000);
+    const enc = new TextEncoder();
+    // ~3x ring size, one write per char with NO awaits between — the exact shape of
+    // a busy browser tab flushing queued keystrokes. Before the capacity-aware
+    // sender, v86 silently dropped every byte past the 16th (incl. Enter).
+    for (const ch of "echo ERDOU_A; echo ERD''OU_MARK; echo ERDOU_B\n") session.write(enc.encode(ch));
+    // ERDOU_MARK appears in the OUTPUT only (typed echo contains the quotes).
+    await waitFor(() => out.includes("ERDOU_MARK"), 10_000);
+    await session.dispose();
+    await rt.shutdown();
+  }, 60_000);
 });
