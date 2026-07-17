@@ -92,6 +92,7 @@ input, textarea { font-family: var(--mono); }
 
 /* ---- title bar ---- */
 .titlebar { height:38px; flex:0 0 38px; display:flex; align-items:center; gap:10px; padding:0 12px; border-bottom:1px solid var(--border); background:var(--panel); }
+.wm-logo { flex:0 0 auto; width:20px; height:20px; border-radius:5px; object-fit:cover; margin-right:-4px; }
 .wm { font-weight:700; font-size:13px; letter-spacing:.3px; }
 .wm b { color: var(--accent); font-weight: 700; }
 .ws { color: var(--muted); font-size: 12px; }

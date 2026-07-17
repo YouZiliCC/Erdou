@@ -1,8 +1,17 @@
-# Erdou
+<p align="center">
+  <img src="docs/assets/erdou-logo.png" alt="Erdou" width="180" />
+</p>
 
-> An open-source browser operating environment where AI agents can build, run, test and ship software without local setup.
->
-> 一个让 AI Agent 能够在浏览器中自由开发、运行、测试和交付软件的开源操作环境。
+<h1 align="center">Erdou</h1>
+
+<p align="center">
+  <em>An open-source browser operating environment where AI agents can build, run, test and ship software without local setup.</em><br />
+  <em>一个让 AI Agent 能够在浏览器中自由开发、运行、测试和交付软件的开源操作环境。</em>
+</p>
+
+<p align="center">
+  <sub>Named after <b>二豆 (Erdou)</b> — a very good dog. 🐕</sub>
+</p>
 
 Erdou builds a browser-native operating environment — a virtual filesystem, processes, a shell, snapshots and virtual ports — that AI coding agents drive as if it were a real OS, with zero local install. See [`proposal_v1.md`](./proposal_v1.md) for the full vision.
 

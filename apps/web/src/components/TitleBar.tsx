@@ -16,6 +16,7 @@ export function TitleBar({
   const [, force] = useState(0);
   return (
     <header className="titlebar">
+      <img className="wm-logo" src="/erdou-logo-128.png" alt="" width="20" height="20" />
       <span className="wm">Er<b>dou</b></span>
       <span className="ws">— {workspace}</span>
       <span className="sp" />
