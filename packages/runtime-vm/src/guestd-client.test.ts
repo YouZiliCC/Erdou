@@ -159,6 +159,20 @@ describe("GuestdClient", () => {
     ).rejects.toThrow(/disposed/i);
   });
 
+  it("surfaces an unsolicited port-event (L) frame via onPortEvent", () => {
+    let push: (b: Uint8Array) => void = () => {};
+    const channel: GuestChannel = { send() {}, subscribe(cb) { push = cb; } };
+    const client = new GuestdClient(channel);
+    const events: Array<{ port: number; listening: boolean; loopback: boolean }> = [];
+    client.onPortEvent((e) => events.push(e));
+    push(encodeJsonFrame(FrameType.PORT_EVENT, 0, { port: 8000, listening: true, loopback: false }));
+    push(encodeJsonFrame(FrameType.PORT_EVENT, 0, { port: 8000, listening: false, loopback: false }));
+    expect(events).toEqual([
+      { port: 8000, listening: true, loopback: false },
+      { port: 8000, listening: false, loopback: false },
+    ]);
+  });
+
   it("ready() called AFTER dispose() rejects immediately (not hang)", async () => {
     const channel: GuestChannel = { send() {}, subscribe() {} };
     const client = new GuestdClient(channel);

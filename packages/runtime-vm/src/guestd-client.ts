@@ -68,6 +68,7 @@ export class GuestdClient {
   private readonly ptyOpenResolvers = new Map<number, (e: Error) => void>();
   private readyResolve?: (v: { pid: number }) => void;
   private readyReject?: (e: Error) => void;
+  private portEventCb?: (e: { port: number; listening: boolean; loopback: boolean }) => void;
   private readonly readyPromise: Promise<{ pid: number }>;
   private pingTimer: ReturnType<typeof setInterval> | undefined;
   private deadlineTimer: ReturnType<typeof setTimeout> | undefined;
@@ -86,6 +87,12 @@ export class GuestdClient {
   private clearReadyTimers(): void {
     if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = undefined; }
     if (this.deadlineTimer) { clearTimeout(this.deadlineTimer); this.deadlineTimer = undefined; }
+  }
+
+  /** Register a listener for unsolicited guest port events (from the guestd
+   *  /proc/net/tcp watcher). Idempotent-set: the latest callback wins. */
+  onPortEvent(cb: (e: { port: number; listening: boolean; loopback: boolean }) => void): void {
+    this.portEventCb = cb;
   }
 
   /** Resolve when guestd is reachable. After a state RESTORE the guest sits idle
@@ -147,6 +154,10 @@ export class GuestdClient {
   private onFrame(type: string, id: number, body: Uint8Array): void {
     if (this.disposed) return;
     if (type === FrameType.READY) { this.readyResolve?.(decodeJson(body) as { pid: number }); return; }
+    if (type === FrameType.PORT_EVENT) {
+      this.portEventCb?.(decodeJson(body) as { port: number; listening: boolean; loopback: boolean });
+      return;
+    }
     const ctl = this.control.get(id);
     if (ctl) { ctl({ type, body }); return; }
     const p = this.pending.get(id);

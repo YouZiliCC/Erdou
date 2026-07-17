@@ -119,6 +119,58 @@ def list_procs():
             continue
     return out
 
+# --- port watcher: mirror of src/proc-net-parse.ts (keep in sync) ---
+_V4_ANY = "00000000"
+_V6_ANY = "00000000000000000000000000000000"
+_ETH0_HEX = "6456A8C0"  # 192.168.86.100 little-endian
+
+def _parse_listening(text):
+    out = {}
+    for line in text.split("\n"):
+        cols = line.split()
+        if len(cols) < 4 or cols[3] != "0A":
+            continue
+        local = cols[1]
+        if ":" not in local:
+            continue
+        iphex, porthex = local.split(":", 1)
+        try:
+            port = int(porthex, 16)
+        except ValueError:
+            continue
+        if port <= 0:
+            continue
+        ip = iphex.upper()
+        reachable = ip in (_V4_ANY, _V6_ANY, _ETH0_HEX)
+        loop = not reachable
+        prev = out.get(port)
+        out[port] = loop if prev is None else (prev and loop)
+    return out
+
+def port_watcher():
+    last = {}
+    while True:
+        cur = {}
+        for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+            try:
+                with open(path) as f:
+                    text = f.read()
+            except OSError:
+                continue
+            for port, loop in _parse_listening(text).items():
+                prev = cur.get(port)
+                cur[port] = loop if prev is None else (prev and loop)
+        for port, loop in cur.items():
+            if port not in last or last[port] != loop:
+                send_json("L", 0, {"port": port, "listening": True, "loopback": loop})
+        for port, loop in last.items():
+            if port not in cur:
+                send_json("L", 0, {"port": port, "listening": False, "loopback": loop})
+        last = cur
+        time.sleep(0.5)
+
+threading.Thread(target=port_watcher, daemon=True).start()
+
 send_json("R", 0, {"pid": os.getpid()})
 
 # Frame reader loop
