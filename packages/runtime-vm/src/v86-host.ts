@@ -2,6 +2,30 @@ import { V86 } from "v86";
 import type { GuestChannel } from "./guestd-client.js";
 import type { Fs9p } from "./fs-bridge.js";
 
+/** v86's in-JS TCP stream from FetchNetworkAdapter.connect(). The handshake is
+ *  async — always write from the "connect" event, never immediately. The "close"
+ *  event is unreliable (may not fire on the guest FIN); never block solely on it. */
+export interface TcpConn {
+  on(event: "connect", cb: () => void): void;
+  on(event: "data", cb: (data: Uint8Array) => void): void;
+  on(event: "close", cb: () => void): void;
+  write(bytes: Uint8Array): void;
+  /** Drive OUR side's close so v86 releases the conn from `network_adapter.tcp_conn`.
+   *  v86's `TCPConnection.prototype.close` completes an active close, OR — when the
+   *  guest already FIN'd (python HTTP/1.0 responds then closes, leaving the conn in
+   *  `close-wait`) — finishes the passive close (→ `last-ack` → `release()`). Without
+   *  this call the conn is retained forever after a guest FIN, leaking per request. */
+  close(): void;
+}
+
+/** v86's FetchNetworkAdapter (in-JS NAT). Addressing is hard-coded at
+ *  construction (router_ip=192.168.86.1, vm_ip=192.168.86.100); connect/probe
+ *  target the guest regardless of DHCP history. */
+export interface NetworkAdapter {
+  tcp_probe(port: number): Promise<boolean>;
+  connect(port: number): TcpConn;
+}
+
 /** Pre-loaded boot assets — produced by a Node or browser loader, consumed by V86Host.
  *  Separating loading from construction lets one host boot in either environment. */
 export interface V86BootInputs {
@@ -52,6 +76,13 @@ export class V86Host {
       memory_size: inputs.memoryMB * 1024 * 1024,
       filesystem: {},
       virtio_console: true,
+      // Networking (Round 12): a virtio NIC + v86's in-JS fetch-NAT. The NIC MUST
+      // be present in the baked state (adding it only at restore crashes v86's
+      // per-device set_state). preserve_mac_from_state_image re-teaches the freshly
+      // constructed adapter the guest MAC on restore — WITHOUT it every
+      // connect/tcp_probe hangs forever (verified spike).
+      net_device: { relay_url: "fetch", type: "virtio" },
+      preserve_mac_from_state_image: true,
       autostart: false,
       disable_keyboard: true,
       disable_speaker: true,
@@ -105,6 +136,12 @@ export class V86Host {
       send: (s: string) => this.emulator.serial0_send(s),
       onByte: (cb: (b: number) => void) => this.emulator.add_listener("serial0-output-byte", cb),
     };
+  }
+
+  /** v86's in-JS network adapter, for VmRuntime.dispatch's reverse-proxy into a
+   *  real guest server. Available after boot(). */
+  networkAdapter(): NetworkAdapter {
+    return this.emulator.network_adapter as NetworkAdapter;
   }
 
   async saveState(): Promise<Uint8Array> {

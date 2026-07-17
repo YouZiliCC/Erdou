@@ -5,5 +5,5 @@
 import wasmUrl from "v86/build/v86.wasm?url";
 
 export function vmAssets(): { baseUrl: string; wasmUrl: string; version: string } {
-  return { baseUrl: "/vm-assets", wasmUrl, version: "alpine-3.24.1-r11b" };
+  return { baseUrl: "/vm-assets", wasmUrl, version: "alpine-3.24.1-r12-net-watch" };
 }

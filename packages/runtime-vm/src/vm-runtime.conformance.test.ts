@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
+import type { RuntimeEvent } from "@erdou/runtime-contract";
 import { runConformance } from "@erdou/conformance";
 import { VmRuntime } from "./vm-runtime.js";
+import { V86Host } from "./v86-host.js";
 import { assetsPresent, defaultAssets, loadNodeInputs } from "./node.js";
 
 const RUN = assetsPresent() && process.env.ERDOU_VM_E2E === "1";
@@ -50,4 +52,95 @@ describe.skipIf(!RUN)("VmRuntime (gated e2e)", () => {
     expect(new TextDecoder().decode(data)).toBe("x");
     await rt.shutdown();
   });
+
+  it("restores the networked state cleanly: eth0 has 192.168.86.100", async () => {
+    const rt = new VmRuntime(makeInputs);
+    await rt.boot();
+    // `ip` is not a standalone binary in the Alpine guest chroot's PATH; busybox
+    // provides it as an applet (`busybox ip …`). This proves the restored state
+    // booted with eth0 already DHCP-addressed (192.168.86.100), no per-boot setup.
+    const p = await rt.exec("busybox ip -o addr show eth0");
+    expect(await p.stdout.text()).toContain("192.168.86.100");
+    await rt.shutdown();
+  });
+
+  it("V86Host.networkAdapter() is live after boot from the networked state", async () => {
+    const host = new V86Host();
+    await host.boot(await makeInputs(), { bootTimeoutMs: 30_000 });
+    host.run();
+    const net = host.networkAdapter();
+    expect(net).toBeDefined();
+    expect(typeof net.tcp_probe).toBe("function");
+    expect(typeof net.connect).toBe("function");
+    await host.destroy();
+  });
+
+  it("dispatch reverse-proxies to a real guest HTTP server bound to 0.0.0.0", async () => {
+    const rt = new VmRuntime(makeInputs);
+    await rt.boot();
+    await rt.writeFile("/index.html", "hello-from-guest-dispatch");
+    // Detached: exec resolves on process START; the server binds after cold-start.
+    await rt.exec("python3 -m http.server 8000 --bind 0.0.0.0");
+    const get = () => rt.dispatch(8000, { method: "GET", url: "/index.html", headers: {}, body: new Uint8Array() });
+    let ok: import("@erdou/runtime-contract").HttpResponse | undefined;
+    const deadline = Date.now() + 40_000; // python cold-start ~16s — poll generously
+    while (Date.now() < deadline) {
+      const r = await get();
+      if (r.status === 200) { ok = r; break; }
+      await new Promise((res) => setTimeout(res, 1000));
+    }
+    expect(ok).toBeDefined();
+    expect(new TextDecoder().decode(ok!.body)).toContain("hello-from-guest-dispatch");
+    // Leak fix (conn.close()): many sequential dispatches must NOT grow the
+    // emulator's retained TCP-connection table. Each guest FIN parks the conn in
+    // `close-wait`; dispatch()'s conn.close() completes the passive close →
+    // v86 release() → delete network_adapter.tcp_conn[tuple]. Without the fix the
+    // table would hold ~N entries after N dispatches (leaked forever).
+    const net = (rt as unknown as { host: V86Host }).host.networkAdapter() as unknown as { tcp_conn: Record<string, unknown> };
+    const N = 6;
+    for (let i = 0; i < N; i++) {
+      const r = await get();
+      expect(r.status).toBe(200); // reuse still works after close() (fix didn't break dispatch)
+    }
+    // Bounded, not N: at most a couple may still be finishing their last-ack.
+    expect(Object.keys(net.tcp_conn).length).toBeLessThan(N);
+    // A closed port probes false → 502, no hang.
+    const closed = await rt.dispatch(9999, { method: "GET", url: "/", headers: {}, body: new Uint8Array() });
+    expect(closed.status).toBe(502);
+    await rt.shutdown();
+  }, 90_000);
+
+  const waitFor = async (pred: () => boolean, ms: number): Promise<void> => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (pred()) return;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    throw new Error(`waitFor: condition not met within ${ms}ms`);
+  };
+
+  it("emits port.opened for a 0.0.0.0 guest server and port.closed when it dies", async () => {
+    const rt = new VmRuntime(makeInputs);
+    await rt.boot();
+    const events: RuntimeEvent[] = [];
+    rt.subscribe((e) => events.push(e));
+    const server = await rt.exec("python3 -m http.server 8000 --bind 0.0.0.0");
+    await waitFor(() => events.some((e) => e.type === "port.opened" && e.port === 8000), 40_000);
+    const opened = events.find((e) => e.type === "port.opened" && e.port === 8000);
+    expect(opened && opened.type === "port.opened" && opened.url).toBe("/__port__/8000/");
+    await rt.kill(server.pid, "SIGKILL");
+    await waitFor(() => events.some((e) => e.type === "port.closed" && e.port === 8000), 15_000);
+    await rt.shutdown();
+  }, 70_000);
+
+  it("does NOT emit port.opened for a 127.0.0.1-only server (emits resource.warning)", async () => {
+    const rt = new VmRuntime(makeInputs);
+    await rt.boot();
+    const events: RuntimeEvent[] = [];
+    rt.subscribe((e) => events.push(e));
+    await rt.exec("python3 -m http.server 8001 --bind 127.0.0.1");
+    await waitFor(() => events.some((e) => e.type === "resource.warning" && e.resource === "port:8001"), 40_000);
+    expect(events.some((e) => e.type === "port.opened" && e.port === 8001)).toBe(false);
+    await rt.shutdown();
+  }, 60_000);
 });

@@ -2,6 +2,7 @@
 export const FrameType = {
   READY: "R", STARTED: "S", STDOUT: "O", STDERR: "E", EXIT: "X", PROCS: "P", ERROR: "!",
   EXEC: "x", SPAWN: "s", KILL: "k", PS: "p", PING: "i", PTY_OPEN: "t", PTY_OPENED: "T",
+  PORT_EVENT: "L",
 } as const;
 
 export interface Frame {

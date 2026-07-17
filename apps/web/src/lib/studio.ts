@@ -248,6 +248,9 @@ export class Studio {
       } else if (e.type === "port.closed") {
         this.openPorts = this.openPorts.filter((p) => p.port !== e.port);
         this.notify();
+      } else if (e.type === "resource.warning") {
+        this.logSystem("system", e.detail);
+        this.notify();
       }
     });
   }

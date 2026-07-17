@@ -53,6 +53,7 @@ const emulator = new V86({
   memory_size: m.memoryMB * 1024 * 1024,
   filesystem: {},
   virtio_console: true,
+  net_device: { relay_url: "fetch", type: "virtio" }, // Round 12: virtio NIC baked into the saved device set
   autostart: false,
   disable_keyboard: true,
   cmdline: "console=ttyS0 tsc=reliable mitigations=off random.trust_cpu=on",
@@ -100,6 +101,12 @@ await sh(GUEST_SETUP_CMD, "SETUPDONE"); console.log("  marker: SETUPDONE (bind m
 await sh(PYCACHE_WARMUP_CMD, "WARMED"); console.log("  marker: WARMED (pycache warmed, rw)");         // warm pycache into sys-root (rw) once
 await sh(REMOUNT_RO_CMD, "ROREADY"); console.log("  marker: ROREADY (system view frozen read-only)");            // freeze system view read-only
 await sh(LAUNCH_GUESTD_CMD, "GDLAUNCHED"); console.log("  marker: GDLAUNCHED (resident guestd launched)");      // resident guestd inside the workspace chroot
+// 4.5/6 bring eth0 up + DHCP so the saved state boots with 192.168.86.100
+// already assigned (buildroot busybox ships udhcpc — no apk change). The
+// marker string is real command output, not appended text (quote-split like
+// the other markers so the tty echo can't self-match it).
+await sh("ip link set eth0 up; udhcpc -i eth0 -n -q 2>&1; ip -o addr show eth0 2>&1; echo NETU''P", "NETUP", 30000);
+console.log("  marker: NETUP (eth0 up + DHCP lease 192.168.86.100)");
 await new Promise((r) => setTimeout(r, 1500));  // let guestd reach its read loop
 
 console.log("5/6 save_state (self-contained: 9p FS rides inside)");
@@ -110,7 +117,7 @@ console.log("6/6 zstd-compress → assets/state.zst");
 // gzip is fine for the MVP if zstd bindings aren't present; keep the extension honest.
 const compressed = zlib.gzipSync(state, { level: 9 });
 fs.writeFileSync(path.join(assets, "state.zst"), compressed);
-fs.writeFileSync(path.join(assets, "state.meta.json"), JSON.stringify({ rawBytes: state.length, compressedBytes: compressed.length, alpine: ver, codec: "gzip" }, null, 2));
+fs.writeFileSync(path.join(assets, "state.meta.json"), JSON.stringify({ rawBytes: state.length, compressedBytes: compressed.length, alpine: ver, codec: "gzip", net: true }, null, 2));
 // assets.ts decompresses state.zst -> state.bin and caches it (only writes if
 // absent). Drop the stale cache now so a rebake's new state.zst is the one
 // that actually gets loaded, not a leftover decompression of the old one.

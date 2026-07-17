@@ -52,6 +52,10 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
    *  `shouldRerun`) so a run's OWN writes don't re-trigger itself forever;
    *  only a fsVersion bump strictly AFTER this point is a real external edit. */
   const lastRunFsVersion = useRef(0);
+  /** The VM's detached server pid from the last run (real guest socket), so the
+   *  next run — or an explicit Stop — can kill it: a real socket stays bound
+   *  until the process dies (unlike the browser kernel's virtual-port unregister). */
+  const servePid = useRef<number | null>(null);
 
   // Derived, not stored: a stale selection (its port already stopped) just
   // falls back to nothing selected instead of needing an effect to reconcile.
@@ -70,6 +74,7 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
     setRunning(true);
     try {
       const result = await runServeCommand(studio.runtime, studio.shell, commandLine);
+      servePid.current = result.pid ?? null;
       if (!result.ok) {
         setErrors([result.stderr?.trim() || result.stdout?.trim() || `exited with code ${result.code}`]);
         setOutput(null);
@@ -123,6 +128,13 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
   async function doRun(action: () => Promise<{ ok: boolean; opened: number[] }>): Promise<void> {
     busy.current = true;
     try {
+      // Kill the previous detached server (VM path) before the close-then-serve,
+      // so a live re-run can rebind the port — a real guest socket stays bound
+      // until the process dies. No-op on the browser kernel (servePid is null).
+      if (servePid.current !== null) {
+        await studio.runtime.kill(servePid.current).catch(() => {});
+        servePid.current = null;
+      }
       for (const p of openedPorts.current) await studio.closePort(p);
       openedPorts.current = [];
       const result = await action();
@@ -176,6 +188,14 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
   }, [studio.fsVersion, live]);
 
   function stop(port: number): void {
+    // On the VM path the tracked pid IS the real guest server — closePort alone
+    // is pure bookkeeping and would leave it bound + running, so kill it too.
+    // Browser-safe: servePid stays null on the browser kernel, so kill is never
+    // called there.
+    if (servePid.current !== null) {
+      void studio.runtime.kill(servePid.current).catch(() => {});
+      servePid.current = null;
+    }
     void studio.closePort(port);
     if (selectedPort === port) setSelectedPort(null);
   }

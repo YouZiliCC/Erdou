@@ -3,38 +3,110 @@ import type { RpcShellSession } from "./kernel.js";
 
 export interface RunServeResult {
   ok: boolean;
-  /** Ports that opened during this run, in open order (captured from the
-   *  event subscription itself — never by diffing a ports list afterwards). */
+  /** Ports that opened during this run, in open order (captured from the event
+   *  subscription, never by diffing a ports list afterwards). */
   openedPorts: number[];
+  /** Ports the server bound loopback-only (127.0.0.1) — reachable via the guest
+   *  loopback, NOT previewable. Non-empty ⇒ show a "bind 0.0.0.0" hint. */
+  loopbackPorts: number[];
+  /** The detached server's pid (real-OS path only), so the caller can stop it
+   *  before re-serving — a real guest socket stays bound until the process dies. */
+  pid?: number;
   /** Present when the command exited. */
   code?: number;
   stdout?: string;
   stderr?: string;
 }
 
+type ServeRuntime = Pick<Runtime, "subscribe" | "getCapabilities" | "exec">;
+
+/** python `-m http.server` cold-start (~16s) + bind + the guestd watcher poll. */
+const VM_SERVE_TIMEOUT_MS = 45_000;
+
 /**
- * Run a (possibly serving) command without assuming it exits OR that
- * `port.opened` lands in the same tick (the contract allows async delivery).
- *
- * Resolution rules:
- *  - The command exits → ok iff exit code 0, with code/stdout/stderr. On a
- *    clean exit with no port seen yet, one macrotask of grace lets an
- *    async-delivered `port.opened` land first.
- *  - A `port.opened` arrives while the command is still running → one
- *    macrotask of grace for a fast exit (the simulated kernel's serve returns
- *    immediately — its stdout should make the result); if the command still
- *    hasn't exited by then it is a real blocking server, and the run settles
- *    as ok with the port (we deliberately never wait for a server's exit —
- *    note: its event subscription then stays live until the process ends,
- *    which the browser kernel's registration-model serve always does; a VM
- *    kernel revisits this in Round 11).
+ * Run a (possibly serving) command. Capability-gated:
+ *  - realOs (VM): a real server BLOCKS, so start it DETACHED via `runtime.exec`
+ *    (which resolves on process START, never awaiting exit) and settle on the
+ *    FIRST of `port.opened` (ok), a loopback-bind `resource.warning` (ok:false
+ *    + hint), a process exit before any port (ok:false + stderr), or a timeout.
+ *  - otherwise (browser): the simulated kernel's serve returns after
+ *    registering, so run it through the shell and settle on exit/port.
  * Never rejects — failures come back as `ok: false`.
  */
 export function runServeCommand(
-  runtime: Pick<Runtime, "subscribe">,
+  runtime: ServeRuntime,
   shell: RpcShellSession,
   commandLine: string,
 ): Promise<RunServeResult> {
+  return runtime.getCapabilities().then((caps) =>
+    caps.realOs ? runServeDetached(runtime, commandLine) : runServeRegistering(runtime, shell, commandLine),
+  );
+}
+
+function runServeDetached(runtime: ServeRuntime, commandLine: string): Promise<RunServeResult> {
+  return new Promise((resolve) => {
+    const openedPorts: number[] = [];
+    const loopbackPorts: number[] = [];
+    let settled = false;
+    let pid: number | undefined;
+    const settle = (r: RunServeResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      unsub();
+      resolve(r);
+    };
+    const unsub = runtime.subscribe((e: RuntimeEvent) => {
+      if (e.type === "port.opened") {
+        openedPorts.push(e.port);
+        settle({ ok: true, openedPorts: [...openedPorts], loopbackPorts: [...loopbackPorts], pid });
+      } else if (e.type === "resource.warning" && e.resource.startsWith("port:")) {
+        // A loopback-only bind: VmRuntime emits the existing `resource.warning`
+        // event (Task 5) rather than a new contract member; recover the port
+        // number from `resource` ("port:<n>").
+        const port = Number(e.resource.slice("port:".length));
+        loopbackPorts.push(port);
+        // Carry the hint as `stderr` (mirroring the timeout settle) so the Preview
+        // panel shows "bind 0.0.0.0" instead of a misleading "exited with code
+        // undefined" — a loopback bind is the most common preview failure.
+        settle({
+          ok: false,
+          openedPorts: [...openedPorts],
+          loopbackPorts: [...loopbackPorts],
+          pid,
+          stderr: `Server on port ${port} is bound to loopback (127.0.0.1) — bind 0.0.0.0 to make it previewable.`,
+        });
+      }
+    });
+    const timer = setTimeout(
+      () =>
+        settle({
+          ok: false,
+          openedPorts: [...openedPorts],
+          loopbackPorts: [...loopbackPorts],
+          pid,
+          stderr: `no port opened within ${VM_SERVE_TIMEOUT_MS / 1000}s (does the server bind 0.0.0.0?)`,
+        }),
+      VM_SERVE_TIMEOUT_MS,
+    );
+    // Start detached: resolves on process START; we NEVER await its exit.
+    runtime.exec(commandLine).then(
+      (handle) => {
+        pid = handle.pid;
+        // If it exits BEFORE opening a port (e.g. a crash / EADDRINUSE), surface it.
+        void handle.wait().then(async (status) => {
+          if (settled) return;
+          const stderr = await handle.stderr.text();
+          settle({ ok: false, openedPorts: [...openedPorts], loopbackPorts: [...loopbackPorts], pid, code: status.code, stderr });
+        });
+      },
+      (err: unknown) =>
+        settle({ ok: false, openedPorts: [], loopbackPorts: [], code: -1, stderr: err instanceof Error ? err.message : String(err) }),
+    );
+  });
+}
+
+function runServeRegistering(runtime: ServeRuntime, shell: RpcShellSession, commandLine: string): Promise<RunServeResult> {
   return new Promise((resolve) => {
     const openedPorts: number[] = [];
     let settled = false;
@@ -46,7 +118,7 @@ export function runServeCommand(
       setTimeout(() => {
         if (!settled) {
           settled = true;
-          resolve({ ok: true, openedPorts });
+          resolve({ ok: true, openedPorts, loopbackPorts: [] });
         }
       }, 0);
     });
@@ -54,25 +126,19 @@ export function runServeCommand(
       async (r) => {
         exited = true;
         if (r.code === 0 && openedPorts.length === 0) {
-          // Let an async-delivered port.opened land before concluding "no port".
           await new Promise((tick) => setTimeout(tick, 0));
         }
         unsub();
         if (settled) return;
         settled = true;
-        resolve({ ok: r.code === 0, openedPorts, code: r.code, stdout: r.stdout, stderr: r.stderr });
+        resolve({ ok: r.code === 0, openedPorts, loopbackPorts: [], code: r.code, stdout: r.stdout, stderr: r.stderr });
       },
       (err: unknown) => {
         exited = true;
         unsub();
         if (settled) return;
         settled = true;
-        resolve({
-          ok: false,
-          openedPorts,
-          code: -1,
-          stderr: err instanceof Error ? err.message : String(err),
-        });
+        resolve({ ok: false, openedPorts, loopbackPorts: [], code: -1, stderr: err instanceof Error ? err.message : String(err) });
       },
     );
   });
