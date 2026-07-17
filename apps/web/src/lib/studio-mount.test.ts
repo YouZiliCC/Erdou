@@ -1,3 +1,4 @@
+import "fake-indexeddb/auto";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Studio } from "./studio.js";
 import type { DirHandleLike, FileHandleLike, MountMtimes } from "./local-mount.js";
@@ -139,5 +140,55 @@ describe("Studio mount watcher", () => {
     // Further ticks (interval already cleared) must not resurrect the pull.
     await vi.advanceTimersByTimeAsync(10_000);
     expect(await studio.readFileText("/a.txt")).toBe("v1");
+  });
+});
+
+describe("Studio.reselectFolder — a folder swap REPLACES the workspace (data safety)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("document", { hidden: false });
+    vi.stubGlobal("window", { addEventListener: vi.fn(), removeEventListener: vi.fn() });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("swapping folder A→B clears A out of the VFS and the auto-save never mirrors A's files onto B's disk", async () => {
+    // Folder A is the initially-mounted project.
+    const folderA = new MockDir("project-A");
+    folderA.children.set("a-only.txt", new MockFile(enc.encode("A"), 1000));
+
+    const studio = new Studio();
+    // boot() wires the file.changed → folder auto-save subscription — the exact
+    // vector the bug rides (mount+load emits file.changed → debounced saveToFolder).
+    await studio.boot();
+    await studio.mountFolder(folderA);
+    expect(await studio.readFileText("/a-only.txt")).toBe("A");
+
+    // The re-select picker returns a DIFFERENT folder B (no a-only.txt).
+    const folderB = new MockDir("project-B");
+    folderB.children.set("b-only.txt", new MockFile(enc.encode("B"), 2000));
+    (window as unknown as { showDirectoryPicker: () => Promise<DirHandleLike> }).showDirectoryPicker =
+      async () => folderB;
+
+    vi.useFakeTimers();
+    const ok = await studio.reselectFolder();
+    expect(ok).toBe(true);
+    expect(studio.mount).toBe(folderB);
+
+    // The workspace is now B alone — NOT A ∪ B: A's file is gone, B's is present.
+    expect(studio.fs.exists("/a-only.txt")).toBe(false);
+    expect(await studio.readFileText("/b-only.txt")).toBe("B");
+
+    // Keep working in B: an edit schedules the debounced folder auto-save, which
+    // mirrors the WHOLE workspace back to the mounted folder (B). This is exactly
+    // when a leaked A-file would be written onto B's real disk.
+    studio.fs.writeFile("/notes.txt", enc.encode("kept working in B"));
+    await vi.advanceTimersByTimeAsync(1000);
+
+    // B's on-disk contents: only B's own file + the new edit — NEVER A's file.
+    expect(folderB.children.has("a-only.txt")).toBe(false);
+    expect(folderB.children.has("b-only.txt")).toBe(true);
+    expect(folderB.children.has("notes.txt")).toBe(true);
   });
 });

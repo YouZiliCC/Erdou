@@ -243,6 +243,10 @@ export class Studio {
   private mountWatch?: { interval: ReturnType<typeof setInterval>; onFocus: () => void };
   /** Set once a rescan fails, so we log it only once instead of every 5s until a rescan succeeds again. */
   private mountRescanFailed = false;
+  /** True only while a folder SWAP (re-select) is repointing the mount to a
+   *  different disk folder. Suspends the folder auto-save for the whole swap so
+   *  the clear+load's file.changed churn can never mirror onto the wrong disk. */
+  private swappingFolder = false;
 
   get activeRun(): Run | undefined {
     return this.runs.find((r) => r.id === this.activeRunId);
@@ -682,6 +686,13 @@ export class Studio {
   }
 
   private scheduleFolderSave(): void {
+    // A folder swap (re-select) is mid-flight repointing the mount to a DIFFERENT
+    // folder: the clear-then-load emits file.changed for every entry, and letting
+    // any of that schedule a save would mirror a half-swapped workspace onto disk
+    // (the old project onto the new folder, or a partially-loaded new folder onto
+    // the old one). swapMountedFolder re-enables saving once the new folder is the
+    // sole source of truth.
+    if (this.swappingFolder) return;
     if (this.folderSaveTimer) clearTimeout(this.folderSaveTimer);
     this.folderSaveTimer = setTimeout(() => void this.saveToFolder(), 600);
   }
@@ -737,18 +748,58 @@ export class Studio {
   }
 
   /** Manual "Re-select folder": re-run the directory picker to swap to a
-   *  DIFFERENT local folder, replacing the current mount (`mountFolder` persists
-   *  + loads the new handle). Needs a user gesture. Returns true if a new folder
-   *  was mounted, false if the user cancelled the picker. */
+   *  DIFFERENT local folder, replacing the current mount. Needs a user gesture.
+   *  Returns true if a new folder was mounted, false if the user cancelled the
+   *  picker. Routes through `swapMountedFolder` (NOT the additive `mountFolder`)
+   *  so the newly-picked folder becomes the sole source of truth. */
   async reselectFolder(): Promise<boolean> {
     const picker = (window as unknown as { showDirectoryPicker?: (o?: unknown) => Promise<unknown> })
       .showDirectoryPicker;
     if (!picker) throw new Error("Folder mounting needs the File System Access API — use Chrome or Edge.");
     const handle = await reselectFolderOp(
       () => picker({ mode: "readwrite" }) as Promise<DirHandleLike>,
-      (h) => this.mountFolder(h),
+      (h) => this.swapMountedFolder(h),
     );
     return handle !== null;
+  }
+
+  /**
+   * Swap the mounted folder for a DIFFERENT one, which becomes the SOLE source
+   * of truth. Distinct from the INITIAL `mountFolder` (additive on purpose — it
+   * carries in-browser work onto the freshly-picked disk): a swap must NOT let
+   * the previous project bleed onto the new folder. `loadFolderIntoVfs` only
+   * ever ADDS files, so without clearing first the workspace would become
+   * old ∪ new and the ~600 ms folder auto-save would then mirror the old
+   * project's files onto the new folder's real disk (e.g. dirtying a `.git`
+   * repo). So: suspend the folder auto-save for the whole swap, clear the
+   * previous project out of the VFS (keeping the VM's image-owned root dirs) and
+   * drop its now-stale mtimes, THEN load the new folder via `mountFolder`.
+   */
+  private async swapMountedFolder(handle: DirHandleLike): Promise<void> {
+    this.swappingFolder = true;
+    // Kill any save the OLD folder had pending — it must not fire against the new one.
+    if (this.folderSaveTimer) {
+      clearTimeout(this.folderSaveTimer);
+      this.folderSaveTimer = undefined;
+    }
+    try {
+      this.clearWorkspace();
+      this.mountMtimes.clear();
+      await this.mountFolder(handle);
+    } finally {
+      this.swappingFolder = false;
+    }
+  }
+
+  /** Delete every project entry from the VFS root, leaving the VM kernel's
+   *  image-owned root dirs (`VM_PRESERVE_DIRS` — skeleton bind mounts + baked
+   *  /etc,/root) untouched. Mirrors `copyWorkspace`'s top-level clear; used by a
+   *  folder swap so the newly-mounted folder is the workspace's only source. */
+  private clearWorkspace(): void {
+    for (const entry of this.fs.readdir("/")) {
+      if (VM_PRESERVE_DIRS.includes(entry.name)) continue;
+      this.fs.rm(`/${entry.name}`, { recursive: true, force: true });
+    }
   }
 
   private scheduleSave(): void {
