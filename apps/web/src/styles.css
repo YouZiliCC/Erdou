@@ -1,8 +1,11 @@
+/* Ink (default dark). `--on-accent` = readable text ON the accent fill; every
+   accent-tint below derives from --accent via color-mix, so a theme only
+   needs to set --accent and the washes/borders recolor with it. */
 :root {
   --bg:#0d0d0d; --panel:#141414; --side:#0f0f0f; --elev:#1c1c1c; --elev2:#232323;
   --border:rgba(255,255,255,.08); --border2:rgba(255,255,255,.05);
   --ink:#ededed; --muted:#8b8b8b; --faint:#5c5c5c;
-  --accent:#58a6ff; --green:#3fb950; --red:#f85149; --purple:#c695c6; --amber:#d29922;
+  --accent:#58a6ff; --on-accent:#00121f; --green:#3fb950; --red:#f85149; --purple:#c695c6; --amber:#d29922;
   --sans:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
   --radius:8px;
@@ -13,10 +16,26 @@
   --border:#e5e5e5; --border2:#ececec; --ink:#0d0d0d; --muted:#6e6e80; --faint:#9a9aa5;
   color-scheme: light;
 }
+/* 二豆 (Erdou) — warm dark, drawn from the logo: espresso ground, sienna coat
+   accent, amber eyes, cream muzzle for text. */
+:root[data-theme="erdou"] {
+  --bg:#18110b; --panel:#20160d; --side:#150f09; --elev:#2b1e12; --elev2:#372718;
+  --border:rgba(240,205,150,.12); --border2:rgba(240,205,150,.06);
+  --ink:#f1e3c9; --muted:#b0906a; --faint:#79613f;
+  --accent:#e07a3c; --on-accent:#2a1405; --green:#93b054; --red:#e2603c; --purple:#e0928f; --amber:#e6ad3d;
+  color-scheme: dark;
+}
+/* Cream — warm light: ivory ground, deep sienna accent for contrast, cocoa text. */
+:root[data-theme="cream"] {
+  --bg:#fbf5e9; --panel:#f4ebd8; --side:#efe5cf; --elev:#fffdf6; --elev2:#eaddc3;
+  --border:#e4d5b9; --border2:#eee2c9; --ink:#2c1d10; --muted:#7c6647; --faint:#ab936a;
+  --accent:#c15e22; --on-accent:#fbf5e9; --green:#6f9a3c; --red:#c8492a; --purple:#b56f6c; --amber:#b8801a;
+  color-scheme: light;
+}
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; }
 body { margin:0; background:var(--bg); color:var(--ink); font-family:var(--sans); font-size:13px; }
-::selection { background: rgba(88, 166, 255, 0.28); }
+::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
 button { font-family: var(--sans); cursor: pointer; }
 input, textarea { font-family: var(--mono); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -45,12 +64,12 @@ input, textarea { font-family: var(--mono); }
 
 /* generic chips / buttons used across panels */
 .chip { font-size:10px; padding:1.5px 8px; border-radius:20px; border:1px solid var(--border); color:var(--muted); display:inline-flex; align-items:center; gap:5px; }
-.chip.run,.chip.running{color:var(--accent);border-color:rgba(88,166,255,.35);}
-.chip.review{color:var(--purple);border-color:rgba(198,149,198,.35);}
-.chip.done,.chip.exited{color:var(--green);border-color:rgba(63,185,80,.3);}
-.chip.error,.chip.killed{color:var(--red);border-color:rgba(248,81,73,.3);}
+.chip.run,.chip.running{color:var(--accent);border-color:color-mix(in srgb, var(--accent) 35%, transparent);}
+.chip.review{color:var(--purple);border-color:color-mix(in srgb, var(--purple) 35%, transparent);}
+.chip.done,.chip.exited{color:var(--green);border-color:color-mix(in srgb, var(--green) 32%, transparent);}
+.chip.error,.chip.killed{color:var(--red);border-color:color-mix(in srgb, var(--red) 32%, transparent);}
 .btn { font-size:12px; border:1px solid var(--border); background:var(--elev); color:var(--ink); border-radius:6px; padding:5px 11px; cursor:pointer; }
-.btn.primary { background:var(--accent); color:#00121f; border-color:transparent; font-weight:600; }
+.btn.primary { background:var(--accent); color:var(--on-accent); border-color:transparent; font-weight:600; }
 .btn.ghost { background:transparent; color:var(--muted); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
@@ -74,7 +93,7 @@ input, textarea { font-family: var(--mono); }
 .ui-toggle-track { position: relative; flex: 0 0 auto; width: 30px; height: 17px; border-radius: 20px; background: var(--elev2); border: 1px solid var(--border); transition: background 0.15s ease, border-color 0.15s ease; }
 .ui-toggle-knob { position: absolute; top: 1px; left: 1px; width: 13px; height: 13px; border-radius: 50%; background: var(--faint); transition: transform 0.15s ease, background 0.15s ease; }
 .ui-toggle.on { color: var(--ink); }
-.ui-toggle.on .ui-toggle-track { background: rgba(88, 166, 255, 0.25); border-color: rgba(88, 166, 255, 0.4); }
+.ui-toggle.on .ui-toggle-track { background: color-mix(in srgb, var(--accent) 25%, transparent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
 .ui-toggle.on .ui-toggle-knob { transform: translateX(13px); background: var(--accent); }
 
 /* generic tab bar (Task 10 — ReviewPane) */
@@ -93,6 +112,15 @@ input, textarea { font-family: var(--mono); }
 /* ---- title bar ---- */
 .titlebar { height:38px; flex:0 0 38px; display:flex; align-items:center; gap:10px; padding:0 12px; border-bottom:1px solid var(--border); background:var(--panel); }
 .wm-logo { flex:0 0 auto; width:20px; height:20px; border-radius:5px; object-fit:cover; margin-right:-4px; }
+
+/* ---- theme picker ---- */
+.theme-menu { position:relative; display:inline-flex; }
+.theme-btn { padding:4px 7px; display:inline-flex; align-items:center; }
+.theme-pop { min-width:132px; right:0; left:auto; }
+.theme-opt { display:flex; align-items:center; gap:9px; }
+.theme-check { margin-left:auto; color:var(--accent); font-size:11px; }
+.theme-swatch { flex:0 0 auto; width:18px; height:18px; border-radius:5px; border:1px solid var(--border); display:inline-flex; align-items:center; justify-content:center; gap:2px; overflow:hidden; }
+.theme-swatch-dot { width:5px; height:5px; border-radius:50%; }
 .wm { font-weight:700; font-size:13px; letter-spacing:.3px; }
 .wm b { color: var(--accent); font-weight: 700; }
 .ws { color: var(--muted); font-size: 12px; }
@@ -134,7 +162,7 @@ input, textarea { font-family: var(--mono); }
 .tree { padding: 4px 6px; }
 .node { display: flex; align-items: center; gap: 7px; padding: 3px 10px; border-radius: 6px; cursor: pointer; color: var(--ink); }
 .node:hover { background: var(--elev); }
-.node.sel { background: rgba(88, 166, 255, 0.1); color: var(--accent); }
+.node.sel { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
 .node .chev { flex: 0 0 14px; width: 14px; height: 14px; color: var(--faint); transition: transform 0.12s ease; }
 .node .chev.open { transform: rotate(90deg); }
 .node .ico { flex: 0 0 14px; width: 14px; height: 14px; color: var(--faint); }
@@ -182,7 +210,7 @@ input, textarea { font-family: var(--mono); }
 .sibling-hint { color: var(--faint); font-size: 11px; margin-left: auto; }
 .sibling-hint code { font-family: var(--mono); }
 .port-chip { display: inline-flex; align-items: center; gap: 4px; font-family: var(--mono); font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 20px; padding: 3px 4px 3px 10px; }
-.port-chip.sel { color: var(--accent); border-color: rgba(88, 166, 255, 0.35); }
+.port-chip.sel { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
 .port-chip button { border: none; background: transparent; color: inherit; font-family: var(--sans); font-size: 11px; padding: 2px 6px; border-radius: 10px; cursor: pointer; }
 .port-chip button:hover { background: var(--elev2); color: var(--ink); }
 .port-chip button.x:hover { color: var(--red); }
@@ -202,7 +230,7 @@ input, textarea { font-family: var(--mono); }
 .msg { margin-bottom: 16px; }
 .who { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); margin-bottom: 6px; }
 .you { background: var(--elev); border: 1px solid var(--border2); border-radius: 9px; padding: 9px 12px; font-size: 13px; max-width: 80%; white-space: pre-wrap; word-break: break-word; }
-.think { border-left: 2px solid rgba(88, 166, 255, .4); padding: 2px 0 2px 12px; color: var(--muted); font-size: 12.5px; line-height: 1.55; margin-bottom: 16px; white-space: pre-wrap; word-break: break-word; }
+.think { border-left: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); padding: 2px 0 2px 12px; color: var(--muted); font-size: 12.5px; line-height: 1.55; margin-bottom: 16px; white-space: pre-wrap; word-break: break-word; }
 
 /* tool call block: collapsible (Task 12) — .tool is the header <button>, .tool-detail the expanded body */
 .tool-block { margin: 6px 0 16px; }
@@ -277,7 +305,7 @@ input, textarea { font-family: var(--mono); }
 .hunk .a .c { color: var(--green); }
 .hunk .d { background: rgba(248, 81, 73, .12); }
 .hunk .d .c { color: var(--red); }
-.hunk .h { background: rgba(88, 166, 255, .06); color: var(--accent); }
+.hunk .h { background: color-mix(in srgb, var(--accent) 8%, transparent); color: var(--accent); }
 
 @media (max-width: 900px) {
   .shell { flex-direction: column; }

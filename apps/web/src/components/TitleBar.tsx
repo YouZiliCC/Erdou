@@ -1,6 +1,5 @@
-import { useState } from "react";
 import type { ReactNode } from "react";
-import { toggleTheme } from "../lib/theme.js";
+import { ThemeMenu } from "./ThemeMenu.js";
 
 export function TitleBar({
   workspace, model, running, onSettings, onReset, onThemeChange, children,
@@ -13,7 +12,6 @@ export function TitleBar({
   onThemeChange?: () => void;
   children?: ReactNode;
 }) {
-  const [, force] = useState(0);
   return (
     <header className="titlebar">
       <img className="wm-logo" src="/erdou-logo-128.png" alt="" width="20" height="20" />
@@ -23,16 +21,7 @@ export function TitleBar({
       <span className="chip"><span className={"dot " + (running ? "busy" : "on")} /> runtime · js·py·wasi</span>
       {children}
       <span className="chip">{model}</span>
-      <button
-        className="btn ghost"
-        onClick={() => {
-          toggleTheme();
-          force((n) => n + 1);
-          onThemeChange?.();
-        }}
-      >
-        ◐
-      </button>
+      <ThemeMenu onChange={onThemeChange} />
       <button
         className="btn ghost"
         onClick={() => {

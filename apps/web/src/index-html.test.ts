@@ -15,7 +15,7 @@ describe("index.html", () => {
   });
 
   it("keeps the same-origin shell intact", () => {
-    expect(html).toContain('href="/favicon.svg"');
+    expect(html).toContain('href="/favicon-256.png"'); // 二豆 favicon (logo)
     expect(html).toContain('src="/src/main.tsx"');
   });
 });
