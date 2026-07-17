@@ -162,7 +162,7 @@ rm -f packages/runtime-vm/assets/state.bin
 pnpm --filter @erdou/runtime-vm bake
 ```
 
-Then **bump `version` in `apps/web/src/lib/vm-assets.ts` AND `STATE_VERSION` in `scripts/bake-image.mjs`** (same string) so IndexedDB-cached clients re-fetch the new state (currently `alpine-3.24.1-r12-lo-baked`). The bake stamps that version into `assets/state.meta.json`, and `loadBrowserInputs` verifies it on every cache-miss fetch (`expectedStateVersion`), so a stale on-disk `state.zst` from an older bake fail-fasts with a re-bake instruction instead of being silently cached under the new key. The `state.zst`/kernel/bios binaries stay gitignored — never commit them.
+Then **bump the profile's `version` in `packages/runtime-vm/src/profiles.data.json`** — that JSON is the single source of truth. `scripts/bake-image.mjs` reads the version straight from it (there is no `STATE_VERSION` constant to touch), and `apps/web/src/lib/vm-assets.ts` picks it up via the typed `PROFILE_META` map (`@erdou/runtime-vm/profiles`), so IndexedDB-cached clients re-fetch the new state. The bake stamps that version into `assets/state-<profile>.meta.json`, and `loadBrowserInputs` verifies it on every cache-miss fetch (`expectedStateVersion`), so a stale on-disk `state.zst` from an older bake fail-fasts with a re-bake instruction instead of being silently cached under the new key. The `state.zst`/kernel/bios binaries stay gitignored — never commit them.
 
 **Package egress (Round 13):** the same fetch-NAT now also carries guest-originated `pip`/`npm`
 traffic to the real PyPI/npm registries — `networkEgress` is `"cors-only"`, not `"none"`. See
@@ -188,7 +188,8 @@ Guest toolchain (all profiles): i686 Alpine 3.24.1, Python 3.14, pip 26.1.2; `no
 its per-profile smoke markers (`PIP_OK`, `NODE_OK`/`NPM_OK`, `SCI_OK`) and the baked config markers
 (`RESOLV_OK`, `PIPCONF_OK`, `NPMRC_OK`, `HOMESET_OK`) plus `ETH_OK`/`LO_OK` before `save_state`, and fails
 loudly rather than saving a broken image. On re-bake, bump the profile's `version` in
-`src/profiles.data.json` **and** `STATE_VERSION` in `scripts/bake-image.mjs`.
+`src/profiles.data.json` — the single source of truth: `scripts/bake-image.mjs` reads it from there
+(no separate constant), and `apps/web/src/lib/vm-assets.ts` picks it up via `PROFILE_META`.
 
 ### How package egress works
 
@@ -210,8 +211,12 @@ guest CA — TLS terminates at the browser. `vmCapabilities` reports `networkEgr
   which would otherwise leave the live adapter's `fetch` bare). Verified: `pip install six` ≈ 49 s;
   `pip install flask` + a Flask app on `0.0.0.0` served back through `dispatch` ≈ 180 s.
 - **Only TCP:80 is relayed.** https and every other port refuse instantly (RST — a clean, fast failure, never a
-  hang), so guests must use `http://` registry URLs. In production the app page must be **https-served** for
-  PyPI (the NAT's auto-upgrade); npm works either way.
+  hang), so guests must use `http://` registry URLs. PyPI works **regardless of the app page's protocol**: the
+  egress shim upgrades the guest's `http://`→`https://` itself in non-https contexts (Node harnesses and
+  http-served pages), and on an https-served page v86's own NAT auto-upgrade does it for free so the shim defers
+  to it (`needsHttpsUpgrade()` — exactly one upgrade in every context). So an https page is an *additional*
+  upgrade path, not a requirement. npm needs no upgrade either way (its registry serves plain http and
+  301-redirects to https, which the NAT follows).
 - **CORS boundary.** npm's registry and PyPI's metadata *and* artifacts send `Access-Control-Allow-Origin: *`
   (so they work from the browser's cross-origin `fetch`); Alpine's `dl-cdn` mirror does **not**. That is why
   `apk` packages are **baked at image-build time**, not installed at runtime — apk-over-gateway (and arbitrary
