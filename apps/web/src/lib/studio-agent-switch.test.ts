@@ -86,6 +86,36 @@ describe("Studio — agent mid-run switch_environment (C2)", () => {
     expect(run!.status).toBe("review");
   });
 
+  it("the agent's system prompt carries the ENVIRONMENTS & PACKAGES catalog — current env marked + every profile's package managers (R13 §4 wired into production)", async () => {
+    // FINDING 1 (final-switch.md / final-crosscut.md): runAgentTurn built the
+    // agent's `environment` with NO `catalog`, so environmentsCatalogSection
+    // returned "" and the whole "agent knows the collection" brief was dead in
+    // the shipped app. This asserts the section reaches the model.
+    const studio = new Studio();
+    await studio.boot(); // browser kernel is the current environment
+
+    // Capture the request body the gateway sends — the system prompt lives in
+    // its `messages`, so the rendered catalog section (if wired) shows up here.
+    const bodies: string[] = [];
+    const fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(String(init?.body ?? ""));
+      return new Response(JSON.stringify(final("done")), { status: 200 });
+    }) as typeof globalThis.fetch;
+    (studio as unknown as { gateway: ModelGateway }).gateway = new ModelGateway({ fetch });
+
+    await studio.startRun("hello", DEFAULT_MODEL, "auto");
+
+    const prompt = bodies.join("\n");
+    // The section renders only when studio supplies environment.catalog.
+    expect(prompt).toContain("ENVIRONMENTS & PACKAGES");
+    // current === browser is named and [current]-marked.
+    expect(prompt).toContain("You are running in: Browser kernel (browser)");
+    expect(prompt).toContain("[current]");
+    // vm:node's npm capability is surfaced up-front (the exact fact the review
+    // said was missing) — proves the whole catalog, not just the current env.
+    expect(prompt).toContain("install: npm install");
+  });
+
   it("Confirm mode gates the mid-run switch — the agent parks approval for switch_environment before switching", async () => {
     const studio = new Studio();
     await studio.boot();

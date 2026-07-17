@@ -9,7 +9,7 @@ import type { RuntimeEvent, ProcessInfo, Snapshot, Runtime, FileSystemApi, Unsub
 import { AGENT_LANGUAGES, AGENT_COMMANDS } from "./languages.js";
 import {
   createBrowserKernel,
-  SKELETON_DIRS,
+  VM_PRESERVE_DIRS,
   environmentId,
   parseEnvironmentId,
   type Environment,
@@ -688,13 +688,16 @@ export class Studio {
     if (!this.mount) return;
     try {
       // The VM kernel's readdir("/") exposes its skeleton bind-mount stub dirs
-      // (bin/lib/usr/proc/dev/tmp) — never write those into the user's real folder.
+      // (bin/lib/usr/proc/dev/tmp) AND its baked config dirs (/etc pip.conf +
+      // resolv.conf, /root .npmrc) — never write those image-owned dirs into
+      // the user's real folder (R12.5 IMP2 class). VM_PRESERVE_DIRS = skeleton
+      // + etc + root; SKELETON_DIRS alone would dump /etc/pip.conf onto disk.
       await saveVfsToFolder(
         this.fs,
         this.mount,
         "/",
         this.mountMtimes,
-        this.kernelKind === "vm" ? new Set(SKELETON_DIRS) : undefined,
+        this.kernelKind === "vm" ? new Set(VM_PRESERVE_DIRS) : undefined,
       );
     } catch (err) {
       this.logSystem("error", "Failed to sync to local folder", asMessage(err));
@@ -842,6 +845,25 @@ export class Studio {
         commands: AGENT_COMMANDS,
         notes:
           "You can build & preview web apps: write a React/TS project (e.g. /src/main.tsx) and the user can Bundle & Run it (bundled in-browser, npm deps from a CDN), `erdou serve <dir>` a static site, or `erdou.serve(app, port)` a Python WSGI app — any of these serves it on a port to preview.",
+        // The environments catalog: which env the agent is in now + every env
+        // it can switch into (interpreters, package managers, install recipes,
+        // switch guidance). Without this, agent-core's environmentsCatalogSection
+        // returns "" and the R13 "ENVIRONMENTS & PACKAGES" brief is dead in
+        // production (final-switch.md FINDING 1). Duck-typed projection: each
+        // EnvironmentDescriptor structurally satisfies agent-core's
+        // EnvironmentBrief — no cross-import, keeps layering (apps/web → agent-core).
+        catalog: {
+          current: this.currentEnvId,
+          available: ENVIRONMENTS.map((e) => ({
+            id: e.id,
+            label: e.label,
+            interpreters: e.interpreters,
+            packageManagers: e.packageManagers,
+            installRecipes: e.installRecipes,
+            switchGuidance: e.switchGuidance,
+            speed: e.speed,
+          })),
+        },
       },
       // The agent can move itself to an environment with the interpreter /
       // package manager the task needs; the callback performs the sanctioned

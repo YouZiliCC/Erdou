@@ -24,6 +24,23 @@ export type { VmProfile };
  *  `workspace-copy.ts` and `studio.ts` import it from here. */
 export const SKELETON_DIRS: readonly string[] = ["bin", "lib", "usr", "proc", "dev", "tmp"];
 
+/** The image-owned root dirs a cross-kernel workspace copy (and a VM folder
+ *  save) must never mirror-DELETE, copy across kernels, or dump onto a user's
+ *  disk: the six skeleton bind-mount stubs PLUS the VM-baked config dirs `/etc`
+ *  (pip.conf, resolv.conf) and `/root` (.npmrc). Those two live IN the 9p
+ *  workspace root but carry the package-egress config baked into each image —
+ *  they are NOT user project content. Without them here, a browser→VM switch's
+ *  mirror-delete wipes the baked configs off the live guest (pip + npm egress
+ *  break — Round 13 CRITICAL), a VM→browser switch pollutes the browser Vfs
+ *  with image system files, and a folder mount dumps /etc/pip.conf onto disk.
+ *
+ *  NOTE: this is deliberately WIDER than `SKELETON_DIRS`. `SKELETON_DIRS` stays
+ *  the narrow set guardSkeleton (runtime-vm) uses to block writes to bind-mount
+ *  points — guardSkeleton must still ALLOW writes under /etc,/root (e.g. pip's
+ *  /root/.local user-site, npm cache). Only the mirror/copy/folder-sync layer
+ *  widens to VM_PRESERVE_DIRS. */
+export const VM_PRESERVE_DIRS: readonly string[] = [...SKELETON_DIRS, "etc", "root"];
+
 /** The active execution environment: the fast browser kernel, or a VM kernel on
  *  a specific image profile. Its string id (`browser` | `vm:<profile>`) is the
  *  stable handle the selector, the switch tool, and the run-diff all key on. */

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { Vfs } from "@erdou/runtime-browser";
 import { loadFolderIntoVfs, saveVfsToFolder, rescanFolder, type MountMtimes } from "./local-mount.js";
+import { VM_PRESERVE_DIRS } from "./kernel.js";
 import { MockDir, MockFile } from "./test-support/mock-dir.js";
 
 const enc = new TextEncoder();
@@ -87,6 +88,27 @@ describe("local folder mount", () => {
     expect(dec.decode((nestedBin.children.get("keep-me.txt") as MockFile).data)).toBe(
       "nested bin is a real project dir",
     );
+  });
+
+  it("saveVfsToFolder with VM_PRESERVE_DIRS keeps the VM-baked /etc,/root config off the user's real folder", async () => {
+    // Round 13 (R12.5 IMP2 class): a VM carries baked /etc/pip.conf +
+    // /root/.npmrc IN its 9p workspace root. When a VM has a real folder
+    // mounted, the folder save must NOT dump those image-owned config dirs
+    // onto the user's disk — studio passes VM_PRESERVE_DIRS (skeleton + etc +
+    // root) as `rootSkip` for the VM kernel, not the bare SKELETON_DIRS.
+    const fs = new Vfs({ clock: () => 0 });
+    fs.mkdir("/etc", { recursive: true });
+    fs.writeFile("/etc/pip.conf", "baked");
+    fs.mkdir("/root", { recursive: true });
+    fs.writeFile("/root/.npmrc", "baked");
+    fs.writeFile("/app.py", "print(1)"); // real user file
+
+    const root = new MockDir("project");
+    await saveVfsToFolder(fs, root, "/", undefined, new Set(VM_PRESERVE_DIRS));
+
+    expect(root.children.has("etc")).toBe(false); // baked config not written to disk
+    expect(root.children.has("root")).toBe(false);
+    expect(root.children.has("app.py")).toBe(true); // real user file still synced
   });
 
   it("rescanFolder does not re-pull a file the browser just wrote back", async () => {
