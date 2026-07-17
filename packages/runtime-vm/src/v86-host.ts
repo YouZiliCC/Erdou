@@ -10,6 +10,12 @@ export interface TcpConn {
   on(event: "data", cb: (data: Uint8Array) => void): void;
   on(event: "close", cb: () => void): void;
   write(bytes: Uint8Array): void;
+  /** Drive OUR side's close so v86 releases the conn from `network_adapter.tcp_conn`.
+   *  v86's `TCPConnection.prototype.close` completes an active close, OR — when the
+   *  guest already FIN'd (python HTTP/1.0 responds then closes, leaving the conn in
+   *  `close-wait`) — finishes the passive close (→ `last-ack` → `release()`). Without
+   *  this call the conn is retained forever after a guest FIN, leaking per request. */
+  close(): void;
 }
 
 /** v86's FetchNetworkAdapter (in-JS NAT). Addressing is hard-coded at

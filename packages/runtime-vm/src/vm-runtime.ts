@@ -192,7 +192,11 @@ export class VmRuntime implements Runtime {
       return { status: 502, headers: { "content-type": "text/plain" }, body: new TextEncoder().encode(`No server listening on port ${port}`) };
     }
     const raw = serializeHttpRequest(req);
-    const bytes = await new Promise<Uint8Array>((resolve) => {
+    // dispatch() ALWAYS resolves an HttpResponse — it must NEVER reject.
+    // `Promise<HttpResponse>` has no error contract, so every completion path
+    // (self-describing complete / idle / close / hard cap) funnels through the
+    // guarded `toResponse` below and resolves, even on a parse failure.
+    return await new Promise<HttpResponse>((resolve) => {
       const conn = net.connect(port);
       const chunks: Uint8Array[] = [];
       let idle: ReturnType<typeof setTimeout> | undefined;
@@ -204,30 +208,47 @@ export class VmRuntime implements Runtime {
         for (const c of chunks) { out.set(c, o); o += c.length; }
         return out;
       };
+      const plain502 = (msg: string): HttpResponse => (
+        { status: 502, headers: { "content-type": "text/plain" }, body: new TextEncoder().encode(msg) }
+      );
+      const toResponse = (bytes: Uint8Array): HttpResponse => {
+        // M2: a no-bytes close (closed-port RST / connect that produced nothing)
+        // reads as 502, not a false "timed out within 15s".
+        if (bytes.length === 0) return plain502(`No response from port ${port}`);
+        // parseHttpResponse throws when bytes arrived but no CRLFCRLF header
+        // terminator has (guest paused mid-headers → reachable via the idle timer
+        // / hard cap). A parse failure resolves to a neutral 502 — never rejects.
+        try { return parseHttpResponse(bytes); }
+        catch { return plain502(`Bad Gateway: malformed or incomplete response from port ${port}`); }
+      };
       const finish = (): void => {
         if (done) return;
         done = true;
         if (idle) clearTimeout(idle);
         clearTimeout(hard);
-        resolve(acc());
+        resolve(toResponse(acc()));
+        // Release the conn from the emulator's tcp_conn table. python HTTP/1.0
+        // FINs after responding, parking the conn in `close-wait`; only OUR
+        // close() completes the passive close (→ release()). Guarded so a
+        // close() throw can't disturb the already-resolved dispatch.
+        try { conn.close(); } catch { /* already-resolved; ignore */ }
       };
       // Hard cap: never hang forever if the guest wedges mid-response.
       const hard = setTimeout(finish, 15_000);
       conn.on("connect", () => conn.write(raw));
       conn.on("data", (d) => {
         chunks.push(d instanceof Uint8Array ? d : new Uint8Array(d as ArrayBufferLike));
-        if (responseComplete(acc())) { finish(); return; }
+        // responseComplete → parseHeaderLines can throw on a malformed status line
+        // inside this emulator callback (no reject path). Treat a throw as "not
+        // complete yet" — the idle timer / hard cap + guarded parse finish it.
+        let complete = false;
+        try { complete = responseComplete(acc()); } catch { complete = false; }
+        if (complete) { finish(); return; }
         if (idle) clearTimeout(idle);
         idle = setTimeout(finish, 600); // idle fallback for keep-alive servers with no length info
       });
       conn.on("close", finish); // unreliable — a backstop, not the primary condition
     });
-    if (bytes.length === 0) {
-      // M2: a no-bytes close (closed-port RST / connect that produced nothing)
-      // reads as 502, not a false "timed out within 15s".
-      return { status: 502, headers: { "content-type": "text/plain" }, body: new TextEncoder().encode(`No response from port ${port}`) };
-    }
-    return parseHttpResponse(bytes);
   }
   async closePort(port: number): Promise<void> { this.ports.close(port); }
 

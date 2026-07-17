@@ -90,9 +90,22 @@ describe.skipIf(!RUN)("VmRuntime (gated e2e)", () => {
     }
     expect(ok).toBeDefined();
     expect(new TextDecoder().decode(ok!.body)).toContain("hello-from-guest-dispatch");
+    // Leak fix (conn.close()): many sequential dispatches must NOT grow the
+    // emulator's retained TCP-connection table. Each guest FIN parks the conn in
+    // `close-wait`; dispatch()'s conn.close() completes the passive close →
+    // v86 release() → delete network_adapter.tcp_conn[tuple]. Without the fix the
+    // table would hold ~N entries after N dispatches (leaked forever).
+    const net = (rt as unknown as { host: V86Host }).host.networkAdapter() as unknown as { tcp_conn: Record<string, unknown> };
+    const N = 6;
+    for (let i = 0; i < N; i++) {
+      const r = await get();
+      expect(r.status).toBe(200); // reuse still works after close() (fix didn't break dispatch)
+    }
+    // Bounded, not N: at most a couple may still be finishing their last-ack.
+    expect(Object.keys(net.tcp_conn).length).toBeLessThan(N);
     // A closed port probes false → 502, no hang.
     const closed = await rt.dispatch(9999, { method: "GET", url: "/", headers: {}, body: new Uint8Array() });
     expect(closed.status).toBe(502);
     await rt.shutdown();
-  }, 60_000);
+  }, 90_000);
 });
