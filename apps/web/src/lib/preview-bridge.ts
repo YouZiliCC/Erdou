@@ -16,8 +16,10 @@ import type { HttpRequest, HttpResponse } from "@erdou/runtime-contract";
  * stay in sync.
  */
 
-/** The same-origin scope the preview SW controls; a previewed app on port N is
- *  viewed at `/__preview__/<N>/…`. */
+/** The path-prefix that marks a previewed iframe; an app on port N is viewed at
+ *  `/__preview__/<N>/…`. The SW itself registers at ROOT `/` (see
+ *  `startPreviewProxy`) so it can also intercept a guest's ABSOLUTE-path
+ *  resources, which resolve against the app origin and escape this prefix. */
 export const PREVIEW_SCOPE = "/__preview__/";
 
 const BODYLESS_METHODS = new Set(["GET", "HEAD"]);
@@ -28,9 +30,33 @@ const NULL_BODY_STATUS = new Set([101, 204, 205, 304]);
 // The nested segment that lets a previewed app reach a SIBLING port instead of
 // its own (the "primary" port it is viewed at).
 const PORT_OVERRIDE = /^\/__port__\/(\d+)(\/.*)?$/;
+// A preview-scope path: `/__preview__/<primary>/…`. Group 1 is the primary port.
+const PREVIEW_PATH = /^\/__preview__\/([^/]+)(\/.*)?$/;
+
+// Apply the `/__port__/<n>/` sibling-override to a guest path (a `/`-rooted path
+// already stripped of the preview scope, or a guest's own absolute path). An
+// empty path normalizes to `/`; an explicit override redirects to port `<n>`.
+function applyOverride(guestPath: string, primary: number): { port: number; rest: string } {
+  const rest = guestPath === "" ? "/" : guestPath;
+  const override = PORT_OVERRIDE.exec(rest);
+  if (override) {
+    const overridePort = override[1];
+    if (overridePort !== undefined) return { port: Number(overridePort), rest: override[2] || "/" };
+  }
+  return { port: primary, rest };
+}
+
+// Parse the primary port from a `/__preview__/<primary>/…` pathname, or null
+// when the pathname is not a well-formed preview-scope path.
+function previewPrimary(pathname: string): number | null {
+  const match = PREVIEW_PATH.exec(pathname);
+  if (!match) return null;
+  const primary = Number(match[1]);
+  return Number.isInteger(primary) ? primary : null;
+}
 
 /**
- * Resolve which port an intercepted preview request routes to, and the
+ * Resolve which port an intercepted IN-SCOPE preview request routes to, and the
  * (query-less) path to forward.
  *
  * Scheme: an app is viewed at `/__preview__/<primary>/…`; `primary` is parsed
@@ -50,13 +76,54 @@ const PORT_OVERRIDE = /^\/__port__\/(\d+)(\/.*)?$/;
  */
 export function resolvePort(pathname: string, primary: number): { port: number; rest: string } {
   const afterScope = pathname.slice(PREVIEW_SCOPE.length + String(primary).length);
-  const rest = afterScope === "" ? "/" : afterScope;
-  const override = PORT_OVERRIDE.exec(rest);
-  if (override) {
-    const overridePort = override[1];
-    if (overridePort !== undefined) return { port: Number(overridePort), rest: override[2] || "/" };
+  return applyOverride(afterScope, primary);
+}
+
+/**
+ * Decide whether an intercepted request belongs to a previewed guest and, if so,
+ * which guest `port` and `guestPath` to forward it to. Returns `null` for a
+ * PASSTHROUGH — a request the SW must NOT touch (the Studio app's own traffic).
+ * This is the single gate that makes root-scoped interception safe: only the two
+ * cases below are proxied; every other request is left to the browser untouched.
+ *
+ *  1. In-scope — the request URL is itself under `/__preview__/<primary>/…` (the
+ *     iframe's main document, or a RELATIVE subresource that resolved under the
+ *     scope). Routed from the URL by `resolvePort`.
+ *  2. Absolute-path escape — the request URL is OUT of scope (e.g. `/style.css`
+ *     from `<link href="/style.css">`), but its REFERRER is a SAME-ORIGIN
+ *     preview iframe. The browser resolved the guest's absolute path against the
+ *     app origin, escaping the scope; we recover `primary` from the referrer and
+ *     forward the request's own absolute pathname to that guest. The referrer
+ *     MUST be same-origin, so a foreign page can never steer interception.
+ *
+ * Either case honors a `/__port__/<n>/` sibling-override in the resolved path.
+ * `guestPath` carries no query string — the caller appends `url.search`.
+ *
+ * PURE. The SW (`public/preview-sw.js`) duplicates this verbatim — it cannot
+ * import TS. Keep the two in sync.
+ */
+export function routePreviewRequest(
+  requestUrl: string,
+  referrer: string,
+): { port: number; guestPath: string } | null {
+  const req = new URL(requestUrl);
+  const scopePrimary = previewPrimary(req.pathname);
+  if (scopePrimary !== null) {
+    const { port, rest } = resolvePort(req.pathname, scopePrimary);
+    return { port, guestPath: rest };
   }
-  return { port: primary, rest };
+  if (!referrer) return null;
+  let ref: URL;
+  try {
+    ref = new URL(referrer);
+  } catch {
+    return null;
+  }
+  if (ref.origin !== req.origin) return null;
+  const refPrimary = previewPrimary(ref.pathname);
+  if (refPrimary === null) return null;
+  const { port, rest } = applyOverride(req.pathname, refPrimary);
+  return { port, guestPath: rest };
 }
 
 /** Marshal an intercepted `Request` into a runtime `HttpRequest`.
@@ -148,8 +215,12 @@ function activeWorker(reg: ServiceWorkerRegistration): Promise<ServiceWorker | n
 
 /**
  * Boot the preview proxy: install the page-side bridge listener, then register
- * the SW at the preview scope so it can intercept preview iframes. Guarded so a
- * no-SW environment just logs and skips (the app still runs, sans preview).
+ * the SW at ROOT scope `/` so it can intercept not just in-scope preview iframes
+ * but also a guest's ABSOLUTE-path resources, which resolve against the app
+ * origin and escape `/__preview__/`. `routePreviewRequest` is the gate that
+ * keeps this safe: app-origin traffic that is neither in-scope nor referred by a
+ * preview iframe passes straight through untouched. Guarded so a no-SW
+ * environment just logs and skips (the app still runs, sans preview).
  */
 export async function startPreviewProxy(runtime: DispatchRuntime): Promise<void> {
   // Register the message listener before the SW activates, so no early proxied
@@ -160,7 +231,7 @@ export async function startPreviewProxy(runtime: DispatchRuntime): Promise<void>
     return;
   }
   try {
-    const reg = await navigator.serviceWorker.register("/preview-sw.js", { scope: PREVIEW_SCOPE });
+    const reg = await navigator.serviceWorker.register("/preview-sw.js", { scope: "/" });
     await activeWorker(reg);
   } catch (err) {
     console.warn("[erdou] preview SW registration failed", err);

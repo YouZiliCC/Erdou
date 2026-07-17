@@ -4,6 +4,7 @@ import {
   httpResponseToResponse,
   installPreviewBridge,
   resolvePort,
+  routePreviewRequest,
   setPreviewRuntime,
 } from "./preview-bridge.js";
 
@@ -90,6 +91,60 @@ describe("resolvePort", () => {
   it("normalizes an empty or trailing-slash-only rest to '/' for a sibling override", () => {
     expect(resolvePort("/__preview__/8080/__port__/8000", 8080)).toEqual({ port: 8000, rest: "/" });
     expect(resolvePort("/__preview__/8080/__port__/8000/", 8080)).toEqual({ port: 8000, rest: "/" });
+  });
+});
+
+describe("routePreviewRequest", () => {
+  it("routes an IN-SCOPE request from the URL (query stripped — the SW appends it)", () => {
+    expect(routePreviewRequest("http://x/__preview__/8000/api?q=1", "")).toEqual({
+      port: 8000,
+      guestPath: "/api",
+    });
+  });
+
+  it("normalizes an in-scope bare-port URL to guestPath '/'", () => {
+    expect(routePreviewRequest("http://x/__preview__/8000", "")).toEqual({ port: 8000, guestPath: "/" });
+    expect(routePreviewRequest("http://x/__preview__/8000/", "")).toEqual({ port: 8000, guestPath: "/" });
+  });
+
+  it("routes an ABSOLUTE-path escape by the preview referrer's port (the CSS bug)", () => {
+    // <link href="/style.css"> from a page at /__preview__/8000/ hits the app
+    // origin at /style.css; recover the guest port from the referrer.
+    expect(routePreviewRequest("http://x/style.css", "http://x/__preview__/8000/")).toEqual({
+      port: 8000,
+      guestPath: "/style.css",
+    });
+  });
+
+  it("carries the absolute pathname (query stripped) for a referred subresource", () => {
+    expect(routePreviewRequest("http://x/assets/app.js?v=2", "http://x/__preview__/8000/page")).toEqual({
+      port: 8000,
+      guestPath: "/assets/app.js",
+    });
+  });
+
+  it("PASSES THROUGH (null) a genuine app request — out of scope, no preview referrer", () => {
+    expect(routePreviewRequest("http://x/assets/app.js", "http://x/")).toBeNull();
+    expect(routePreviewRequest("http://x/assets/app.js", "")).toBeNull();
+  });
+
+  it("PASSES THROUGH (null) an absolute request whose referrer is a foreign origin", () => {
+    // A cross-origin referrer must never steer interception.
+    expect(routePreviewRequest("http://x/style.css", "http://evil/__preview__/8000/")).toBeNull();
+  });
+
+  it("honors the /__port__/<n>/ sibling-override for an in-scope request", () => {
+    expect(routePreviewRequest("http://x/__preview__/8080/__port__/8000/api", "")).toEqual({
+      port: 8000,
+      guestPath: "/api",
+    });
+  });
+
+  it("honors the /__port__/<n>/ sibling-override for an absolute-path escape", () => {
+    expect(routePreviewRequest("http://x/__port__/8000/api", "http://x/__preview__/8080/")).toEqual({
+      port: 8000,
+      guestPath: "/api",
+    });
   });
 });
 
