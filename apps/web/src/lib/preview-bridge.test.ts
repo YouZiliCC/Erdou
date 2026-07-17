@@ -107,12 +107,23 @@ describe("routePreviewRequest", () => {
     expect(routePreviewRequest("http://x/__preview__/8000/", "")).toEqual({ port: 8000, guestPath: "/" });
   });
 
-  it("routes an ABSOLUTE-path escape by the preview referrer's port (the CSS bug)", () => {
-    // <link href="/style.css"> from a page at /__preview__/8000/ hits the app
-    // origin at /style.css; recover the guest port from the referrer.
+  it("routes an ABSOLUTE-path escape by the preview CLIENT url — no referrer needed (the regression the SW fix closes)", () => {
+    // The SW sources the preview context from the initiating client's document
+    // URL (`client.url`), so a guest that strips its referrer (Referrer-Policy:
+    // no-referrer) is STILL routed: the second arg is the client.url here, and
+    // the referrer would have been empty.
     expect(routePreviewRequest("http://x/style.css", "http://x/__preview__/8000/")).toEqual({
       port: 8000,
       guestPath: "/style.css",
+    });
+  });
+
+  it("falls back to the referrer as the context when the client is unavailable", () => {
+    // When clientId/client is missing (e.g. a navigation), the SW passes the
+    // request referrer as the context; routing works identically.
+    expect(routePreviewRequest("http://x/app.css", "http://x/__preview__/3000/page")).toEqual({
+      port: 3000,
+      guestPath: "/app.css",
     });
   });
 
@@ -123,7 +134,10 @@ describe("routePreviewRequest", () => {
     });
   });
 
-  it("PASSES THROUGH (null) a genuine app request — out of scope, no preview referrer", () => {
+  it("PASSES THROUGH (null) a genuine app request — client.url is the app doc, not a preview scope", () => {
+    // The Studio app's own subresource: its initiating client (context) is the
+    // app document at "/", not under /__preview__/ → null → the SW leaves it to
+    // the browser untouched (the critical zero-risk passthrough property).
     expect(routePreviewRequest("http://x/assets/app.js", "http://x/")).toBeNull();
     expect(routePreviewRequest("http://x/assets/app.js", "")).toBeNull();
   });
@@ -140,7 +154,8 @@ describe("routePreviewRequest", () => {
     });
   });
 
-  it("honors the /__port__/<n>/ sibling-override for an absolute-path escape", () => {
+  it("honors the /__port__/<n>/ sibling-override for an absolute-path escape (client.url context)", () => {
+    // Same override, routed from the client.url context (no referrer required).
     expect(routePreviewRequest("http://x/__port__/8000/api", "http://x/__preview__/8080/")).toEqual({
       port: 8000,
       guestPath: "/api",

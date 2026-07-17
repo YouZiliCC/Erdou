@@ -290,8 +290,8 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
             </span>
           ))
         )}
-        <span className="sibling-hint" title="An absolute path like /api isn't proxied — only requests under the preview scope are">
-          Previewed apps must use relative URLs (or <code>/__port__/&lt;n&gt;/</code> to reach a sibling port).
+        <span className="sibling-hint" title="Absolute paths (e.g. /style.css) are now proxied to the guest via the initiating iframe client; relative URLs are still recommended. Use /__port__/<n>/ to reach a sibling port.">
+          Previewed apps can use relative or absolute URLs (both proxied); use <code>/__port__/&lt;n&gt;/</code> to reach a sibling port.
         </span>
       </div>
 

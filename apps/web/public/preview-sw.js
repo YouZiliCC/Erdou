@@ -9,10 +9,13 @@
 //
 // The worker registers at ROOT scope `/` (not `/__preview__/`) so it can also
 // catch a guest's ABSOLUTE-path resources (`<link href="/style.css">`), which
-// resolve against the app origin and escape the `/__preview__/` prefix.
+// resolve against the app origin and escape the `/__preview__/` prefix. For an
+// out-of-scope request we identify which guest it escaped from by the INITIATING
+// CLIENT's document URL (`clients.get(event.clientId).url`), robust to the
+// guest's Referrer-Policy (the referrer is only a fallback).
 // `routePreviewRequest` is the safety gate: only in-scope requests and requests
-// referred by a same-origin preview iframe are proxied — the Studio app's own
-// traffic returns `null` and is left to the browser untouched.
+// whose preview context is a same-origin preview iframe are proxied — the Studio
+// app's own traffic returns `null` and is passed straight through untouched.
 //
 // This marshalling + routing mirrors `src/lib/preview-bridge.ts` (which cannot
 // be imported here — this file is served as static JS). Keep the two in sync.
@@ -65,28 +68,31 @@ function resolvePort(pathname, primary) {
 // which guest `port` and `guestPath` to forward it to. Returns null for a
 // PASSTHROUGH — a request the SW must NOT touch (the Studio app's own traffic).
 //   1. In-scope: the URL is under `/__preview__/<primary>/…`.
-//   2. Absolute-path escape: the URL is out of scope but its REFERRER is a
-//      SAME-ORIGIN preview iframe (the guest used an absolute path).
-// Either case honors a /__port__/<n>/ sibling-override. `guestPath` carries no
-// query string — the caller appends `url.search`.
-function routePreviewRequest(requestUrl, referrer) {
+//   2. Absolute-path escape: the URL is out of scope but the `previewContextUrl`
+//      is a SAME-ORIGIN preview iframe (the guest used an absolute path).
+// `previewContextUrl` identifies which guest an out-of-scope request escaped
+// from: the SW sources it from the INITIATING CLIENT's document URL (robust to
+// the guest's Referrer-Policy), falling back to the request referrer — i.e.
+// `client.url ?? referrer`. Either case honors a /__port__/<n>/ sibling-override.
+// `guestPath` carries no query string — the caller appends `url.search`.
+function routePreviewRequest(requestUrl, previewContextUrl) {
   const req = new URL(requestUrl);
   const scopePrimary = previewPrimary(req.pathname);
   if (scopePrimary !== null) {
     const { port, rest } = resolvePort(req.pathname, scopePrimary);
     return { port, guestPath: rest };
   }
-  if (!referrer) return null;
-  let ref;
+  if (!previewContextUrl) return null;
+  let ctx;
   try {
-    ref = new URL(referrer);
+    ctx = new URL(previewContextUrl);
   } catch {
     return null;
   }
-  if (ref.origin !== req.origin) return null;
-  const refPrimary = previewPrimary(ref.pathname);
-  if (refPrimary === null) return null;
-  const { port, rest } = applyOverride(req.pathname, refPrimary);
+  if (ctx.origin !== req.origin) return null;
+  const ctxPrimary = previewPrimary(ctx.pathname);
+  if (ctxPrimary === null) return null;
+  const { port, rest } = applyOverride(req.pathname, ctxPrimary);
   return { port, guestPath: rest };
 }
 
@@ -99,13 +105,46 @@ self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim(
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
-  const route = routePreviewRequest(event.request.url, event.request.referrer);
-  // Passthrough: not a preview request. Leave the app's own traffic to the
-  // browser — never call respondWith for it (the critical safety property of
-  // registering at root scope).
-  if (!route) return;
-  event.respondWith(proxy(event, route));
+
+  // In-scope preview requests (`/__preview__/<port>/…`) are fully determined by
+  // the URL alone — no client lookup needed. Decide synchronously.
+  if (previewPrimary(url.pathname) !== null) {
+    event.respondWith(proxy(event, routePreviewRequest(url.href, "")));
+    return;
+  }
+
+  // Out-of-scope, same-origin: either a guest's ABSOLUTE-path resource that
+  // escaped `/__preview__/` (e.g. `<link href="/style.css">`) or the Studio
+  // app's own traffic. We tell them apart by the INITIATING CLIENT (the iframe's
+  // document URL), which is robust to the guest's Referrer-Policy — the referrer
+  // is only a fallback. Resolving the client is async, so we commit to
+  // respondWith and pass genuine app traffic straight through to the network
+  // untouched (never handing it to a guest — the core safety property).
+  event.respondWith(routeOutOfScope(event, url));
 });
+
+// Route (or pass through) an out-of-scope, same-origin request. Identifies the
+// preview context from the initiating client, then proxies to the guest when it
+// is an absolute-path escape, or re-fetches from the network for genuine app
+// traffic (routePreviewRequest → null).
+async function routeOutOfScope(event, url) {
+  const context = await previewContext(event);
+  const route = routePreviewRequest(url.href, context);
+  if (!route) return fetch(event.request);
+  return proxy(event, route);
+}
+
+// The preview context that identifies which guest an out-of-scope request
+// escaped from: the initiating client's document URL (`/__preview__/<port>/…`,
+// unaffected by Referrer-Policy), falling back to the request referrer when the
+// client is unavailable (e.g. a navigation, whose clientId is empty).
+async function previewContext(event) {
+  if (event.clientId) {
+    const client = await self.clients.get(event.clientId);
+    if (client) return client.url;
+  }
+  return event.request.referrer;
+}
 
 async function proxy(event, route) {
   const url = new URL(event.request.url);

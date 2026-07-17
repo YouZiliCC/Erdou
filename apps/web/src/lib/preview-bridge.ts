@@ -88,13 +88,19 @@ export function resolvePort(pathname: string, primary: number): { port: number; 
  *
  *  1. In-scope — the request URL is itself under `/__preview__/<primary>/…` (the
  *     iframe's main document, or a RELATIVE subresource that resolved under the
- *     scope). Routed from the URL by `resolvePort`.
+ *     scope). Routed from the URL by `resolvePort`; `previewContextUrl` is ignored.
  *  2. Absolute-path escape — the request URL is OUT of scope (e.g. `/style.css`
- *     from `<link href="/style.css">`), but its REFERRER is a SAME-ORIGIN
- *     preview iframe. The browser resolved the guest's absolute path against the
- *     app origin, escaping the scope; we recover `primary` from the referrer and
- *     forward the request's own absolute pathname to that guest. The referrer
- *     MUST be same-origin, so a foreign page can never steer interception.
+ *     from `<link href="/style.css">`), but the `previewContextUrl` is a
+ *     SAME-ORIGIN preview iframe. The browser resolved the guest's absolute path
+ *     against the app origin, escaping the scope; we recover `primary` from the
+ *     context and forward the request's own absolute pathname to that guest.
+ *
+ * `previewContextUrl` is the URL that identifies WHICH guest an out-of-scope
+ * request escaped from. The SW sources it from the INITIATING CLIENT's document
+ * URL (`client.url`, robust to the guest's Referrer-Policy) and falls back to the
+ * request REFERRER when the client is unavailable — i.e. `client.url ?? referrer`.
+ * Either way it must be a path-bearing, same-origin `/__preview__/<port>/…` URL;
+ * the same-origin check means a foreign page can never steer interception.
  *
  * Either case honors a `/__port__/<n>/` sibling-override in the resolved path.
  * `guestPath` carries no query string — the caller appends `url.search`.
@@ -104,7 +110,7 @@ export function resolvePort(pathname: string, primary: number): { port: number; 
  */
 export function routePreviewRequest(
   requestUrl: string,
-  referrer: string,
+  previewContextUrl: string,
 ): { port: number; guestPath: string } | null {
   const req = new URL(requestUrl);
   const scopePrimary = previewPrimary(req.pathname);
@@ -112,17 +118,17 @@ export function routePreviewRequest(
     const { port, rest } = resolvePort(req.pathname, scopePrimary);
     return { port, guestPath: rest };
   }
-  if (!referrer) return null;
-  let ref: URL;
+  if (!previewContextUrl) return null;
+  let ctx: URL;
   try {
-    ref = new URL(referrer);
+    ctx = new URL(previewContextUrl);
   } catch {
     return null;
   }
-  if (ref.origin !== req.origin) return null;
-  const refPrimary = previewPrimary(ref.pathname);
-  if (refPrimary === null) return null;
-  const { port, rest } = applyOverride(req.pathname, refPrimary);
+  if (ctx.origin !== req.origin) return null;
+  const ctxPrimary = previewPrimary(ctx.pathname);
+  if (ctxPrimary === null) return null;
+  const { port, rest } = applyOverride(req.pathname, ctxPrimary);
   return { port, guestPath: rest };
 }
 
@@ -231,11 +237,28 @@ export async function startPreviewProxy(runtime: DispatchRuntime): Promise<void>
     return;
   }
   try {
+    await unregisterStalePreviewWorkers();
     const reg = await navigator.serviceWorker.register("/preview-sw.js", { scope: "/" });
     await activeWorker(reg);
   } catch (err) {
     console.warn("[erdou] preview SW registration failed", err);
   }
+}
+
+/**
+ * Remove any pre-upgrade preview worker registered at the OLD `/__preview__/`
+ * scope. This worker now ships at ROOT `/`, which is a DIFFERENT registration
+ * key; without this sweep a returning user would run BOTH workers split-brain
+ * (the old scope serving in-scope iframe requests, the new root scope serving
+ * absolute-path escapes and app traffic). Unregister the stale one so only the
+ * root worker remains. The root registration's scope ends in `/`, never
+ * `/__preview__/`, so it is left untouched.
+ */
+async function unregisterStalePreviewWorkers(): Promise<void> {
+  const regs = await navigator.serviceWorker.getRegistrations();
+  await Promise.all(
+    regs.filter((r) => r.scope.endsWith(PREVIEW_SCOPE)).map((r) => r.unregister()),
+  );
 }
 
 async function answer(
