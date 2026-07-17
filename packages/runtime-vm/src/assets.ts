@@ -15,19 +15,12 @@ export interface V86Assets {
   profile?: VmProfile;
 }
 
-// LEGACY (pre-R13 single-image name) — REMOVE IN T10 once the real profile
-// bakes land as state-<profile>.zst: base boots the old state.zst so the gated
-// conformance suite stays green during the transition.
+// Per-profile state image: state-<profile>.zst, produced by
+// `pnpm --filter @erdou/runtime-vm bake --profile <p>`. (The pre-R13 legacy
+// single-image state.zst fallback was removed in T10 once the real profile
+// bakes landed.)
 function resolveStatePath(profile: VmProfile): string {
-  const named = join(assetsDir, `state-${profile}.zst`);
-  if (profile === "base" && !existsSync(named) && existsSync(join(assetsDir, "state.zst"))) {
-    console.warn(
-      "[runtime-vm] state-base.zst absent — booting legacy state.zst (pre-R13 bake); " +
-      "re-bake with `pnpm --filter @erdou/runtime-vm bake --profile base`",
-    );
-    return join(assetsDir, "state.zst");
-  }
-  return named;
+  return join(assetsDir, `state-${profile}.zst`);
 }
 
 export function assetsPresent(profile: VmProfile = "base"): boolean {
@@ -57,8 +50,8 @@ export async function loadNodeInputs(assets: V86Assets): Promise<V86BootInputs> 
   const metaPath = assets.statePath.replace(/\.zst$/, ".meta.json");
   const meta = JSON.parse(readFileSync(metaPath, "utf8")) as { codec: string; profile?: string };
   if (meta.codec !== "gzip") throw new Error(`unknown state codec ${meta.codec} — expected gzip`);
-  // Cross-linked asset guard: baked metas (T3+) stamp their profile. The legacy
-  // pre-R13 meta has none — tolerated until T10 removes the fallback above.
+  // Cross-linked asset guard: baked metas stamp their profile; refuse a state
+  // whose stamped profile doesn't match the requested one.
   if (assets.profile && meta.profile && meta.profile !== assets.profile) {
     throw new Error(`${metaPath} is a "${meta.profile}" bake but profile "${assets.profile}" was requested — cross-linked assets; re-bake with \`pnpm --filter @erdou/runtime-vm bake --profile ${assets.profile}\``);
   }

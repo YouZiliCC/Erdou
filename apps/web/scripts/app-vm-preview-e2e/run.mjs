@@ -170,7 +170,7 @@ async function main() {
       );
     });
 
-    const kernelBtnSel = 'button[aria-label="Kernel"]';
+    const kernelBtnSel = 'button[aria-label="Environment"]';
 
     // On a cold `.vite` optimize-deps cache Vite re-bundles on first navigation:
     // deferred module scripts stall `domcontentloaded` (so wait on "commit"
@@ -199,10 +199,10 @@ async function main() {
     // 2) Switch to the Linux VM (~40MB state fetch + ~2-3s boot).
     const t0 = Date.now();
     await page.click(kernelBtnSel);
-    await page.locator(".ui-select-pop .ui-select-opt", { hasText: "Linux VM" }).click();
+    await page.locator(".ui-select-pop .ui-select-opt", { hasText: "Linux VM · Python" }).click();
     try {
       await page.waitForFunction(
-        () => document.querySelector('button[aria-label="Kernel"] .ui-select-label')?.textContent === "Linux VM",
+        () => document.querySelector('button[aria-label="Environment"] .ui-select-label')?.textContent === "Linux VM · Python",
         undefined,
         { timeout: 40_000 },
       );

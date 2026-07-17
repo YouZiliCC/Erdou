@@ -143,7 +143,7 @@ async function main() {
     });
 
     const t0 = Date.now();
-    const kernelBtnSel = 'button[aria-label="Kernel"]';
+    const kernelBtnSel = 'button[aria-label="Environment"]';
 
     // On a cold `.vite` optimize-deps cache, Vite can still be re-bundling
     // when we first navigate; it then pushes a full-reload over its HMR
@@ -166,10 +166,10 @@ async function main() {
 
     // 2) Switch to the Linux VM (~40MB state fetch + ~2s boot).
     await page.click(kernelBtnSel);
-    await page.locator(".ui-select-pop .ui-select-opt", { hasText: "Linux VM" }).click();
+    await page.locator(".ui-select-pop .ui-select-opt", { hasText: "Linux VM · Python" }).click();
     try {
       await page.waitForFunction(
-        () => document.querySelector('button[aria-label="Kernel"] .ui-select-label')?.textContent === "Linux VM",
+        () => document.querySelector('button[aria-label="Environment"] .ui-select-label')?.textContent === "Linux VM · Python",
         undefined,
         { timeout: 40_000 },
       );
@@ -276,7 +276,7 @@ async function main() {
     await page.locator(".ui-select-pop .ui-select-opt", { hasText: "Browser kernel" }).click();
     try {
       await page.waitForFunction(
-        () => document.querySelector('button[aria-label="Kernel"] .ui-select-label')?.textContent === "Browser kernel",
+        () => document.querySelector('button[aria-label="Environment"] .ui-select-label')?.textContent === "Browser kernel",
         undefined,
         { timeout: 15_000 },
       );
