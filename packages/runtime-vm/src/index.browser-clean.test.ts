@@ -53,7 +53,7 @@ describe("runtime-vm default entry is browser-clean", () => {
     expect(idxImports.some((i) => /\.\/assets(\.js)?$/.test(i))).toBe(false);
     // and EVERY module reachable from the default entry — not just index.ts's
     // direct imports — must be node-free at the top level. A depth-≥2 import
-    // (e.g. a node:fs import reintroduced in port-registry.ts or
+    // (e.g. a node:fs import reintroduced in http-codec.ts or
     // workspace-snapshot.ts) would otherwise go undetected.
     for (const f of localGraph(join(here, "index.ts"))) {
       const nested = topLevelImports(f).filter((n) => NODE_BUILTINS.test(n));
