@@ -9,9 +9,14 @@ A second Erdou Runtime: a real 32-bit Alpine Linux guest in a [v86](https://gith
 ## Build the assets (once; not committed)
 
 ```
-pnpm --filter @erdou/runtime-vm download-assets   # pinned kernel + BIOS → assets/ (gitignored)
-pnpm --filter @erdou/runtime-vm bake              # Alpine + guestd → assets/state.zst (gitignored)
+pnpm --filter @erdou/runtime-vm download-assets            # pinned kernel + BIOS → assets/ (gitignored)
+pnpm --filter @erdou/runtime-vm bake --profile base        # → assets/state-base.zst (gitignored)
+pnpm --filter @erdou/runtime-vm bake --all                 # bake the whole profile set (base/node/sci)
 ```
+
+As of Round 13 the image is **multi-profile** — `base`, `node`, `sci`, each a separate
+`state-<profile>.zst` + meta + version. See [Profiles & package egress](#profiles--package-egress-round-13)
+below. `bake` defaults to `--profile base`; the conformance suite pins `base`.
 
 ## Browser usage
 
@@ -159,7 +164,71 @@ pnpm --filter @erdou/runtime-vm bake
 
 Then **bump `version` in `apps/web/src/lib/vm-assets.ts` AND `STATE_VERSION` in `scripts/bake-image.mjs`** (same string) so IndexedDB-cached clients re-fetch the new state (currently `alpine-3.24.1-r12-lo-baked`). The bake stamps that version into `assets/state.meta.json`, and `loadBrowserInputs` verifies it on every cache-miss fetch (`expectedStateVersion`), so a stale on-disk `state.zst` from an older bake fail-fasts with a re-bake instruction instead of being silently cached under the new key. The `state.zst`/kernel/bios binaries stay gitignored — never commit them.
 
-**Deferred to a later round (out of scope this round):** the npm/pip network-egress gateway (spec §7) and WISP — `networkEgress` is still `"none"`. This round is preview-only; the fetch-NAT is used solely for the host→guest dispatch reverse-proxy.
+**Package egress (Round 13):** the same fetch-NAT now also carries guest-originated `pip`/`npm`
+traffic to the real PyPI/npm registries — `networkEgress` is `"cors-only"`, not `"none"`. See
+[Profiles & package egress](#profiles--package-egress-round-13) below.
+
+## Profiles & package egress (Round 13)
+
+The VM ships as three baked **profiles**, each a self-contained `state-<profile>.zst` + `state-<profile>.meta.json`
+(the meta carries `version` + `profile`; a mismatch fail-fasts at boot via `expectedStateVersion`). The
+profile package data is the single source of truth in [`src/profiles.data.json`](./src/profiles.data.json),
+re-exported as typed `PROFILE_META`/`VM_PROFILES` from the browser-clean `@erdou/runtime-vm/profiles` subpath
+and read directly by the `.mjs` bake/link scripts.
+
+| Profile | Adds to base | Interpreters · package managers | Version | Size (gz) | Bake |
+| --- | --- | --- | --- | --- | --- |
+| `base` | `python3` `py3-pip` | python3 · apk, pip | `alpine-3.24.1-r13-base` | ~48 MB | `bake --profile base` |
+| `node` | `+ nodejs` `+ npm` | python3, node · apk, pip, npm | `alpine-3.24.1-r13-node` | ~80 MB | `bake --profile node` |
+| `sci` | `+ py3-numpy` `+ py3-pandas` | python3 · apk, pip | `alpine-3.24.1-r13-sci` | ~84 MB | `bake --profile sci` |
+
+Guest toolchain (all profiles): i686 Alpine 3.24.1, Python 3.14, pip 26.1.2; `node` adds node 24 / npm 11;
+`sci` bakes numpy 2.4 / pandas 3.0. Bake with `pnpm --filter @erdou/runtime-vm bake --profile <base|node|sci>`
+(pnpm forwards `--profile` straight through — no `--` needed) or `--all` for the whole set. Each bake asserts
+its per-profile smoke markers (`PIP_OK`, `NODE_OK`/`NPM_OK`, `SCI_OK`) and the baked config markers
+(`RESOLV_OK`, `PIPCONF_OK`, `NPMRC_OK`, `HOMESET_OK`) plus `ETH_OK`/`LO_OK` before `save_state`, and fails
+loudly rather than saving a broken image. On re-bake, bump the profile's `version` in
+`src/profiles.data.json` **and** `STATE_VERSION` in `scripts/bake-image.mjs`.
+
+### How package egress works
+
+Guest `pip`/`npm` are baked to point at **plain-HTTP** registry URLs; the page-side v86 fetch-NAT turns that
+guest HTTP (port 80 only) into a browser `fetch` to the real registry. There is **no custom gateway** and no
+guest CA — TLS terminates at the browser. `vmCapabilities` reports `networkEgress: "cors-only"`.
+
+- **npm — baked config only, no shim.** `/root/.npmrc` = `registry=http://registry.npmjs.org/`. The registry
+  301-redirects http→https and the NAT's `fetch` follows it; npm rewrites the tarball hosts itself. Verified:
+  `npm install left-pad` ≈ 32 s.
+- **pip — baked config + an egress shim.** `/etc/pip.conf` sets `index-url http://pypi.org/simple/`,
+  `trusted-host pypi.org files.pythonhosted.org`, and `break-system-packages = true` (Alpine's Python is
+  PEP-668 externally-managed). But pypi.org/files.pythonhosted.org answer plain http with `403 SSL is required`
+  (no redirect) and link `https://` wheels in their simple-API bodies, so a small shim
+  ([`egress-shim.ts`](./src/egress-shim.ts)) wraps the adapter's `fetch`: it upgrades `http://`→`https://`
+  (only in non-https contexts — v86 does this for free on an https-served page) and rewrites
+  `https://{files.pythonhosted.org,pypi.org}` → `http://` in simple-API responses. The shim is installed in
+  `V86Host.boot` **and re-installed after state restore** (v86 reconstructs `network_adapter` during restore,
+  which would otherwise leave the live adapter's `fetch` bare). Verified: `pip install six` ≈ 49 s;
+  `pip install flask` + a Flask app on `0.0.0.0` served back through `dispatch` ≈ 180 s.
+- **Only TCP:80 is relayed.** https and every other port refuse instantly (RST — a clean, fast failure, never a
+  hang), so guests must use `http://` registry URLs. In production the app page must be **https-served** for
+  PyPI (the NAT's auto-upgrade); npm works either way.
+- **CORS boundary.** npm's registry and PyPI's metadata *and* artifacts send `Access-Control-Allow-Origin: *`
+  (so they work from the browser's cross-origin `fetch`); Alpine's `dl-cdn` mirror does **not**. That is why
+  `apk` packages are **baked at image-build time**, not installed at runtime — apk-over-gateway (and arbitrary
+  TCP/git via a WISP relay) is deferred to Round 14.
+
+### Where installs land (persistence)
+
+Guest `/` is the chroot'd 9p **workspace** and `/usr` is read-only, so:
+
+- `pip install` auto-selects the **user site** (`/root/.local/...`) and `npm install` writes `node_modules` in
+  the project — both land on the 9p workspace and **persist** across VM reboots via snapshots. Only `/tmp` and
+  the skeleton bind-mount dirs (`bin lib usr proc dev tmp`) are ephemeral.
+- `python3 -m venv` works but adds **~1.5k small files** to every snapshot (and takes ~95 s to create under
+  emulation) — prefer the default user-site installs unless you specifically need isolation.
+- On `sci`, numpy/pandas are apk-baked, but the **first** `import numpy`/`import pandas` in a process is ~50 s
+  under emulation — heavy numeric work belongs in the browser kernel (Pyodide `loadPackage`/micropip, near
+  native speed), with `sci` as the compatibility fallback.
 
 ## Gated test suites
 
@@ -229,8 +298,14 @@ real PTY).
 server (probe-first, HTTP/1.1 codec, connection released), and a `guestd` port watcher emits
 `port.opened`/`port.closed` (+ a loopback-only `resource.warning` hint); apps/web's serve flow is
 kernel-aware (detached spawn + await `port.opened` for the VM). Verified by the gated Node conformance
-(30/30, incl. dispatch + port-event tests) and the gated app preview e2e (`RESULT ALL_PASS`). Deferred:
-the package-registry network-egress gateway + WISP (`networkEgress` is `"none"` today).
+(32/32, incl. dispatch + port-event tests) and the gated app preview e2e (`RESULT ALL_PASS`).
+
+**Round 13 (profiles + package egress) — complete:** three baked profiles (`base`/`node`/`sci`), real
+`pip`/`npm` installs through the fetch-NAT (`networkEgress: "cors-only"`) via a baked pip.conf/npmrc + the
+`egress-shim`, and per-profile capabilities. Verified by the gated Node conformance (32/32 on `base`) and the
+new `ERDOU_NET_E2E` suite (real `pip six` / `npm left-pad` / `pip flask`→`dispatch` preview / `sci` numpy
+import against live registries). Deferred to Round 14: `apk`-over-gateway and arbitrary TCP/git via a WISP
+relay (`dl-cdn` and most hosts are not CORS-open).
 
 ## Known limitations
 

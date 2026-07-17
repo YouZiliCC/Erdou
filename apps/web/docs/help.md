@@ -18,7 +18,7 @@ How to choose:
 
 - Start on the **Browser kernel** — instant, and it covers pure-Python and static-web work.
 - Switch to a **Linux VM** profile when you need a real shell, `npm`, or packages with native code. The VM is emulated x86 — expect it to be roughly 10-100x slower than native.
-- Switching copies your project across. The first boot of a VM profile downloads its image (roughly 40-70 MB, then cached); a profile that has not been baked fails loudly with the bake command to run.
+- Switching copies your project across. The first boot of a VM profile downloads its image (roughly 48-84 MB depending on profile, then cached); a profile that has not been baked fails loudly with the bake command to run.
 
 ## Installing packages
 

@@ -8,6 +8,8 @@ Erdou builds a browser-native operating environment — a virtual filesystem, pr
 
 **It works end to end today:** open the web app, paste a model key, describe a task, and an AI agent operates the browser-native OS — reading/writing files, running shell commands, verifying its work — with a live trace, a file browser, and an interactive terminal.
 
+**Environments & real packages (Round 13):** code runs either in the browser-native kernel or in a real 32-bit Alpine **Linux VM** (v86), which now ships as multiple baked profiles — `base` (Python), `node` (Node.js + npm), and `sci` (NumPy/Pandas). Real `pip install`/`npm install` work from inside the VM — guest HTTP rides the browser's own `fetch` out to PyPI/npm, with no local proxy or custom gateway — installs persist in the project workspace, and the browser kernel installs pure-Python wheels via micropip. The agent knows the whole collection and can `switch_environment` mid-task (approval-gated) when a step needs a different toolchain.
+
 ## Try it
 
 ```bash
