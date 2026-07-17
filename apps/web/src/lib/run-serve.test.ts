@@ -106,6 +106,9 @@ describe("runServeCommand (VM / realOs path)", () => {
     const r = await runServeCommand(runtime as any, shell as any, "python3 -m http.server 8001 --bind 127.0.0.1");
     expect(r.ok).toBe(false);
     expect(r.loopbackPorts).toEqual([8001]);
+    // carries a "bind 0.0.0.0" hint as stderr so the Preview panel shows it
+    // instead of a misleading "exited with code undefined".
+    expect(r.stderr).toContain("0.0.0.0");
   });
 
   it("a server that exits before opening a port fails with its stderr", async () => {

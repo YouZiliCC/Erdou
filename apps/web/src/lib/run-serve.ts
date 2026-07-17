@@ -66,7 +66,16 @@ function runServeDetached(runtime: ServeRuntime, commandLine: string): Promise<R
         // number from `resource` ("port:<n>").
         const port = Number(e.resource.slice("port:".length));
         loopbackPorts.push(port);
-        settle({ ok: false, openedPorts: [...openedPorts], loopbackPorts: [...loopbackPorts], pid });
+        // Carry the hint as `stderr` (mirroring the timeout settle) so the Preview
+        // panel shows "bind 0.0.0.0" instead of a misleading "exited with code
+        // undefined" — a loopback bind is the most common preview failure.
+        settle({
+          ok: false,
+          openedPorts: [...openedPorts],
+          loopbackPorts: [...loopbackPorts],
+          pid,
+          stderr: `Server on port ${port} is bound to loopback (127.0.0.1) — bind 0.0.0.0 to make it previewable.`,
+        });
       }
     });
     const timer = setTimeout(
