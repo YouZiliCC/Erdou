@@ -118,11 +118,9 @@ export class V86Host {
     this.emulator = this.makeEmulator(opt);
     // Package egress (Round 13): wrap the NAT's fetch with the pypi shim —
     // https upgrade in non-https contexts + simple-API link rewrite (pypi.org
-    // 403s plain http and links https wheels the NAT can't relay). The adapter
-    // is constructed synchronously for relay_url "fetch", so no request can
-    // beat the install; test fakes that model no NIC have nothing to wrap.
-    const net = this.emulator.network_adapter as { fetch?: UpstreamFetch } | undefined;
-    if (net && typeof net.fetch === "function") installEgressShim(net as { fetch: UpstreamFetch });
+    // 403s plain http and links https wheels the NAT can't relay). Install now
+    // for the no-restore path; test fakes that model no NIC have nothing to wrap.
+    this.installEgress();
 
     const timeoutMs = opts.bootTimeoutMs ?? DEFAULT_BOOT_TIMEOUT_MS;
     await new Promise<void>((resolve, reject) => {
@@ -135,11 +133,23 @@ export class V86Host {
       );
       this.emulator.add_listener("emulator-ready", () => { clearTimeout(timer); resolve(); });
     });
+    // Re-install after restore: restoring from initial_state RECONSTRUCTS
+    // network_adapter, so the pre-ready wrap above targets a dead object and the
+    // live adapter's fetch is bare (pip 403s; npm masks it via 301). Idempotent
+    // (marker guard), so the no-restore path where the object is unchanged is a
+    // no-op. Found by the Round-13 net-e2e acceptance suite.
+    this.installEgress();
     assertFs9pSymbols(this.emulator.fs9p);
     (this as { fs9p: Fs9p }).fs9p = this.emulator.fs9p as Fs9p;
   }
 
   run(): void { this.emulator.run(); }
+
+  /** Wrap the live NAT adapter's fetch with the pypi egress shim (idempotent). */
+  private installEgress(): void {
+    const net = this.emulator.network_adapter as { fetch?: UpstreamFetch } | undefined;
+    if (net && typeof net.fetch === "function") installEgressShim(net as { fetch: UpstreamFetch });
+  }
 
   private readonly inputSenders = new Map<number, (b: Uint8Array) => void>();
   private readonly flushTimers = new Set<ReturnType<typeof setTimeout>>();
