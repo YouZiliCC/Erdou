@@ -46,7 +46,7 @@ declare module "./types.js" {
 }
 
 const SHELL_BUILTINS =
-  "ls cat grep find head tail mkdir rm cp mv touch echo pwd env which ps kill true false";
+  "ls cat grep sed awk find head tail mkdir rm cp mv touch echo pwd env which ps kill jobs true false";
 
 /**
  * Foundational orientation shared by BOTH kernels — what Erdou *is* and how it
@@ -168,7 +168,9 @@ function simulatedPrompt(env: EnvironmentInfo, caps: RuntimeCapabilities): strin
   if (caps.packageManagers.length === 0) {
     notAvailable.push("Package managers (apt, yum, brew, apk) and system packages.");
   }
-  notAvailable.push("Docker, systemd, sudo/root, cron, and background daemons.");
+  notAvailable.push(
+    "Docker, systemd, sudo/root, cron, and managed services — but long-running BACKGROUND PROCESSES exist: a trailing & backgrounds the whole command line (prints [pid]; `jobs` lists them and surfaces a finished job's buffered output; `kill <pid>` stops one). A non-trailing & (cmd1 & cmd2) is an error.",
+  );
   if (!languages.includes("node")) {
     notAvailable.push("Node.js and npm — you cannot run .js/.ts files directly (no `node`).");
   }
@@ -188,7 +190,7 @@ function simulatedPrompt(env: EnvironmentInfo, caps: RuntimeCapabilities): strin
     "",
     "ENVIRONMENT",
     "- A virtual OS inside a web browser tab: an in-memory POSIX-ish filesystem, processes, and a shell. Paths are absolute and start with '/'. The filesystem starts empty.",
-    `- Shell: pipes (|), redirection (> >> <), and && || ; . Built-in commands: ${SHELL_BUILTINS}. cd and export change the shell state.`,
+    `- Shell: pipes (|), redirection (> >> <), && || ; and trailing-& background jobs (see \`jobs\`). Built-in commands: ${SHELL_BUILTINS}. cd and export change the shell state. sed/awk are honest busybox-style subsets that ERROR on anything unsupported (JS RegExp semantics) — prefer simple invocations.`,
     extraCommands.length > 0 ? `- Extra commands: ${extraCommands.join(", ")}.` : "",
     `- Languages you can run: ${canRun}.${wasiNote}`,
     caps.virtualPorts ? "- You can open virtual ports for previews." : "",

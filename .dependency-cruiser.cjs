@@ -1,4 +1,4 @@
-// Enforces the strict bottom-up layering from notice.md:
+// Enforces the strict bottom-up layering from docs/architecture.md:
 //   Agent depends on Runtime; Runtime never depends on Agent.
 //   Agent binds to the Runtime Contract, not a concrete Runtime.
 // Cross-package @erdou imports resolve to each package's src via its exports.

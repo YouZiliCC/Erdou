@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <b>English</b> | <a href="./README.zh-CN.md">简体中文</a>
+  <b>English</b> | <a href="./docs/README.zh-CN.md">简体中文</a>
 </p>
 
 <p align="center">
@@ -19,7 +19,9 @@
 
 ---
 
-Erdou is a browser-native operating environment — a virtual filesystem, processes, a POSIX-ish shell, snapshots and virtual ports — that an AI coding agent drives as if it were a real machine. Everything runs inside your browser tab: your code, the shell, the language runtimes, even a full Linux VM. Only the model API call leaves it. See [`proposal_v1.md`](./proposal_v1.md) for the full vision.
+Erdou is a browser-native operating environment — a virtual filesystem, processes, a POSIX-ish shell, snapshots and virtual ports — that an AI coding agent drives as if it were a real machine. Everything runs inside your browser tab: your code, the shell, the language runtimes, even a full Linux VM. Only the model API call leaves it.
+
+📖 **Docs:** [User guide](./docs/user-guide.md) · [Architecture](./docs/architecture.md) · [Roadmap](./docs/roadmap.md)
 
 **It works end to end today:** open the web app, paste a model key, describe a task — and the agent reads and writes files, runs commands, verifies its work and shows you a reviewable diff, live.
 
@@ -30,7 +32,7 @@ Erdou is a browser-native operating environment — a virtual filesystem, proces
 - **Real packages.** `pip install` / `npm install` work from *inside the VM* — guest HTTP rides the browser's own `fetch` out to PyPI/npm, no proxy server, and installs persist in the workspace. The browser kernel installs pure-Python wheels via micropip/Pyodide.
 - **A real dev server, in the tab.** Programs bind ports in the sandbox; a Service Worker reverse-proxies the preview iframe onto them. Static sites, Python WSGI apps and bundled React apps all render in the Preview panel — the agent can start a server and open the preview for you.
 - **Languages as plug-ins.** JavaScript/TypeScript built in; **Python** via Pyodide (real CPython in-browser); any `wasm32-wasi` binary (Rust/C/C++/Zig/TinyGo) via the WASI host. A language pack is just an `Executor` registered under a command name.
-- **Git in the browser.** A `git` executor over isomorphic-git — init/add/commit/log/status/branch fully client-side.
+- **Git in the browser — including the network.** A `git` executor over isomorphic-git: init/add/commit/log/status/branch fully client-side, plus **clone / fetch / pull / push** over smart-HTTP (token auth with redacted logging; browsers need a CORS proxy for github.com — `--cors-proxy` / `GIT_CORS_PROXY`, Node needs none).
 - **Your disk, safely.** Mount a local folder (File System Access API): two-way sync with external-edit conflict detection, an explicit mirror push, and fail-safes that refuse destructive writes.
 - **Private by construction.** Projects live in IndexedDB or your mounted folder. Nothing but the model API request ever leaves the browser.
 
@@ -43,24 +45,24 @@ pnpm --filter @erdou/web dev     # open the printed URL, click "Settings", set a
 
 Everything runs in your browser; only the model API call leaves it (proxied in dev to avoid CORS). See [`apps/web`](./apps/web).
 
+**Deploying?** `pnpm build` produces a static `apps/web/dist`. If your model provider blocks browser CORS (api.openai.com does), front it with the zero-dependency relay: `node scripts/model-proxy.mjs --target https://api.openai.com` — it streams SSE, passes `Authorization` through untouched, and stores nothing.
+
 ### Enable the Linux VM (optional)
 
 The browser-native kernel works out of the box — nothing to bake. The Alpine **Linux VM** environments do **not**: their machine images are baked artifacts (gitignored, never committed), so on a fresh clone every VM option in the environment picker shows "— not baked" until you bake it yourself:
 
 ```bash
+pnpm --filter @erdou/runtime-vm download-assets       # once: fetch + sha256-verify the boot blobs
 pnpm --filter @erdou/runtime-vm bake --profile base   # or: node | sci | --all
 ```
 
-The bake needs two inputs:
-
-1. **Network access to the Alpine CDN** (`dl-cdn.alpinelinux.org`) — it fetches the pinned Alpine 3.24.1 x86 minirootfs plus each profile's apk packages (a few MiB for `base`, tens of MiB for `node`/`sci`).
-2. **Three boot blobs in `packages/runtime-vm/assets/`** — `kernel.bin`, `seabios.bin`, `vgabios.bin` (the v86 buildroot bzImage + SeaBIOS/VGABIOS). These have **no pinned public download URL yet**: `pnpm --filter @erdou/runtime-vm download-assets` only verifies files already staged there, so for now you must copy the three files from an existing checkout that has them (sha256 pins live in `packages/runtime-vm/assets/manifest.json`).
+A fresh clone bootstraps with **zero manual staging**: `download-assets` fetches the three boot blobs (`kernel.bin` — v86's buildroot bzImage; `seabios.bin`/`vgabios.bin` — pinned by immutable commit in the v86 repo), sha256-verifies every byte against `assets/manifest.json` (a mismatched download is deleted and the script fails loudly), and is idempotent — re-runs double as an integrity check. The bake itself additionally needs network access to the Alpine CDN (`dl-cdn.alpinelinux.org`) for the pinned Alpine 3.24.1 x86 minirootfs + each profile's apk packages.
 
 Each bake takes well under a minute and writes `assets/state-<profile>.zst` (roughly 48–84 MB per profile, downloaded once by the browser and then cached).
 
 ## Architecture
 
-Erdou follows a strict bottom-up layering (see [`notice.md`](./notice.md)). **Agent depends on Runtime; Runtime never depends on Agent.** Agents bind to the Runtime *Contract*, never to a concrete Runtime.
+Erdou follows a strict bottom-up layering (see [`docs/architecture.md`](./docs/architecture.md)). **Agent depends on Runtime; Runtime never depends on Agent.** Agents bind to the Runtime *Contract*, never to a concrete Runtime.
 
 ```
 browser APIs → runtime-contract → runtime implementations → agent-tools → agent-core → app
@@ -73,7 +75,7 @@ This is **enforced in CI**, not merely documented — `pnpm lint:deps` fails the
 | Package | Role |
 | --- | --- |
 | [`@erdou/runtime-contract`](./packages/runtime-contract) | The frozen boundary: pure types/interfaces every Runtime implements. Zero dependencies. |
-| [`@erdou/runtime-browser`](./packages/runtime-browser) | The browser-native kernel: VFS, process table + in-process executor, POSIX-ish shell + built-ins, snapshots, virtual ports. |
+| [`@erdou/runtime-browser`](./packages/runtime-browser) | The browser-native kernel: VFS, process table + in-process executor, POSIX-ish shell + built-ins (incl. honest `sed`/`awk` subsets and trailing-`&` background jobs), snapshots, virtual ports. |
 | [`@erdou/runtime-vm`](./packages/runtime-vm) | The second kernel: a real 32-bit Alpine Linux guest in a v86 WASM emulator, behind the same contract. Multi-profile images, package egress, PTY. |
 | [`@erdou/runtime-wasi`](./packages/runtime-wasi) | A `wasi_snapshot_preview1` host over the executor contract — runs `wasm32-wasi` binaries from Rust/C/C++/Zig/TinyGo. |
 | [`@erdou/conformance`](./packages/conformance) | A runtime-agnostic contract test suite. Any adapter that passes it satisfies the contract. |
@@ -113,6 +115,7 @@ Requires Node ≥ 22 and pnpm ≥ 11. Everything is Node-runnable — the kernel
 
 - **Fail fast, no silent fallbacks.** Every failure throws a typed errno error (`ENOENT: no such file or directory, open '/foo'`) carrying the offending path — never a swallowed default.
 - **No over-engineering.** Only what the current round needs; deferred capabilities are pre-seeded by the layering, not built speculatively.
+- **Keep the agent's self-image current.** The agent's system prompt — its `ABOUT ERDOU` environment brief, capability catalog and tool guidance (`packages/agent-core/src/prompt.ts`) — is a single source of truth. Any change that adds or alters a capability must update it in the same change: an agent with a stale world-model builds the wrong thing.
 
 ## License
 

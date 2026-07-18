@@ -196,16 +196,27 @@ export class ProcessTable {
    * shell command line behind `Runtime.exec`, whose streams and lifecycle the
    * caller owns. The table tracks it for getProcesses/wait/kill; the caller
    * settles it via the returned controls. The record's own stdio streams are
-   * closed placeholders (the composite's real streams live on its handle).
+   * closed placeholders (the composite's real streams live on its handle) —
+   * unless the caller passes live `stdout`/`stderr`, which are exposed on the
+   * record as-is (the shell's background jobs buffer their output there so
+   * `jobs` can read it off the table entry later). The caller owns passed
+   * streams entirely: the table never writes to or ends them.
    */
-  adopt(opts: { cmd: string; args?: string[]; cwd?: string; env?: Record<string, string> }): AdoptedProcess {
+  adopt(opts: {
+    cmd: string;
+    args?: string[];
+    cwd?: string;
+    env?: Record<string, string>;
+    stdout?: PipeStream;
+    stderr?: PipeStream;
+  }): AdoptedProcess {
     const pid = this.nextPid++;
     const stdin = new PipeStream();
-    const stdout = new PipeStream();
-    const stderr = new PipeStream();
     stdin.end();
-    stdout.end();
-    stderr.end();
+    const stdout = opts.stdout ?? new PipeStream();
+    const stderr = opts.stderr ?? new PipeStream();
+    if (opts.stdout === undefined) stdout.end();
+    if (opts.stderr === undefined) stderr.end();
 
     let resolveWait!: (status: ExitStatus) => void;
     const waitPromise = new Promise<ExitStatus>((resolve) => {

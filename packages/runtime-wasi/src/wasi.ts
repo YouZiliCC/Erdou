@@ -389,8 +389,49 @@ export class WasiHost {
       sched_yield: (): number => E.SUCCESS,
       fd_datasync: (): number => E.SUCCESS,
       fd_sync: (): number => E.SUCCESS,
-      fd_readdir: (_fd: number, _buf: number, _len: number, _cookie: number, usedPtr: number): number => {
-        this.view().setUint32(usedPtr, 0, true); // directory iteration is not yet supported
+      // Preview1 dirent stream: each record is a 24-byte dirent header
+      // (d_next u64 | d_ino u64 | d_namlen u32 | d_type u8 + padding) followed
+      // by the raw name bytes (no NUL). `cookie` is the index to resume from
+      // (0 = start); each record's d_next is the cookie of the record after it.
+      // Per the spec, when the buffer is too small the final record is written
+      // truncated so bufused == buf_len — callers treat bufused < buf_len as
+      // end-of-directory and otherwise resume with the last complete d_next.
+      // Listings include "." and ".." first (both directories), matching the
+      // preview1 host convention (e.g. wasmtime). d_ino is 0, consistent with
+      // fd_filestat_get above (this host has no inode numbers).
+      fd_readdir: (fd: number, bufPtr: number, bufLen: number, cookie: number | bigint, bufUsedPtr: number): number => {
+        const f = this.fds.get(fd);
+        if (!f) return E.BADF;
+        if (f.type !== "dir" && f.type !== "preopen") return E.NOTDIR;
+        let entries: { name: string; type: number }[];
+        try {
+          entries = [
+            { name: ".", type: FT.DIRECTORY },
+            { name: "..", type: FT.DIRECTORY },
+            ...o.fs.readdir(f.path!).map((e) => ({
+              name: e.name,
+              type: e.type === "directory" ? FT.DIRECTORY : e.type === "symlink" ? FT.SYMLINK : FT.REGULAR,
+            })),
+          ];
+        } catch (err) {
+          return mapError(err);
+        }
+        const u = this.u8();
+        let used = 0;
+        for (let i = Number(cookie); i < entries.length && used < bufLen; i++) {
+          const nameBytes = encoder.encode(entries[i]!.name);
+          const record = new Uint8Array(24 + nameBytes.length);
+          const rv = new DataView(record.buffer);
+          rv.setBigUint64(0, BigInt(i + 1), true); // d_next
+          rv.setBigUint64(8, 0n, true); // d_ino
+          rv.setUint32(16, nameBytes.length, true); // d_namlen
+          rv.setUint8(20, entries[i]!.type); // d_type
+          record.set(nameBytes, 24);
+          const n = Math.min(record.length, bufLen - used);
+          u.set(record.subarray(0, n), bufPtr + used);
+          used += n;
+        }
+        this.view().setUint32(bufUsedPtr, used, true);
         return E.SUCCESS;
       },
     };

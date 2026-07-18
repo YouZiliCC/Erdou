@@ -3,6 +3,8 @@ import type { Program, ProgramRegistry } from "../process/program.js";
 import { describeError } from "./util.js";
 import * as fsCmd from "./fs.js";
 import * as textCmd from "./text.js";
+import { sed } from "./sed.js";
+import { awk } from "./awk.js";
 import { erdou } from "./serve.js";
 
 export interface BuiltinDeps {
@@ -28,9 +30,10 @@ const SIGNAL_ALIASES: Record<string, Signal> = {
 };
 
 /**
- * Populate and return the program registry. `cd`/`export` are intercepted by
- * the shell interpreter (they mutate shell state) and registered here only as
- * harmless guards so `which cd` works and a stray `cd` in a pipeline is a no-op.
+ * Populate and return the program registry. `cd`/`export`/`jobs` are
+ * intercepted by the shell interpreter (they touch shell-session state: cwd,
+ * environment, background-job list) and registered here only as harmless
+ * guards so `which cd` works and a stray `cd` in a pipeline is a no-op.
  */
 export function createBuiltins(deps: BuiltinDeps): ProgramRegistry {
   const reg = deps.registry;
@@ -93,6 +96,8 @@ export function createBuiltins(deps: BuiltinDeps): ProgramRegistry {
     grep: textCmd.grep,
     head: textCmd.head,
     tail: textCmd.tail,
+    sed,
+    awk,
     true: textCmd.trueCmd,
     false: textCmd.falseCmd,
     which,
@@ -101,6 +106,7 @@ export function createBuiltins(deps: BuiltinDeps): ProgramRegistry {
     erdou,
     cd: noop,
     export: noop,
+    jobs: noop,
   };
 
   for (const [name, prog] of Object.entries(programs)) reg.set(name, prog);

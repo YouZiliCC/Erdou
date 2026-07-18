@@ -56,13 +56,25 @@ export function parse(src: string): List {
         t.type === "op" &&
         (t.value === "&&" || t.value === "||" || t.value === ";" || t.value === "&")
       ) {
-        // '&' backgrounds the list; in this round it sequences like ';'.
-        if (t.value === "&") background = true;
-        op = t.value === "&" ? ";" : t.value;
+        // '&' backgrounds the WHOLE list and is only supported as the line's
+        // final token. Per-item backgrounding ('cmd1 & cmd2') has no AST
+        // representation, so it errors loudly instead of silently sequencing.
+        if (t.value === "&") {
+          pos++;
+          if (pos < tokens.length) {
+            throw new ErrnoError("EINVAL", {
+              syscall: "parse",
+              path: "'&' is only supported at the end of a line ('cmd &'); 'cmd1 & cmd2' is not",
+            });
+          }
+          background = true;
+          break;
+        }
+        op = t.value;
         pos++;
         if (pos >= tokens.length) {
-          // A trailing ';' or '&' just terminates the list.
-          if (t.value === ";" || t.value === "&") break;
+          // A trailing ';' just terminates the list.
+          if (t.value === ";") break;
           throw new ErrnoError("EINVAL", { syscall: "parse", path: "dangling operator" });
         }
       } else {

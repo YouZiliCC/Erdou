@@ -19,9 +19,11 @@ mkdirSync(pub, { recursive: true });
 
 function link(f, hint) {
   const target = join(assetsDir, f);
-  if (!existsSync(target)) { console.warn(`[link-vm-assets] missing ${target} — run \`${hint}\``); return false; }
   const l = join(pub, f);
+  // Drop a stale link even when the target vanished — a dangling symlink here
+  // breaks the vite build (it tries to copy the missing target).
   try { rmSync(l, { force: true }); } catch {}
+  if (!existsSync(target)) { console.warn(`[link-vm-assets] missing ${target} — run \`${hint}\``); return false; }
   symlinkSync(relative(pub, target), l);
   return true;
 }

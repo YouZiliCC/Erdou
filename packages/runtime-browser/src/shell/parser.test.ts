@@ -28,6 +28,21 @@ describe("parse", () => {
     expect(list.items[0]!.pipeline.commands[0]!.words).toHaveLength(2);
   });
 
+  it("a trailing & backgrounds a whole pipeline / list", () => {
+    let list = parse("echo hi | grep h &");
+    expect(list.background).toBe(true);
+    expect(list.items[0]!.pipeline.commands).toHaveLength(2);
+
+    list = parse("a && b &");
+    expect(list.background).toBe(true);
+    expect(list.items).toHaveLength(2);
+  });
+
+  it("rejects a non-trailing & with EINVAL (only 'cmd &' is supported)", () => {
+    expect(() => parse("echo a & echo b")).toThrow(/EINVAL/);
+    expect(() => parse("echo a & echo b")).toThrow(/'cmd1 & cmd2' is not/);
+  });
+
   it("keeps glob words unexpanded in the AST", () => {
     const cmd = parse("ls *.ts").items[0]!.pipeline.commands[0]!;
     expect(cmd.words[1]).toEqual({ parts: [{ t: "glob", v: "*.ts" }] });

@@ -2,7 +2,7 @@ import { ErrnoError } from "@erdou/runtime-contract";
 import type { Signal } from "@erdou/runtime-contract";
 import { parse } from "./parser.js";
 import { expandWord } from "./expand.js";
-import type { Command, Pipeline } from "./ast.js";
+import type { Command, List, ListItem, Pipeline } from "./ast.js";
 import { PipeStream } from "../core/byte-stream.js";
 import { join, normalize } from "../vfs/path.js";
 import type { Vfs } from "../vfs/vfs.js";
@@ -36,17 +36,31 @@ export interface ShellDeps {
   env?: Record<string, string>;
 }
 
+/** A background job launched by a trailing `&`. `record` is the job's adopted
+ *  process-table entry: its pid is what `[pid] cmd` announced, killing it kills
+ *  the job's stages, and its stdout/stderr streams hold the buffered output. */
+interface BackgroundJob {
+  pid: number;
+  command: string;
+  record: ProcessRecord;
+}
+
 /**
  * The shell interpreter: parses a command line and runs it against the process
- * table, wiring pipelines, redirections and `&&`/`||`/`;` control flow. `cd`
- * and `export` are handled in-process because they mutate the shell's own cwd
- * and environment, which persist across `execute` calls on the same instance.
+ * table, wiring pipelines, redirections and `&&`/`||`/`;` control flow. `cd`,
+ * `export` and `jobs` are handled in-process because they touch the shell's
+ * own cwd/environment/job-list, which persist across `execute` calls on the
+ * same instance. A trailing `&` detaches the whole line as a background job
+ * (see {@link Shell.launchBackground}).
  */
 export class Shell {
   cwd: string;
   env: Record<string, string>;
   private readonly table: ProcessTable;
   private readonly vfs: Vfs;
+  /** This shell's background jobs, oldest first. Finished jobs stay here until
+   *  `jobs` has reported them done once, then they are dropped. */
+  private readonly jobs: BackgroundJob[] = [];
 
   constructor(deps: ShellDeps) {
     this.table = deps.table;
@@ -59,9 +73,10 @@ export class Shell {
     const stdout = new PipeStream();
     const stderr = new PipeStream();
     const records: ProcessRecord[] = [];
+    let canceled = false;
     const wait = (async (): Promise<number> => {
       try {
-        return await this.process(src, stdout, stderr, records);
+        return await this.process(src, stdout, stderr, records, () => canceled);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (!stderr.isClosed) stderr.write(msg + "\n");
@@ -76,6 +91,7 @@ export class Shell {
       stderr,
       wait: () => wait,
       kill: (signal?: Signal) => {
+        canceled = true; // also stop launching the list's not-yet-started items
         for (const r of records) if (r.state === "running") r.kill(signal);
       },
     };
@@ -90,10 +106,29 @@ export class Shell {
     stdout: PipeStream,
     stderr: PipeStream,
     records: ProcessRecord[],
+    canceled: () => boolean,
   ): Promise<number> {
     const list = parse(src);
+    // A trailing `&` backgrounds the whole list: announce "[pid] cmd" on the
+    // shell's stdout and return immediately; the job runs detached under an
+    // adopted pid (it is NOT in `records`, so killing this foreground result
+    // does not touch it — `&` means detach).
+    if (list.background) return this.launchBackground(src, list, stdout);
+    return this.runList(list.items, stdout, stderr, records, canceled);
+  }
+
+  /** Run list items sequentially with &&/||/; semantics. `canceled` is checked
+   *  before each item so a kill also stops the items not yet started. */
+  private async runList(
+    items: ListItem[],
+    stdout: PipeStream,
+    stderr: PipeStream,
+    records: ProcessRecord[],
+    canceled: () => boolean,
+  ): Promise<number> {
     let code = 0;
-    for (const item of list.items) {
+    for (const item of items) {
+      if (canceled()) break;
       const shouldRun =
         item.op === null || item.op === ";"
           ? true
@@ -101,12 +136,98 @@ export class Shell {
             ? code === 0
             : code !== 0; // "||"
       if (!shouldRun) continue;
-      // `&` is parsed but runs in the foreground this round — true background
-      // detachment is deferred. Running sequentially keeps output capture and
-      // &&/||/; sequencing correct instead of racing stream teardown.
       code = await this.execPipeline(item.pipeline, stdout, stderr, records);
     }
     return code;
+  }
+
+  /**
+   * Launch `list` as a detached background job: adopt a real pid for the
+   * composite (so it shows up in `ps` and `kill <pid>` kills the whole job),
+   * buffer its stdout/stderr on that process-table entry, register it in this
+   * shell's job list, and announce "[pid] command" on the shell's stdout.
+   * Returns 0 immediately — the caller does not await the job. The first
+   * pipeline spawns synchronously here, so the job sees the cwd/env as of the
+   * `&` line. The shell has no async output channel (sessions are command-at-
+   * a-time), so the buffered output surfaces only when `jobs` reports the job
+   * done — never interleaved into a later prompt.
+   */
+  private launchBackground(src: string, list: List, shellStdout: PipeStream): number {
+    // parse() only accepts `&` as the line's final token, so the trimmed
+    // source is guaranteed to end with it — strip it for display.
+    const command = src.trimEnd().replace(/&$/, "").trim();
+    const jobStdout = new PipeStream();
+    const jobStderr = new PipeStream();
+    const records: ProcessRecord[] = [];
+    let canceled = false;
+    const adopted = this.table.adopt({
+      cmd: command,
+      cwd: this.cwd,
+      env: this.env,
+      stdout: jobStdout,
+      stderr: jobStderr,
+    });
+    adopted.onKill((signal) => {
+      canceled = true;
+      for (const r of records) if (r.state === "running") r.kill(signal);
+    });
+    this.jobs.push({ pid: adopted.record.pid, command, record: adopted.record });
+    shellStdout.write(`[${adopted.record.pid}] ${command}\n`);
+    void (async (): Promise<void> => {
+      let code: number;
+      try {
+        code = await this.runList(list.items, jobStdout, jobStderr, records, () => canceled);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!jobStderr.isClosed) jobStderr.write(msg + "\n");
+        code = 2;
+      } finally {
+        // End the buffers before settling the record, so a normally-exited job
+        // is fully readable the moment it reads as done. (A killed job settles
+        // first via the table; the runner unwinds and ends them within
+        // microtasks, and `jobs` awaits the streams, tolerating that gap.)
+        if (!jobStdout.isClosed) jobStdout.end();
+        if (!jobStderr.isClosed) jobStderr.end();
+      }
+      adopted.exited(code);
+    })();
+    return 0;
+  }
+
+  /**
+   * `jobs` — session-scoped job report. Running jobs print as
+   * "[pid] running  <command>"; finished (exited or killed) jobs print once as
+   * "[pid] done (<exit code>)  <command>" followed by their buffered
+   * stdout/stderr — this is the one sanctioned place a background job's output
+   * surfaces (the command-at-a-time shell cannot interleave it asynchronously)
+   * — and are then dropped from the list.
+   */
+  private async builtinJobs(
+    argv: string[],
+    stdout: PipeStream,
+    stderr: PipeStream,
+  ): Promise<number> {
+    if (argv.length > 1) {
+      stderr.write(`jobs: takes no arguments (got: ${argv.slice(1).join(" ")})\n`);
+      return 2;
+    }
+    const reported: BackgroundJob[] = [];
+    for (const job of [...this.jobs]) {
+      if (job.record.state === "running") {
+        stdout.write(`[${job.pid}] running  ${job.command}\n`);
+      } else {
+        stdout.write(`[${job.pid}] done (${job.record.exitCode})  ${job.command}\n`);
+        const [out, err] = await Promise.all([job.record.stdout.text(), job.record.stderr.text()]);
+        if (out.length > 0) stdout.write(out);
+        if (err.length > 0) stderr.write(err);
+        reported.push(job);
+      }
+    }
+    for (const job of reported) {
+      const idx = this.jobs.indexOf(job);
+      if (idx !== -1) this.jobs.splice(idx, 1);
+    }
+    return 0;
   }
 
   private async execPipeline(
@@ -121,6 +242,7 @@ export class Shell {
       const argv = specs[0]!.argv;
       if (argv[0] === "cd") return this.builtinCd(argv, shellStderr);
       if (argv[0] === "export") return this.builtinExport(argv);
+      if (argv[0] === "jobs") return this.builtinJobs(argv, shellStdout, shellStderr);
     }
 
     const firstInput = specs[0]!.redirects.find((r) => r.op === "<");

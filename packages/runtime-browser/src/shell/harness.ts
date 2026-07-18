@@ -6,7 +6,7 @@ import { createBuiltins } from "../builtins/index.js";
 import { Shell } from "./interpreter.js";
 
 /** A fully-wired Vfs + ProcessTable + builtins + Shell for tests. */
-export function makeShell(): { shell: Shell; vfs: Vfs } {
+export function makeShell(): { shell: Shell; vfs: Vfs; table: ProcessTable } {
   const vfs = new Vfs({ clock: () => 0 });
   const bus = new EventBus();
   const registry: ProgramRegistry = new Map();
@@ -17,5 +17,5 @@ export function makeShell(): { shell: Shell; vfs: Vfs } {
     killProcess: (pid, signal) => table.kill(pid, signal),
   });
   const shell = new Shell({ table, vfs });
-  return { shell, vfs };
+  return { shell, vfs, table };
 }

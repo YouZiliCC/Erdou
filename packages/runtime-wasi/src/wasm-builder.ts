@@ -93,3 +93,59 @@ export function moduleFdWrite(text: string): Uint8Array {
   const dataSec = section(11, vec([seg(iovAddr, iov), seg(dataAddr, data)]));
   return assemble([types, imports, funcs, mem1, exports, code10, dataSec]);
 }
+
+const i64 = 0x7e;
+
+/**
+ * A module whose _start calls fd_readdir(fd, buf=64, bufLen, cookie, bufused@8).
+ * On a non-zero errno it calls proc_exit(errno); otherwise it fd_writes the
+ * filled dirent buffer (exactly bufused bytes) to stdout and exits 0, so a test
+ * can decode the raw preview1 dirent stream from stdout.
+ */
+export function moduleFdReaddir(fd: number, bufLen: number, cookie: number): Uint8Array {
+  const BUF = 64;
+  const USED = 8;
+  const IOV = 16;
+  const types = section(
+    1,
+    vec([
+      [0x60, ...uleb(5), i32, i32, i32, i64, i32, ...uleb(1), i32], // fd_readdir
+      [0x60, ...uleb(4), i32, i32, i32, i32, ...uleb(1), i32], // fd_write
+      [0x60, ...uleb(1), i32, ...uleb(0)], // proc_exit
+      TYPE_VOID_VOID,
+    ]),
+  );
+  const imports = section(
+    2,
+    vec([
+      [...name("wasi_snapshot_preview1"), ...name("fd_readdir"), 0x00, ...uleb(0)],
+      [...name("wasi_snapshot_preview1"), ...name("fd_write"), 0x00, ...uleb(1)],
+      [...name("wasi_snapshot_preview1"), ...name("proc_exit"), 0x00, ...uleb(2)],
+    ]),
+  );
+  const funcs = section(3, vec([[...uleb(3)]]));
+  const exports = section(7, vec([memExport, [...name("_start"), 0x00, ...uleb(3)]]));
+  const body = [
+    ...uleb(1), ...uleb(1), i32, // one local: errno
+    0x41, ...sleb(fd),
+    0x41, ...sleb(BUF),
+    0x41, ...sleb(bufLen),
+    0x42, ...sleb(cookie), // i64.const cookie
+    0x41, ...sleb(USED),
+    0x10, ...uleb(0), // call fd_readdir
+    0x21, ...uleb(0), // local.set errno
+    0x20, ...uleb(0), // local.get errno
+    0x04, 0x40, // if (errno != 0)
+    0x20, ...uleb(0),
+    0x10, ...uleb(2), // call proc_exit(errno)
+    0x0b, // end if
+    0x41, ...sleb(IOV), 0x41, ...sleb(BUF), 0x36, ...uleb(2), ...uleb(0), // iov.ptr = BUF
+    0x41, ...sleb(IOV + 4), 0x41, ...sleb(USED), 0x28, ...uleb(2), ...uleb(0), 0x36, ...uleb(2), ...uleb(0), // iov.len = bufused
+    0x41, ...sleb(1), 0x41, ...sleb(IOV), 0x41, ...sleb(1), 0x41, ...sleb(32),
+    0x10, ...uleb(1), // call fd_write(1, iov, 1, nwritten@32)
+    0x1a, // drop
+    0x0b, // end
+  ];
+  const code10 = section(10, vec([[...uleb(body.length), ...body]]));
+  return assemble([types, imports, funcs, mem1, exports, code10]);
+}

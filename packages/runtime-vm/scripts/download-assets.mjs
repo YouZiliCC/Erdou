@@ -1,59 +1,36 @@
-// Fetch the pinned kernel + BIOS blobs into assets/ (gitignored). Reads
-// assets/manifest.json for the source locations; verifies sha256 when present.
+// Ensure the pinned kernel + BIOS blobs exist in assets/ (gitignored), byte-
+// identical to the sha256 pins in assets/manifest.json — makes a fresh clone
+// able to bake without any manual staging. Per blob (see lib/ensure-asset.mjs):
+// - present -> sha256-verified in place (mismatch fails loudly with both
+//   hashes, file kept for inspection);
+// - missing -> downloaded from the manifest's pinned url to a temp name,
+//   sha256-verified, atomically renamed into place (bad bytes delete the temp
+//   and fail with both hashes — assets/ never holds an unverified blob).
+// Idempotent: a green run leaves the next run with nothing but verifies.
 //
-// NOTE on regeneration: the kernel/BIOS blobs are the v86 buildroot bzImage +
-// SeaBIOS/VGABIOS build assets verified across the R11 spikes (spike dirs
-// a/b/c all used identical copies — buildroot-bzimage68.bin, seabios.bin,
-// vgabios.bin). There is no stable public release URL pinned for them yet
-// (see manifest.json's kernel.source / bios.source); until one is set, this
-// script is a no-op if the three files are already staged in assets/ (as they
-// are after a manual copy for the first bake) — it only fetches when a file is
-// missing AND a manifest.*.url is configured. Fill manifest.kernel.url +
-// manifest.bios.seabiosUrl/vgabiosUrl (a release attachment or the team's
-// asset store) to make this script able to (re)fetch from scratch.
+// Provenance of the pins (each URL fetched + hash-matched on 2026-07-18):
+// - kernel.bin  = v86's buildroot bzImage (9p+virtio), buildroot-bzimage68.bin
+//   on the v86 project's asset host i.copy.sh (no commit-addressed URL exists
+//   there; the sha256 pin is the integrity anchor).
+// - seabios.bin / vgabios.bin = copy/v86 repo bios/ build assets, pinned by
+//   immutable commit SHA (2f1346b0…, master at pin time; bytes last changed
+//   2023-08-06 in b8a39b11…).
 import fs from "node:fs";
 import path from "node:path";
-import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { ensureAsset } from "./lib/ensure-asset.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const assets = path.join(here, "..", "assets");
 const manifest = JSON.parse(fs.readFileSync(path.join(assets, "manifest.json"), "utf8"));
 
-async function get(url, dest, sha256) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`fetch ${url} -> ${r.status}`);
-  const buf = Buffer.from(await r.arrayBuffer());
-  if (sha256 && sha256 !== "<fill-from-download>") {
-    const got = crypto.createHash("sha256").update(buf).digest("hex");
-    if (got !== sha256) throw new Error(`sha256 mismatch for ${dest}: expected ${sha256}, got ${got}`);
-  }
-  fs.writeFileSync(dest, buf);
-  console.log(`wrote ${dest} (${buf.length} bytes)`);
+const blobs = [
+  { dest: path.join(assets, manifest.kernel.file), url: manifest.kernel.url, sha256: manifest.kernel.sha256 },
+  { dest: path.join(assets, manifest.bios.seabios), url: manifest.bios.seabiosUrl, sha256: manifest.bios.seabiosSha256 },
+  { dest: path.join(assets, manifest.bios.vgabios), url: manifest.bios.vgabiosUrl, sha256: manifest.bios.vgabiosSha256 },
+];
+for (const blob of blobs) {
+  const action = await ensureAsset(blob);
+  console.log(`${action} ${path.basename(blob.dest)} (${fs.statSync(blob.dest).size} bytes, sha256 ${blob.sha256})`);
 }
-
-const kernelDest = path.join(assets, "kernel.bin");
-const seabiosDest = path.join(assets, "seabios.bin");
-const vgabiosDest = path.join(assets, "vgabios.bin");
-
-if (fs.existsSync(kernelDest) && fs.existsSync(seabiosDest) && fs.existsSync(vgabiosDest)) {
-  console.log("assets already staged (kernel.bin, seabios.bin, vgabios.bin present) — skipping fetch.");
-  console.log("To force a re-fetch, delete them and set manifest.kernel.url + bios.seabiosUrl/vgabiosUrl.");
-  process.exit(0);
-}
-
-// NOTE: set manifest.kernel.url / manifest.bios.*.url to the pinned source your
-// bake was verified against (a release attachment or the team asset store).
-const kernelUrl = manifest.kernel.url;
-const seabiosUrl = manifest.bios.seabiosUrl;
-const vgabiosUrl = manifest.bios.vgabiosUrl;
-if (!kernelUrl || !seabiosUrl || !vgabiosUrl) {
-  throw new Error(
-    "assets/manifest.json needs kernel.url + bios.seabiosUrl + bios.vgabiosUrl (pin your sources) — " +
-    "or copy the three verified blobs into assets/ manually for a first bake (see manifest kernel/bios .source notes)."
-  );
-}
-await get(kernelUrl, kernelDest, manifest.kernel.sha256);
-await get(seabiosUrl, seabiosDest, manifest.bios.seabiosSha256);
-await get(vgabiosUrl, vgabiosDest, manifest.bios.vgabiosSha256);
 console.log("assets ready");

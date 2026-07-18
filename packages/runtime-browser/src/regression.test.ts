@@ -87,18 +87,23 @@ describe("regression: process", () => {
 });
 
 describe("regression: shell + builtins", () => {
-  it("#3 a backgrounded command's output is not lost", async () => {
-    const { shell } = makeShell();
+  it("#3 a backgrounded command's output surfaces via jobs (real backgrounding superseded the interim foreground-&)", async () => {
+    const { shell, table } = makeShell();
     const r = shell.execute("echo hi &");
     await r.wait();
-    expect(await r.stdout.text()).toBe("hi\n");
+    const pid = Number((await r.stdout.text()).match(/^\[(\d+)\]/)![1]);
+    await table.wait(pid);
+    const j = shell.execute("jobs");
+    await j.wait();
+    expect(await j.stdout.text()).toBe(`[${pid}] done (0)  echo hi\nhi\n`);
   });
 
-  it("#19 a non-trailing & sequences instead of throwing", async () => {
+  it("#19 a non-trailing & errors loudly instead of silently sequencing", async () => {
     const { shell } = makeShell();
     const r = shell.execute("echo a & echo b");
-    await r.wait();
-    expect(await r.stdout.text()).toBe("a\nb\n");
+    expect(await r.wait()).toBe(2);
+    expect(await r.stdout.text()).toBe("");
+    expect(await r.stderr.text()).toMatch(/EINVAL/);
   });
 
   it("#4 tail -n 0 prints nothing", async () => {

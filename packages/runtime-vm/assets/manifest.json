@@ -3,13 +3,16 @@
   "alpine": { "version": "3.24.1", "arch": "x86", "minirootfs": "alpine-minirootfs-3.24.1-x86.tar.gz", "cdn": "https://dl-cdn.alpinelinux.org/alpine" },
   "kernel": {
     "file": "kernel.bin",
-    "source": "v86 buildroot bzImage (9p+virtio); staged locally from the verified R11 spikes (spike dirs a/b/c, buildroot-bzimage68.bin) — no stable public URL pinned yet, see download-assets.mjs note",
+    "source": "v86 buildroot bzImage (9p+virtio) from the v86 project's asset host (buildroot-bzimage68.bin, same file its examples boot). The host has no commit-addressed URLs, so the sha256 pin below is the integrity anchor; download-assets.mjs refuses any bytes that don't match it. Verified byte-identical to the R11-spike blob on 2026-07-18.",
+    "url": "https://i.copy.sh/buildroot-bzimage68.bin",
     "sha256": "507a759c70ab7a490a233be454d0b5b88bc667956a410b531cb4edc091e2eb1c"
   },
   "bios": {
     "seabios": "seabios.bin",
     "vgabios": "vgabios.bin",
-    "source": "v86 build assets; staged locally from the verified R11 spikes (seabios.bin, vgabios.bin) — no stable public URL pinned yet",
+    "source": "v86 repo build assets (bios/ dir), pinned by immutable commit SHA 2f1346b0 (master as of 2026-07-18; the blobs' bytes last changed 2023-08-06 in b8a39b11). Verified byte-identical to the R11-spike blobs.",
+    "seabiosUrl": "https://raw.githubusercontent.com/copy/v86/2f1346b0e7d88d4cbbbcc05fe15b4e369c3de23f/bios/seabios.bin",
+    "vgabiosUrl": "https://raw.githubusercontent.com/copy/v86/2f1346b0e7d88d4cbbbcc05fe15b4e369c3de23f/bios/vgabios.bin",
     "seabiosSha256": "73e3f359102e3a9982c35fce98eb7cd08f18303ac7f1ba6ebfbe6cdc1c244d98",
     "vgabiosSha256": "a4bc0d80cc3ca028c73dafa8fee396b8d054ce87ebd8abfbd31b06b437607880"
   },
