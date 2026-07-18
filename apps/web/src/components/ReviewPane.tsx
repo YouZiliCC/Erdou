@@ -5,8 +5,9 @@ import { FilePanel } from "./FilePanel.js";
 import { TerminalPanel } from "./TerminalPanel.js";
 import { PreviewPanel } from "./PreviewPanel.js";
 import { ProcessPanel } from "./ProcessPanel.js";
+import { LogPanel } from "./LogPanel.js";
 
-type Tab = "Diff" | "Files" | "Terminal" | "Preview" | "Processes";
+type Tab = "Diff" | "Files" | "Terminal" | "Preview" | "Processes" | "Log";
 
 const MAIN_TABS: Tab[] = ["Diff", "Files", "Terminal", "Preview"];
 
@@ -77,6 +78,9 @@ export function ReviewPane({ studio }: { studio: Studio }) {
         <button className={"tab muted" + (tab === "Processes" ? " sel" : "")} onClick={() => setTab("Processes")}>
           Processes
         </button>
+        <button className={"tab muted" + (tab === "Log" ? " sel" : "")} onClick={() => setTab("Log")}>
+          Log
+        </button>
       </div>
       <div className="tab-body">
         {tab === "Diff" &&
@@ -98,6 +102,7 @@ export function ReviewPane({ studio }: { studio: Studio }) {
           <PreviewPanel studio={studio} />
         </div>
         {tab === "Processes" && <ProcessPanel studio={studio} />}
+        {tab === "Log" && <LogPanel studio={studio} />}
       </div>
     </div>
   );

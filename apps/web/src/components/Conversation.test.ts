@@ -88,13 +88,14 @@ describe("Conversation system-error strip (B3)", () => {
     expect(html).toContain("error four");
   });
 
-  it("still renders the full systemLog (all kinds) in the empty state", () => {
+  it("the empty state does NOT dump the systemLog — the Log tab is its home now", () => {
+    // The first-run view stays clean (title + examples only); info-level mount/
+    // restore chatter lives in the review pane's Log tab (LogPanel).
     const html = render({
       systemLog: [line("system", "Runtime booted."), line("error", "Could not restore project.", "quota exceeded")],
     });
-    expect(html).toContain("Runtime booted.");
-    expect(html).toContain("Could not restore project.");
-    expect(html).toContain("quota exceeded");
+    expect(html).not.toContain("Runtime booted.");
+    expect(html).not.toContain("Could not restore project.");
   });
 });
 

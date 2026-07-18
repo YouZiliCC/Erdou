@@ -335,3 +335,97 @@ describe("Ctrl+C", () => {
     expect(d.data(DOWN)).toEqual({ write: "", run: null }); // walk abandoned
   });
 });
+
+describe("cursor movement and mid-line editing", () => {
+  const LEFT = "\x1b[D";
+  const RIGHT = "\x1b[C";
+  const HOME = "\x1b[H";
+  const END = "\x1b[F";
+  const DEL = "\x1b[3~";
+
+  it("Left moves the cursor and typing inserts mid-line (full-redraw strategy)", () => {
+    const { d } = make();
+    d.start();
+    d.data("abc");
+    // prompt "ws / $ " = 7 cols; cursor from col 10 to col 9
+    expect(d.data(LEFT)).toEqual({ write: "\r\x1b[9C", run: null });
+    // insert before "c": erase row, rewrite, park cursor after the X (col 10)
+    expect(d.data("X").write).toBe(ERASE_LINE + "ws / $ " + "abXc" + "\r\x1b[10C");
+    expect(d.data("\r")).toMatchObject({ run: "abXc" });
+  });
+
+  it("Backspace mid-line deletes BEFORE the cursor", () => {
+    const { d } = make();
+    d.start();
+    d.data("abc");
+    d.data(LEFT); // ab|c
+    expect(d.data("\x7f").write).toBe(ERASE_LINE + "ws / $ " + "ac" + "\r\x1b[8C");
+    expect(d.data("\r")).toMatchObject({ run: "ac" });
+  });
+
+  it("Delete removes the code point AT the cursor; Home jumps to column 0 of the line", () => {
+    const { d } = make();
+    d.start();
+    d.data("abc");
+    expect(d.data(HOME)).toEqual({ write: "\r\x1b[7C", run: null }); // |abc
+    expect(d.data(DEL).write).toBe(ERASE_LINE + "ws / $ " + "bc" + "\r\x1b[7C");
+    expect(d.data("\r")).toMatchObject({ run: "bc" });
+  });
+
+  it("Ctrl+A / Ctrl+E mirror Home / End; boundary arrows are no-ops", () => {
+    const { d } = make();
+    d.start();
+    d.data("ab");
+    expect(d.data("\x01")).toEqual({ write: "\r\x1b[7C", run: null }); // Ctrl+A
+    expect(d.data(LEFT)).toEqual({ write: "", run: null }); // already at 0
+    expect(d.data("\x05")).toEqual({ write: "\r\x1b[9C", run: null }); // Ctrl+E
+    expect(d.data(RIGHT)).toEqual({ write: "", run: null }); // already at end
+    expect(d.data(END)).toEqual({ write: "", run: null }); // End at end: no-op
+  });
+
+  it("mid-line edit on a WRAPPED line erases every row and repositions across the wrap", () => {
+    const { d } = make(10); // prompt 7 + "abcdef" = 13 visible -> 2 rows
+    d.start();
+    d.data("abcdef");
+    d.data(LEFT + LEFT + LEFT + LEFT); // ab|cdef
+    const w = d.data("X").write; // -> abXcdef (14 visible, still 2 rows)
+    // cursor sat on row 1 of 2: hop down, erase both rows, rewrite, park the
+    // cursor at the row-2 start (offset 3 lands exactly on the wrap boundary)
+    expect(w).toBe("\x1b[1B" + ERASE_LINE + ERASE_UP + "ws / $ " + "abXcdef" + "\r");
+    // Enter from mid-line parks the cursor at the end first
+    const enter = d.data("\r");
+    expect(enter.run).toBe("abXcdef");
+    expect(enter.write).toBe("\r\x1b[4C" + "\r\n");
+  });
+
+  it("End onto an exactly-full row restores xterm's deferred-wrap state by re-echoing the final char", () => {
+    const { d } = make(10); // prompt 7 + "abc" = 10 visible: exactly full
+    d.start();
+    d.data("abc");
+    expect(d.data(HOME)).toEqual({ write: "\r\x1b[7C", run: null });
+    // CUF cannot reach the deferred position (it clamps at the last column):
+    // land before "c" and re-echo it instead.
+    expect(d.data(END)).toEqual({ write: "\r\x1b[9C" + "c", run: null });
+  });
+
+  it("history recall parks the cursor at the END of the recalled line", () => {
+    const { d } = make();
+    d.start();
+    const r = d.data("echo hi\r");
+    expect(r.run).toBe("echo hi");
+    d.commandDone(ok);
+    d.data("ab");
+    d.data(LEFT); // a|b
+    d.data(UP); // recall "echo hi", cursor at end
+    expect(d.data("!").write).toBe("!"); // plain append echo = cursor is at end
+  });
+
+  it("arrows buffered as type-ahead during a command replay as real edits", () => {
+    const { d } = make();
+    d.start();
+    expect(d.data("ls\r").run).toBe("ls");
+    d.data("ab" + LEFT + "X"); // buffered while busy
+    d.commandDone(ok); // replay: type ab, Left, insert X -> aXb
+    expect(d.data("\r")).toMatchObject({ run: "aXb" });
+  });
+});

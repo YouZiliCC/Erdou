@@ -33,7 +33,7 @@ Erdou is a browser-native operating environment — a virtual filesystem, proces
 - **A real dev server, in the tab.** Programs bind ports in the sandbox; a Service Worker reverse-proxies the preview iframe onto them. Static sites, Python WSGI apps and bundled React apps all render in the Preview panel — the agent can start a server and open the preview for you.
 - **Languages as plug-ins.** JavaScript/TypeScript built in; **Python** via Pyodide (real CPython in-browser); any `wasm32-wasi` binary (Rust/C/C++/Zig/TinyGo) via the WASI host. A language pack is just an `Executor` registered under a command name.
 - **Git in the browser — including the network.** A `git` executor over isomorphic-git: init/add/commit/log/status/branch fully client-side, plus **clone / fetch / pull / push** over smart-HTTP (token auth with redacted logging; browsers need a CORS proxy for github.com — `--cors-proxy` / `GIT_CORS_PROXY`, Node needs none).
-- **Your disk, safely.** Mount a local folder (File System Access API): two-way sync with external-edit conflict detection, an explicit mirror push, and fail-safes that refuse destructive writes.
+- **Your disk, safely.** Mount a local folder (File System Access API): two-way sync with external-edit conflict detection, explicit **mirror Pull/Push** (deletions included, background auto-sync stays additive), and fail-safes that refuse only genuinely destructive operations. The agent can also hand you the whole project as a **downloadable .zip** (never containing your API key).
 - **Private by construction.** Projects live in IndexedDB or your mounted folder. Nothing but the model API request ever leaves the browser.
 
 ## Try it

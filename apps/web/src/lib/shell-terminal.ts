@@ -5,12 +5,21 @@
  * results, and it returns the exact bytes to write plus the command to run
  * (if any). Tests hand it strings and assert on the writes.
  *
- * Model: cursor-at-end (no left/right movement — Backspace edits the tail).
+ * Model: a real cursor (Left/Right/Home/End/Ctrl+A/Ctrl+E move it; typing
+ * INSERTS at it, Backspace deletes before it, Delete at it). End-of-line ops
+ * keep the original byte-exact fast paths; a mid-line edit uses ONE strategy —
+ * full redraw (erase every wrapped row, rewrite prompt+line, park the cursor
+ * back) — chosen over surgical splicing because wrap-crossing splices are
+ * where line editors historically go wrong. Pure cursor moves emit CR + a
+ * vertical hop + a forward hop (no redraw). The one unreachable position —
+ * xterm's deferred-wrap state after an exactly-full row — is restored by
+ * re-echoing the final character rather than a CUF that would clamp one short.
  * While a command is in flight all input is buffered raw (type-ahead) and
  * replayed through the SAME key path after the output + next prompt land, so a
- * buffered Enter runs its line and a buffered Ctrl+C cancels it — exactly what
- * a line-buffered real terminal does. Ctrl+C cannot kill the running command
- * (RpcShellSession has no kill); it is buffered like any other key, not faked.
+ * buffered Enter runs its line, buffered arrows edit it, and a buffered Ctrl+C
+ * cancels it — exactly what a line-buffered real terminal does. Ctrl+C cannot
+ * kill the running command (RpcShellSession has no kill); it is buffered like
+ * any other key, not faked.
  *
  * Wrapping: the component supplies the live column count (getCols) and the
  * discipline simulates xterm's line wrapping — deferred wrap on an exactly-full
@@ -92,6 +101,9 @@ function outputChunk(text: string): string {
 
 export class ShellLineDiscipline {
   private line = "";
+  /** Cursor as a UTF-16 offset into `line`, always on a code-point boundary.
+   *  `cursor === line.length` is the (fast-path) at-end state. */
+  private cursor = 0;
   /** The prompt currently on screen. Fresh prompts recompute via getPrompt()
    *  (cwd persists across commands — `cd` moves the next prompt); in-line
    *  redraws (history recall) reuse this stored copy. */
@@ -159,8 +171,12 @@ export class ShellLineDiscipline {
       if (ch === "\r" || ch === "\n") {
         i += 1;
         if (ch === "\r" && input[i] === "\n") i += 1; // pasted CRLF = one Enter
+        // A mid-line Enter first parks the cursor after the last char (bash
+        // behavior) so the "\r\n" and any output start below the whole line.
+        write += this.moveCursor(this.cursor, this.line.length);
         const cmd = this.line.trim();
         this.line = "";
+        this.cursor = 0;
         this.histIndex = null;
         if (cmd.length === 0) {
           // Empty Enter: just a fresh prompt, like a real shell.
@@ -175,52 +191,84 @@ export class ShellLineDiscipline {
       }
       if (ch === "\x7f" || ch === "\b") {
         i += 1;
-        // At the prompt boundary (empty line) there is nothing to erase.
-        if (this.line.length === 0) continue;
-        const before = this.screenLayout();
-        // Pop one code point — a surrogate pair is a single on-screen char.
-        const units =
-          this.line.length >= 2 &&
-          /[\uDC00-\uDFFF]/.test(this.line[this.line.length - 1]!) &&
-          /[\uD800-\uDBFF]/.test(this.line[this.line.length - 2]!)
-            ? 2
-            : 1;
-        const deleted = this.line.slice(-units);
-        this.line = this.line.slice(0, -units);
-        if (before.rows === 1 && before.col < this.getCols()) {
-          // Whole prompt+line on one row, no deferred wrap: erase in place.
-          write += "\b \b".repeat(WIDE.test(deleted) ? 2 : 1);
+        // At the prompt boundary (nothing before the cursor) there is nothing to erase.
+        if (this.cursor === 0) continue;
+        if (this.cursor === this.line.length) {
+          // At-end fast path (the original byte-exact behavior).
+          const before = this.screenLayout();
+          const units = this.prevCharUnits(this.cursor);
+          const deleted = this.line.slice(-units);
+          this.line = this.line.slice(0, -units);
+          this.cursor = this.line.length;
+          if (before.rows === 1 && before.col < this.getCols()) {
+            // Whole prompt+line on one row, no deferred wrap: erase in place.
+            write += "\b \b".repeat(WIDE.test(deleted) ? 2 : 1);
+          } else {
+            // Wrapped (or exactly-full) row: xterm's BS cannot cross a wrap
+            // boundary, so erase every row and redraw the shortened line.
+            write +=
+              ERASE_ROW + ERASE_ROW_ABOVE.repeat(before.rows - 1) + this.prompt + this.line;
+          }
         } else {
-          // Wrapped (or exactly-full) row: xterm's BS cannot cross a wrap
-          // boundary, so erase every row and redraw the shortened line.
-          write +=
-            ERASE_ROW + ERASE_ROW_ABOVE.repeat(before.rows - 1) + this.prompt + this.line;
+          // Mid-line: delete the code point before the cursor, full redraw.
+          const snap = this.snapshotForRedraw();
+          const units = this.prevCharUnits(this.cursor);
+          this.line = this.line.slice(0, this.cursor - units) + this.line.slice(this.cursor);
+          this.cursor -= units;
+          write += this.redraw(snap);
         }
         continue;
       }
       if (ch === "\x03") {
-        // Ctrl+C on an idle line: cancel it — ^C, fresh prompt, line discarded.
+        // Ctrl+C on an idle line: cancel it — ^C (after the line, bash-style),
+        // fresh prompt, line discarded.
         i += 1;
+        write += this.moveCursor(this.cursor, this.line.length);
         this.line = "";
+        this.cursor = 0;
         this.histIndex = null;
         this.prompt = this.getPrompt();
         write += "^C\r\n" + this.prompt;
+        continue;
+      }
+      if (ch === "\x01") {
+        i += 1; // Ctrl+A = Home
+        write += this.cursorTo(0);
+        continue;
+      }
+      if (ch === "\x05") {
+        i += 1; // Ctrl+E = End
+        write += this.cursorTo(this.line.length);
         continue;
       }
       if (ch < " ") {
         i += 1; // other control chars (Tab, Ctrl+…): no binding, ignore
         continue;
       }
-      this.line += ch;
-      write += ch; // local echo
-      i += 1;
+      // Printable: consume a whole code point (a surrogate pair arrives as two
+      // UTF-16 units — a mid-line insert must never split one).
+      let glyph = ch;
+      if (/[\uD800-\uDBFF]/.test(ch) && i + 1 < input.length && /[\uDC00-\uDFFF]/.test(input[i + 1]!)) {
+        glyph += input[i + 1]!;
+      }
+      i += glyph.length;
+      if (this.cursor === this.line.length) {
+        this.line += glyph;
+        this.cursor = this.line.length;
+        write += glyph; // local echo (at-end fast path)
+      } else {
+        const snap = this.snapshotForRedraw();
+        this.line = this.line.slice(0, this.cursor) + glyph + this.line.slice(this.cursor);
+        this.cursor += glyph.length;
+        write += this.redraw(snap);
+      }
     }
     return { write, run: null };
   }
 
   /** Consume one escape sequence at input[i] → [chars consumed, write].
-   *  Up/Down drive history; everything else (left/right/delete/…) is ignored
-   *  under the cursor-at-end model. */
+   *  Up/Down drive history; Left/Right/Home/End move the cursor; Delete edits
+   *  at it; anything else is swallowed. */
   private escape(input: string, i: number): [number, string] {
     if (input[i + 1] !== "[") return [2, ""]; // ESC + one char (alt-chords): ignore
     let j = i + 2;
@@ -229,7 +277,100 @@ export class ShellLineDiscipline {
     const consumed = j + 1 - i;
     if (seq === "\x1b[A") return [consumed, this.historyMove(-1)];
     if (seq === "\x1b[B") return [consumed, this.historyMove(1)];
+    if (seq === "\x1b[D") return [consumed, this.cursorTo(this.cursor - this.prevCharUnits(this.cursor))];
+    if (seq === "\x1b[C") return [consumed, this.cursorTo(this.cursor + this.nextCharUnits(this.cursor))];
+    if (seq === "\x1b[H" || seq === "\x1b[1~") return [consumed, this.cursorTo(0)];
+    if (seq === "\x1b[F" || seq === "\x1b[4~") return [consumed, this.cursorTo(this.line.length)];
+    if (seq === "\x1b[3~") return [consumed, this.deleteAtCursor()];
     return [consumed, ""];
+  }
+
+  /** UTF-16 units of the code point BEFORE offset `c` (0 at the start). */
+  private prevCharUnits(c: number): number {
+    if (c === 0) return 0;
+    return c >= 2 && /[\uDC00-\uDFFF]/.test(this.line[c - 1]!) && /[\uD800-\uDBFF]/.test(this.line[c - 2]!)
+      ? 2
+      : 1;
+  }
+
+  /** UTF-16 units of the code point AT offset `c` (0 at the end). */
+  private nextCharUnits(c: number): number {
+    if (c >= this.line.length) return 0;
+    return /[\uD800-\uDBFF]/.test(this.line[c]!) && c + 1 < this.line.length && /[\uDC00-\uDFFF]/.test(this.line[c + 1]!)
+      ? 2
+      : 1;
+  }
+
+  /** Delete key: remove the code point AT the cursor (no-op at line end). */
+  private deleteAtCursor(): string {
+    const units = this.nextCharUnits(this.cursor);
+    if (units === 0) return "";
+    const snap = this.snapshotForRedraw();
+    this.line = this.line.slice(0, this.cursor) + this.line.slice(this.cursor + units);
+    return this.redraw(snap);
+  }
+
+  /** Move the logical cursor to `to` (clamped), emitting the physical move. */
+  private cursorTo(to: number): string {
+    const clamped = Math.max(0, Math.min(this.line.length, to));
+    const w = this.moveCursor(this.cursor, clamped);
+    this.cursor = clamped;
+    return w;
+  }
+
+  /** Physical position of logical offset `c`: 1-based row within the wrapped
+   *  prompt+line, 0-based column. An exactly-full row is xterm's deferred-wrap
+   *  state: mid-line it means "start of the next row" (where that next char
+   *  physically sits); at line end the cursor really stays on the full row. */
+  private physPos(c: number): { row: number; col: number } {
+    const cols = this.getCols();
+    const { rows, col } = layout((this.prompt + this.line.slice(0, c)).replace(CSI, ""), cols);
+    if (col === cols && c < this.line.length) return { row: rows + 1, col: 0 };
+    return { row: rows, col };
+  }
+
+  /** Emit the physical cursor move between two logical offsets on the CURRENT
+   *  line: CR to column 0 (clears xterm's pending-wrap state), a vertical hop,
+   *  a forward hop. The deferred-wrap end position is unreachable by CUF (it
+   *  clamps at the last column), so that one case lands before the final char
+   *  and re-echoes it — xterm re-enters its natural deferred state. */
+  private moveCursor(from: number, to: number): string {
+    if (from === to) return "";
+    if (to === this.line.length && this.line.length > 0) {
+      const cols = this.getCols();
+      const raw = layout((this.prompt + this.line).replace(CSI, ""), cols);
+      if (raw.col === cols) {
+        const prev = to - this.prevCharUnits(to);
+        return this.moveReachable(from, prev) + this.line.slice(prev);
+      }
+    }
+    return this.moveReachable(from, to);
+  }
+
+  private moveReachable(from: number, to: number): string {
+    const a = this.physPos(from);
+    const b = this.physPos(to);
+    let w = "\r";
+    if (b.row < a.row) w += `\x1b[${a.row - b.row}A`;
+    else if (b.row > a.row) w += `\x1b[${b.row - a.row}B`;
+    if (b.col > 0) w += `\x1b[${b.col}C`;
+    return w;
+  }
+
+  /** Pre-mutation snapshot for `redraw`: how many rows the OLD prompt+line
+   *  occupied and which of them the cursor physically sat on. */
+  private snapshotForRedraw(): { rows: number; cursorRow: number } {
+    return { rows: this.screenLayout().rows, cursorRow: this.physPos(this.cursor).row };
+  }
+
+  /** Mid-line edit strategy: hop down to the OLD last row, erase every wrapped
+   *  row, rewrite prompt + (new) line, park the cursor at its logical spot. */
+  private redraw(snap: { rows: number; cursorRow: number }): string {
+    let w = "";
+    if (snap.cursorRow < snap.rows) w += `\x1b[${snap.rows - snap.cursorRow}B`;
+    w += ERASE_ROW + ERASE_ROW_ABOVE.repeat(snap.rows - 1) + this.prompt + this.line;
+    w += this.moveCursor(this.line.length, this.cursor);
+    return w;
   }
 
   /** ArrowUp (-1) / ArrowDown (+1): replace the current line with a history
@@ -259,10 +400,15 @@ export class ShellLineDiscipline {
   }
 
   /** Erase the on-screen line — EVERY wrapped row, prompt included — and
-   *  redraw it with `text` (which xterm re-wraps naturally). */
+   *  redraw it with `text` (which xterm re-wraps naturally). History recall
+   *  always parks the cursor at the END of the recalled line. */
   private replaceLine(text: string): string {
-    const erase = ERASE_ROW + ERASE_ROW_ABOVE.repeat(this.screenLayout().rows - 1);
+    const snap = this.snapshotForRedraw();
+    let erase = "";
+    if (snap.cursorRow < snap.rows) erase += `\x1b[${snap.rows - snap.cursorRow}B`;
+    erase += ERASE_ROW + ERASE_ROW_ABOVE.repeat(snap.rows - 1);
     this.line = text;
+    this.cursor = text.length;
     return erase + this.prompt + text;
   }
 }

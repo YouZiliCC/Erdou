@@ -24,6 +24,8 @@ Settings holds four things: **Provider**, **Base URL**, **Model**, **API key**. 
 
 A direct provider URL also works as the Base URL whenever the provider permits browser requests (some OpenAI-compatible providers do allow CORS). For a **production** deployment (no Vite dev proxy) with a CORS-blocked provider, run the zero-dependency CORS relay shipped in this repo — `node scripts/model-proxy.mjs --target https://api.openai.com` — and point the Base URL at it; it mirrors the dev proxy's path mapping (`/llm/v1/…` → `<target>/v1/…`).
 
+**Test before saving:** the **Test** button probes the values currently in the form (saved or not) with two checks — a minimal chat round-trip, and a tool-call probe. The second matters: an endpoint can be reachable yet ignore tool calling, which leaves the agent structurally unable to act — the probe warns you about exactly that instead of letting the first real task fail mysteriously. Errors are shown verbatim.
+
 ### Approvals: Auto vs Confirm
 
 The **Command approvals** setting (also switchable in the composer) controls the gated tools — `run_shell`, `remove_path`, `switch_environment`, and the server-starting form of `open_preview`:
@@ -53,7 +55,7 @@ When a turn ends with file changes, the Diff tab opens automatically (unless the
 
 ### Files
 
-The live runtime filesystem as a tree; click a file to view it.
+The live runtime filesystem as a tree; click a file to view it. The header's **Download .zip** button exports the whole workspace as a zip — and the agent can do the same for you via its `package_project` tool (ask it to "package the project"), which drops a download card into the conversation. Exports include `.git` but never `node_modules` or the `.erdou` state (your API key can't end up in an export). The zip lives in browser memory only: after a reload its card honestly shows **expired** — ask for a fresh one.
 
 ### Terminal
 
@@ -79,6 +81,10 @@ On the VM, servers must bind `0.0.0.0` — a `127.0.0.1` bind is only reachable 
 ### Processes
 
 The live process table of the current runtime.
+
+### Log
+
+The system channel's home: mount/restore/sync notices, kernel-switch progress and errors, newest at the bottom (auto-scroll pins to the tail until you scroll up). The first-run screen no longer dumps this log — look here instead. **Clear** empties it; nothing in it is load-bearing.
 
 ## Kernels and environments
 
@@ -120,9 +126,10 @@ The bake needs network access to the Alpine CDN plus three boot blobs staged in 
 
 - **Auto-sync** — workspace changes are written back to disk (debounced ~0.6 s). External disk edits are pulled in by a rescan every 5 s and on window focus.
 - **Conflict skipping** — a file that changed on disk outside Erdou since the last sync is *not* overwritten by auto-save; the system log names the skipped files. If both sides changed, the next rescan pulls the disk version over the workspace copy (disk wins) and says so.
-- **Pull from disk ↓** — a full re-pull, disk wins. Use it to resolve conflicts deliberately.
-- **Push to disk ↑** — a *mirror* push: writes every workspace file **and deletes disk files absent from the workspace**; conflicted files are still skipped (pull first to resolve).
-- **Re-select folder** — swap the mount to a different directory.
+- **Pull ↓ (disk → workspace)** — a **true mirror**: loads every disk file *and deletes workspace entries absent on disk* (`.git`/`node_modules`/`.erdou` and VM image dirs always survive). Use it to make the workspace match the folder exactly.
+- **Push ↑ (workspace → disk)** — the symmetric **true mirror**: writes every workspace file *and deletes disk files absent from the workspace*; files edited on disk outside Erdou are skipped as conflicts (pull first to resolve). The background auto-sync stays additive/merge-like — only these two explicit buttons delete.
+- Both directions refuse to run only when they would actually destroy data (mirroring an empty side onto a non-empty one); empty-onto-empty is a harmless no-op. The status line always reports counts (written/loaded, deleted, conflicts).
+- **Re-select folder…** — swap the mount to a different directory.
 - **`.erdou/` state** — the mounted folder gets an `.erdou/` directory holding your chat history (`runs.json`) and app config (`config.json`: theme, approval mode, model **including the API key, in the clear**). A generated `.erdou/.gitignore` keeps `config.json` out of git commits made inside the folder — that gitignore is the only guard. A folder that already has `.erdou/` hydrates the session from it on mount.
 - After a reload, the browser requires a click to re-grant folder permission — the sidebar shows a **Reconnect** button.
 

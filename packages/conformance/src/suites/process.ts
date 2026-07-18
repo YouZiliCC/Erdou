@@ -45,5 +45,39 @@ export function processSuite(make: MakeRuntime): void {
       const info = (await rt.getProcesses()).find((x) => x.pid === p.pid);
       expect(info === undefined || info.state !== "running").toBe(true);
     });
+
+    it("kill(pid) settles a long/blocking exec promptly as killed", async () => {
+      const rt = await booted(make);
+      // `sleep 30` outlives the 10s promptness bound below by far, so wait()
+      // can only settle in time if the kill actually terminated the process —
+      // unlike the echo test above, this cannot pass via a natural exit.
+      // (`sleep` is part of the suite's POSIX-ish baseline; the browser kernel
+      // provides it through its program-registration seam — see
+      // browser-runtime.conformance.test.ts.)
+      const p = await rt.exec("sleep 30");
+      await rt.kill(p.pid, "SIGKILL");
+      const status = await Promise.race([
+        rt.wait(p.pid),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `wait(${p.pid}) did not settle within 10s of kill — ` +
+                    "kill(pid) failed to terminate a blocking exec",
+                ),
+              ),
+            10_000,
+          ),
+        ),
+      ]);
+      // SIGKILL cannot be caught: the settled status must carry the signal.
+      expect(status.signal).toBe("SIGKILL");
+      // The pid leaves the running set. Both kernels retain settled records in
+      // getProcesses() (this suite already requires exited-record retention
+      // above), so the entry must still be present — and be "killed".
+      const info = (await rt.getProcesses()).find((x) => x.pid === p.pid);
+      expect(info?.state).toBe("killed");
+    });
   });
 }

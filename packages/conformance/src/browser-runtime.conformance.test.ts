@@ -5,7 +5,17 @@ import type { HttpHandler, RuntimeEvent } from "@erdou/runtime-contract";
 
 // This is the only place a concrete Runtime is imported — the suite modules
 // themselves depend on @erdou/runtime-contract alone.
-runConformance("BrowserRuntime", () => new BrowserRuntime({ clock: () => 0 }));
+runConformance("BrowserRuntime", () => {
+  const rt = new BrowserRuntime({ clock: () => 0 });
+  // The browser kernel ships no `sleep` builtin, but `sleep` is part of the
+  // suite's POSIX-ish baseline (the blocking exec-kill test needs a program
+  // that outlives its promptness bound). Provide it through the public
+  // program-registration seam as a never-settling program: kill(pid) is the
+  // only way it ends — exactly what that test asserts — and there is no
+  // pending timer left behind after the kill.
+  rt.registerProgram("sleep", () => new Promise<number>(() => {}));
+  return rt;
+});
 
 /**
  * The shared suite can only exercise the pure `Runtime` contract (dispatch,

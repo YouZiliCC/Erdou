@@ -147,17 +147,20 @@ export function TaskSidebar({
         ))}
       </div>
       <div className="sbf">
-        {studio.mount ? (
-          <div>📁 {studio.mountName} · synced</div>
-        ) : studio.pendingMount ? (
-          <button className="btn ghost" onClick={() => void studio.reconnectMount()}>
-            Reconnect 📁 {studio.mountName}
-          </button>
-        ) : (
-          <button className="btn ghost" onClick={onOpenFolder}>
-            Open folder
-          </button>
-        )}
+        {/* The mounted state itself (dot + folder name) lives in
+            FolderSyncControls' header — the footer only adds the affordances
+            that widget doesn't carry: reconnecting a pending mount, or opening
+            a folder when none is remembered. */}
+        {!studio.mount &&
+          (studio.pendingMount ? (
+            <button className="btn ghost" onClick={() => void studio.reconnectMount()}>
+              Reconnect 📁 {studio.mountName}
+            </button>
+          ) : (
+            <button className="btn ghost" onClick={onOpenFolder}>
+              Open folder
+            </button>
+          ))}
         {studio.mountName && <FolderSyncControls studio={studio} />}
         <div className="rt">
           <span className="dot on" /> runtime live

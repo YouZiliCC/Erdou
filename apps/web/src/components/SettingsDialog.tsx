@@ -1,7 +1,16 @@
-import { useState } from "react";
-import type { ModelConfig } from "@erdou/model-gateway";
+import { useRef, useState } from "react";
+import { ModelGateway, type ModelConfig } from "@erdou/model-gateway";
 import { switchProvider, type ApprovalMode } from "../lib/model-config.js";
+import { createProbeSession, type ProbeResult } from "../lib/model-probe.js";
 import { Select } from "./ui/Select.js";
+
+/**
+ * The probe's gateway — the SAME zero-arg construction studio uses for runs
+ * (studio.ts `new ModelGateway()`), so "Test" exercises the exact client +
+ * provider path a run would, with the dialog's CURRENT (unsaved) field values
+ * passed per call. No parallel HTTP client.
+ */
+const probeGateway = new ModelGateway();
 
 const PROVIDER_OPTIONS: { value: ModelConfig["provider"]; label: string }[] = [
   { value: "openai-compatible", label: "OpenAI-compatible" },
@@ -27,7 +36,35 @@ export function SettingsDialog({
   onClose: () => void;
 }) {
   const [cfg, setCfg] = useState<ModelConfig>(initial);
-  const patch = (p: Partial<ModelConfig>) => setCfg((c) => ({ ...c, ...p }));
+  const [probing, setProbing] = useState(false);
+  const [probe, setProbe] = useState<ProbeResult | null>(null);
+  // A probe result describes the values it tested — and fields stay EDITABLE
+  // while a probe is in flight (up to ~40 s), so every config mutation goes
+  // through `update`, which clears any shown result AND invalidates the
+  // in-flight one: its session.run resolves null instead of a verdict for
+  // values it never tested (the stale-result race).
+  const session = useRef(createProbeSession()).current;
+  const update = (fn: (c: ModelConfig) => ModelConfig) => {
+    session.invalidate();
+    setProbe(null);
+    setCfg(fn);
+  };
+  const patch = (p: Partial<ModelConfig>) => update((c) => ({ ...c, ...p }));
+
+  const runProbe = async () => {
+    setProbing(true);
+    setProbe(null);
+    try {
+      // session.run never rejects (probeModel maps every failure to a
+      // structured result); null means an edit landed mid-flight and the now
+      // stale verdict was dropped. The finally only guards the button against
+      // a truly unexpected throw.
+      const result = await session.run(probeGateway, cfg);
+      if (result) setProbe(result);
+    } finally {
+      setProbing(false);
+    }
+  };
 
   return (
     <div className="scrim" onClick={onClose}>
@@ -41,7 +78,7 @@ export function SettingsDialog({
             className="block"
             value={cfg.provider}
             options={PROVIDER_OPTIONS}
-            onChange={(provider) => setCfg((c) => switchProvider(c, provider))}
+            onChange={(provider) => update((c) => switchProvider(c, provider))}
             ariaLabel="Provider"
           />
         </div>
@@ -75,6 +112,9 @@ export function SettingsDialog({
         </div>
 
         <div className="actions">
+          <button className="btn" disabled={probing} onClick={() => void runProbe()}>
+            {probing ? "Testing…" : "Test"}
+          </button>
           <button className="btn ghost" onClick={onClose}>
             Cancel
           </button>
@@ -82,6 +122,14 @@ export function SettingsDialog({
             Save
           </button>
         </div>
+        {probe && (
+          <p
+            className={`note probe-result ${probe.chatOk ? (probe.toolsOk ? "ok" : "warn") : "err"}`}
+            aria-live="polite"
+          >
+            {probe.detail}
+          </p>
+        )}
         <p className="note">
           The default <code>/llm/v1</code> is a dev-server proxy whose target is <code>yunwu.ai</code> unless{" "}
           <code>VITE_LLM_TARGET=&lt;url&gt;</code> is set when the dev server starts. A direct provider URL also works

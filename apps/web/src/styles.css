@@ -164,10 +164,23 @@ input, textarea { font-family: var(--mono); }
 .sbf { margin-top: auto; padding: 10px 12px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 11.5px; }
 .sbf .rt { display: flex; align-items: center; gap: 6px; }
 
-/* manual folder-sync controls (mounted in the sidebar footer) */
+/* manual folder-sync controls (mounted in the sidebar footer). Structure: a
+   compact header (mount dot + folder name, re-select demoted to a text-style
+   control), two full-width direction buttons whose verb + route make the
+   mirror semantics visible, and an aria-live status line reporting counts. */
 .folder-sync { display: flex; flex-direction: column; gap: 6px; }
+.folder-sync .fs-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.folder-sync .fs-mount { flex: 1 1 auto; min-width: 0; display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
+.folder-sync .fs-mount .dot { flex: 0 0 auto; }
+.folder-sync .fs-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder-sync .fs-reselect { flex: 0 0 auto; border: none; background: transparent; color: var(--faint); font-family: var(--sans); font-size: 11px; line-height: 1; padding: 2px 5px; border-radius: 4px; cursor: pointer; }
+.folder-sync .fs-reselect:hover { color: var(--ink); background: var(--elev); }
+/* after :hover on purpose — equal specificity, source order decides; disabled buttons still match :hover */
+.folder-sync .fs-reselect:disabled { color: var(--faint); background: transparent; cursor: not-allowed; opacity: .45; }
 .folder-sync .fs-row { display: flex; flex-direction: column; gap: 4px; }
-.folder-sync .fs-row .btn { text-align: left; }
+.folder-sync .fs-dir { display: flex; align-items: baseline; gap: 8px; text-align: left; }
+.folder-sync .fs-verb { color: var(--ink); font-weight: 600; white-space: nowrap; }
+.folder-sync .fs-sem { margin-left: auto; color: var(--faint); font-size: 10.5px; white-space: nowrap; }
 .folder-sync .fs-status { padding: 4px 2px 0; color: var(--faint); }
 
 /* files */
@@ -257,6 +270,37 @@ input, textarea { font-family: var(--mono); }
 .sysline { display: flex; align-items: center; gap: 7px; }
 .sysline.err { color: var(--red); }
 .sysline .detail { color: var(--faint); }
+
+/* LogPanel (Log tab): scroll container for the system channel — .tab-body>* gives
+   it flex:1/min-height:0 but no overflow; lines reuse the .sysline rules above. */
+.log-panel-host { display: flex; flex-direction: column; min-height: 0; }
+.log-panel { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 12px 14px; font-family: var(--mono); font-size: 11.5px; color: var(--faint); display: flex; flex-direction: column; gap: 5px; }
+.log-panel .sysline { align-items: baseline; }
+.log-panel .sysline .dot { flex: 0 0 auto; }
+.log-panel .sysline .detail { word-break: break-word; }
+.log-panel .artifact { max-width: 480px; }
+.log-head { flex: 0 0 auto; display: flex; align-items: center; justify-content: flex-end; padding: 6px 14px 0; }
+
+/* project-export artifact card (zip download; .expired = blob lost to a reload) */
+.artifact { display:flex; align-items:center; gap:10px; max-width:420px; margin:2px 0 16px; padding:9px 12px; border:1px solid var(--border); background:var(--elev); border-radius:var(--radius); }
+.artifact-ico { flex:0 0 auto; color:var(--accent); }
+.artifact-meta { flex:1; min-width:0; }
+.artifact-name { font-family:var(--mono); font-size:12.5px; color:var(--ink); word-break:break-all; }
+.artifact-sub { font-family:var(--sans); font-size:11px; color:var(--muted); margin-top:1px; }
+.artifact-note { font-family:var(--sans); font-size:11px; color:var(--faint); margin-top:4px; line-height:1.5; }
+.artifact.expired { opacity:.8; border-style:dashed; }
+.artifact.expired .artifact-ico { color:var(--faint); }
+.artifact-dl { flex:0 0 auto; text-decoration:none; }
+
+/* Files panel header (Download .zip) */
+.fhead { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:2px 14px 8px; border-bottom:1px solid var(--border2); margin-bottom:6px; }
+.fhead-title { font-family:var(--sans); font-size:11px; color:var(--faint); text-transform:uppercase; letter-spacing:.4px; }
+.fhead-err { color:var(--red); font-family:var(--mono); font-size:11.5px; padding:0 14px 6px; }
+
+/* Settings connection-probe result states */
+.dialog .probe-result.ok { color: var(--green); }
+.dialog .probe-result.warn { color: var(--amber); }
+.dialog .probe-result.err { color: var(--red); }
 
 /* system-error strip: recent system-channel errors pinned between transcript and composer (audit B3) */
 .sysbar { flex: 0 0 auto; margin: 0 16px 8px; padding: 7px 11px; border: 1px solid color-mix(in srgb, var(--red) 32%, transparent); background: color-mix(in srgb, var(--red) 6%, var(--elev)); border-radius: 9px; font-family: var(--mono); font-size: 11.5px; display: flex; flex-direction: column; gap: 5px; }

@@ -32,9 +32,11 @@ import {
   clearPersistedHandle,
   type DirHandleLike,
   type FolderMirrorResult,
+  type FolderPullResult,
   type MountMtimes,
 } from "./local-mount.js";
 import { pullDiskToWorkspace, pushWorkspaceToDisk, reselectFolder as reselectFolderOp } from "./folder-sync-controls.js";
+import { buildProjectZip } from "./project-zip.js";
 
 const SNAPSHOT_ID = "erdou:default";
 /** Cap on `Studio.systemLog` entries so a noisy source (e.g. failing rescans) can't grow it unbounded. */
@@ -44,7 +46,7 @@ const SYSTEM_LOG_LIMIT = 200;
 const SAVE_FAILED_TEXT = "Couldn't save your project to this browser (storage may be full or restricted).";
 const RESCAN_FAILED_TEXT = "Mount rescan failed";
 
-export type TraceKind = "system" | "user" | "thought" | "tool" | "result" | "done" | "error";
+export type TraceKind = "system" | "user" | "thought" | "tool" | "result" | "done" | "error" | "artifact";
 
 export interface TraceLine {
   id: number;
@@ -53,6 +55,39 @@ export interface TraceLine {
   detail?: string;
   ok?: boolean;
   ts: number;
+}
+
+/** The JSON payload of a kind:"artifact" trace line's `detail` (plain JSON —
+ *  it persists through runs-store/.erdou like any other trace line). The blob
+ *  itself does NOT persist: `exportId` keys into `Studio.exports`, which is
+ *  session-only, so a reloaded browser renders the card in an expired state. */
+export interface ExportArtifact {
+  exportId: string;
+  name: string;
+  byteSize: number;
+  fileCount: number;
+}
+
+/** Parse an artifact line's `detail` back into its payload; null when it is
+ *  missing or the wrong shape (a truncated/hand-edited persisted trace). */
+export function parseArtifactDetail(detail: string | undefined): ExportArtifact | null {
+  if (!detail) return null;
+  try {
+    const p: unknown = JSON.parse(detail);
+    if (
+      typeof p === "object" &&
+      p !== null &&
+      typeof (p as ExportArtifact).exportId === "string" &&
+      typeof (p as ExportArtifact).name === "string" &&
+      typeof (p as ExportArtifact).byteSize === "number" &&
+      typeof (p as ExportArtifact).fileCount === "number"
+    ) {
+      return p as ExportArtifact;
+    }
+  } catch {
+    // fall through — malformed JSON reads as "not an artifact payload"
+  }
+  return null;
 }
 
 export type RunStatus = "running" | "review" | "done" | "error";
@@ -229,6 +264,11 @@ export class Studio {
    *  and PreviewPanel focuses `port` (or the latest open port when null)
    *  whenever `nonce` changes. Null until the tool is first used. */
   previewRequest: { port: number | null; nonce: number } | null = null;
+  /** Session-only registry of built project zips, keyed by exportId (the key an
+   *  artifact trace line carries). Deliberately NOT persisted: the values hold
+   *  object URLs onto in-memory blobs, which die with the page — after a reload
+   *  the persisted trace line finds no entry here and renders as expired. */
+  exports = new Map<string, { url: string; name: string; byteSize: number; fileCount: number }>();
   /** The Preview panel's detached serve process (`RunServeResult.pid`, VM path
    *  only — `null` on the browser kernel). Owned here, not in the panel, so
    *  `switchKernel` can kill it on the OUTGOING kernel pre-swap, and so it
@@ -872,16 +912,23 @@ export class Studio {
   //     rootSkip as the auto path, so the two can't drift. Errors propagate to
   //     the caller (the UI shows them) rather than being swallowed here.
 
-  /** Manual "Pull from disk ↓": load the mounted folder from disk into the
-   *  workspace now — disk wins (a full re-pull, distinct from the mtime-gated
-   *  background rescan). No-op returning 0 if nothing is mounted; returns the
-   *  file count pulled. */
-  async pullFolderNow(): Promise<number> {
-    if (!this.mount) return 0;
-    const count = await pullDiskToWorkspace(this.mount, this.fs, this.mountMtimes);
+  /** Manual "Pull from disk ↓": mirror the mounted folder into the workspace
+   *  now — disk wins on content AND workspace entries absent on disk are
+   *  deleted (distinct from the additive mtime-gated background rescan),
+   *  honoring VM_PRESERVE_DIRS at root on the VM kernel exactly like the auto
+   *  save path so image-owned dirs survive the delete pass. Returns the pull
+   *  result for the UI to report, or null if nothing is mounted. */
+  async pullFolderNow(): Promise<FolderPullResult | null> {
+    if (!this.mount) return null;
+    const result = await pullDiskToWorkspace(
+      this.mount,
+      this.fs,
+      this.mountMtimes,
+      this.kernelKind === "vm" ? new Set(VM_PRESERVE_DIRS) : undefined,
+    );
     this.fsVersion++;
     this.notify();
-    return count;
+    return result;
   }
 
   /** Manual "Push to disk ↑": mirror the workspace onto the mounted folder now
@@ -998,6 +1045,14 @@ export class Studio {
   /** Append a system/terminal/mount message (not tied to any run). */
   logSystem(kind: TraceKind, text: string, detail?: string): void {
     this.systemLog = [...this.systemLog, this.line(kind, text, detail)].slice(-SYSTEM_LOG_LIMIT);
+    this.notify();
+  }
+
+  /** Empty the system channel (the Log tab's Clear button). Purely a display
+   *  reset — nothing here is load-bearing state. */
+  clearSystemLog(): void {
+    if (this.systemLog.length === 0) return;
+    this.systemLog = [];
     this.notify();
   }
 
@@ -1301,6 +1356,43 @@ export class Studio {
             };
           },
         },
+        // App-UI tool (same inline style as open_preview): packages the
+        // workspace as a .zip and puts a Download button in front of the user.
+        // Read-only + UI-only, so it is deliberately NOT approval-gated (not
+        // in agent-core's GATED_TOOLS).
+        {
+          name: "package_project",
+          description:
+            "Package the user's whole project as a downloadable .zip and hand them a Download button in the " +
+            "conversation. Zips the entire workspace including .git (version history is part of the project), " +
+            "excluding node_modules (regenerable) and Erdou-internal state. Use it when the user asks to export, " +
+            "download, save a copy of, or hand off the project. Optional `name` sets the zip's file name.",
+          parameters: {
+            type: "object",
+            properties: {
+              name: {
+                type: "string",
+                description: "Optional base name for the zip file (defaults to the project folder's name).",
+              },
+            },
+          },
+          execute: async (_ctx, args) => {
+            const name = typeof args.name === "string" && args.name.trim() !== "" ? args.name.trim() : undefined;
+            try {
+              // Pass THIS turn's `run`, not activeRun: if the user selects
+              // another thread (or New Draft) mid-run, the card must still
+              // land on the conversation that invoked the tool — otherwise
+              // the "Download button in the conversation" claim below lies.
+              const e = this.exportProject(name, run);
+              return {
+                ok: true,
+                output: `Packaged ${e.fileCount} files (${e.byteSize} bytes) into ${e.name}; the user now has a Download button in the conversation.`,
+              };
+            } catch (err) {
+              return { ok: false, output: asMessage(err) };
+            }
+          },
+        },
       ],
       onEvent: (e) => this.onAgentEvent(run, e),
       approve: this.makeApprove(approvalMode),
@@ -1510,6 +1602,47 @@ export class Studio {
    *  allows to be asynchronous — via the boot-time subscription. */
   closePort(port: number): Promise<void> {
     return this.runtime.closePort(port);
+  }
+
+  /**
+   * Package the workspace as a downloadable .zip and register it for the UI.
+   * Builds the archive (excluding node_modules/.erdou, and the VM image dirs
+   * on the vm kernel — see project-zip.ts), wraps it in an object URL, and
+   * registers it under a fresh exportId. The PREVIOUS export (if any) is
+   * revoked and dropped — object URLs pin their blobs for the tab's lifetime,
+   * so keeping stale ones would leak the whole zip per export; the dropped
+   * entry's card then honestly renders as expired. A kind:"artifact" trace
+   * line (detail = the `ExportArtifact` JSON) lands on `targetRun` when given
+   * (package_project passes ITS run, so the card follows the conversation that
+   * invoked the tool even if the user has selected another thread mid-run);
+   * otherwise on the active run (FilePanel's manual Download), or the
+   * systemLog when no run is selected.
+   *
+   * `name` defaults to the mounted folder name or "erdou-project"; ".zip" is
+   * appended (a supplied trailing ".zip" is not doubled). Throws the precise
+   * empty-workspace error from buildProjectZip — callers surface it.
+   */
+  exportProject(
+    name?: string,
+    targetRun?: Run,
+  ): { exportId: string; url: string; name: string; byteSize: number; fileCount: number } {
+    const base = (name?.trim() || this.mountName || "erdou-project").replace(/\.zip$/i, "");
+    const zip = buildProjectZip(this.fs, { kernelKind: this.kernelKind });
+    for (const [id, prev] of this.exports) {
+      URL.revokeObjectURL(prev.url);
+      this.exports.delete(id);
+    }
+    const exportId = newRunId();
+    const fileName = `${base}.zip`;
+    const url = URL.createObjectURL(new Blob([zip.bytes as BlobPart], { type: "application/zip" }));
+    const entry = { url, name: fileName, byteSize: zip.byteSize, fileCount: zip.fileCount };
+    this.exports.set(exportId, entry);
+    const detail: ExportArtifact = { exportId, name: fileName, byteSize: zip.byteSize, fileCount: zip.fileCount };
+    const text = `Project packaged: ${fileName} (${zip.fileCount} files)`;
+    const run = targetRun ?? this.activeRun;
+    if (run) this.appendLine(run, "artifact", text, JSON.stringify(detail));
+    else this.logSystem("artifact", text, JSON.stringify(detail));
+    return { exportId, ...entry };
   }
 
   /** The agent's open_preview tool lands here: record the request (a nonce so

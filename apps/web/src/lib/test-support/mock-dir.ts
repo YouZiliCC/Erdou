@@ -40,7 +40,11 @@ export class MockDir implements DirHandleLike {
       d = new MockDir(name);
       this.children.set(name, d);
     }
-    return d as MockDir;
+    // Real-API fidelity: an existing FILE of that name rejects with
+    // TypeMismatchError (even with { create: true }) — a type-flipped entry
+    // must be pruned first, never silently handed back as the wrong kind.
+    if (!(d instanceof MockDir)) throw new DOMException(`"${name}" is a file`, "TypeMismatchError");
+    return d;
   }
   async getFileHandle(name: string, opts?: { create?: boolean }): Promise<FileHandleLike> {
     let f = this.children.get(name);
@@ -49,7 +53,8 @@ export class MockDir implements DirHandleLike {
       f = new MockFile(new Uint8Array());
       this.children.set(name, f);
     }
-    return f as MockFile;
+    if (!(f instanceof MockFile)) throw new DOMException(`"${name}" is a directory`, "TypeMismatchError");
+    return f;
   }
   async removeEntry(name: string, opts?: { recursive?: boolean }): Promise<void> {
     const e = this.children.get(name);

@@ -46,8 +46,37 @@ export function FilePanel({ studio }: { studio: Studio }) {
     });
   }
 
+  // Manual export path: build the zip and trigger the browser download right
+  // away via a temporary anchor (no card needed — the file lands in the
+  // downloads bar). Errors (e.g. an empty workspace) surface inline here.
+  const [exportError, setExportError] = useState<string | null>(null);
+  function downloadZip() {
+    try {
+      setExportError(null);
+      const e = studio.exportProject();
+      const a = document.createElement("a");
+      a.href = e.url;
+      a.download = e.name;
+      a.click();
+    } catch (err) {
+      setExportError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   return (
     <div className="panel">
+      <div className="fhead">
+        <span className="fhead-title">Workspace</span>
+        <button
+          type="button"
+          className="btn ghost"
+          onClick={downloadZip}
+          title="Download the whole project as a .zip (excludes node_modules and Erdou-internal state)"
+        >
+          Download .zip
+        </button>
+      </div>
+      {exportError && <div className="fhead-err">{exportError}</div>}
       {tree.length === 0 ? (
         <div className="hint">The filesystem is empty. Ask the agent to create a project, or use the terminal.</div>
       ) : (

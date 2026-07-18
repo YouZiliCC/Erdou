@@ -4,6 +4,7 @@ import {
   loadFolderIntoVfs,
   saveVfsToFolder,
   mirrorVfsToFolder,
+  mirrorFolderToVfs,
   rescanFolder,
   type MountMtimes,
 } from "./local-mount.js";
@@ -316,5 +317,205 @@ describe("local folder mount", () => {
       /Refusing to mirror an empty workspace/,
     );
     expect(root.children.has("precious.txt")).toBe(true);
+  });
+
+  it("mirrorVfsToFolder no-ops an empty workspace onto a folder with nothing deletable, instead of refusing", async () => {
+    // The refusal is a DATA fail-safe, not a ritual: pushing an empty workspace
+    // to a freshly created (empty) folder destroys nothing and must succeed as
+    // "0 written, 0 deleted" — the refusal fires only when disk files would die.
+    const fs = new Vfs({ clock: () => 0 });
+    const root = new MockDir("new");
+    expect(await mirrorVfsToFolder(fs, root)).toEqual({ written: [], conflicts: [], deleted: [] });
+
+    // SKIP-dir content on disk is never deletable — still a no-op success.
+    const git = new MockDir(".git");
+    git.children.set("config", new MockFile(enc.encode("[core]"), 1000));
+    root.children.set(".git", git);
+    expect(await mirrorVfsToFolder(fs, root)).toEqual({ written: [], conflicts: [], deleted: [] });
+    expect((root.children.get(".git") as MockDir).children.has("config")).toBe(true);
+
+    // rootSkip'd disk files aren't deletable either (image-owned territory)...
+    const bin = new MockDir("bin");
+    bin.children.set("tool", new MockFile(enc.encode("t"), 1000));
+    root.children.set("bin", bin);
+    expect(await mirrorVfsToFolder(fs, root, undefined, new Set(["bin"]))).toEqual({
+      written: [],
+      conflicts: [],
+      deleted: [],
+    });
+    expect(root.children.has("bin")).toBe(true);
+    // ...but WITHOUT the rootSkip the same disk file is deletable → refusal.
+    await expect(mirrorVfsToFolder(fs, root)).rejects.toThrow(/Refusing to mirror an empty workspace/);
+
+    // Non-empty workspace onto the empty-ish folder: the normal mirror runs.
+    fs.writeFile("/app.py", "print(1)");
+    const result = await mirrorVfsToFolder(fs, root, undefined, new Set(["bin"]));
+    expect(result.written).toEqual(["/app.py"]);
+    expect(result.deleted).toEqual([]);
+  });
+
+  it("mirrorVfsToFolder refuses an empty workspace when the only disk data is SKIP content NESTED in a deletable dir", async () => {
+    // Fix-pass regression (reviewer probe): the guard used to count disk files
+    // with SKIP excluded at EVERY level, but with an empty workspace the prune
+    // never recurses — vendor/ is disk-only, so removeEntry("vendor",
+    // {recursive:true}) destroys the nested .git wholesale. A guard that calls
+    // that "0 deletable files" wipes exactly the data class SKIP exists to
+    // protect. Nested SKIP content must count as deletable; only ROOT-level
+    // SKIP names (which the prune itself skips) are shielded.
+    const fs = new Vfs({ clock: () => 0 });
+    const root = new MockDir("project");
+    const vendor = new MockDir("vendor");
+    const vendorGit = new MockDir(".git");
+    vendorGit.children.set("config", new MockFile(enc.encode("[core]"), 1000));
+    vendor.children.set(".git", vendorGit);
+    root.children.set("vendor", vendor);
+
+    await expect(mirrorVfsToFolder(fs, root)).rejects.toThrow(/Refusing to mirror an empty workspace/);
+    // The vendored repo survives untouched.
+    const diskVendor = root.children.get("vendor") as MockDir;
+    expect((diskVendor.children.get(".git") as MockDir).children.has("config")).toBe(true);
+  });
+
+  it("mirrorVfsToFolder converges a file↔directory type flip in both directions instead of dying mid-mirror", async () => {
+    // Known Push gap: the save pass's getFileHandle/getDirectoryHandle reject
+    // with TypeMismatchError when the disk entry's kind differs from the
+    // workspace's — the prune pass must run FIRST and remove the flipped entry
+    // (counted in `deleted`) so the mirror converges.
+    const fs = new Vfs({ clock: () => 0 });
+    const mtimes: MountMtimes = new Map();
+    const root = new MockDir("project");
+    root.children.set("cfg", new MockFile(enc.encode("was-a-file"), 1000));
+    const data = new MockDir("data");
+    data.children.set("d.txt", new MockFile(enc.encode("dd"), 1000));
+    root.children.set("data", data);
+    await loadFolderIntoVfs(root, fs, "/", mtimes);
+
+    // The workspace flips both kinds: cfg file→dir, data dir→file.
+    fs.rm("/cfg");
+    fs.mkdir("/cfg", { recursive: true });
+    fs.writeFile("/cfg/nested.txt", "n");
+    fs.rm("/data", { recursive: true });
+    fs.writeFile("/data", "now-a-file");
+
+    const result = await mirrorVfsToFolder(fs, root, mtimes);
+    expect(result.deleted.sort()).toEqual(["/cfg", "/data"]);
+    expect(result.conflicts).toEqual([]);
+    const diskCfg = root.children.get("cfg") as MockDir;
+    expect(diskCfg).toBeInstanceOf(MockDir);
+    expect(dec.decode((diskCfg.children.get("nested.txt") as MockFile).data)).toBe("n");
+    const diskData = root.children.get("data") as MockFile;
+    expect(diskData).toBeInstanceOf(MockFile);
+    expect(dec.decode(diskData.data)).toBe("now-a-file");
+    // Stale mtimes under the flipped dir were purged; the new writes recorded.
+    expect(mtimes.has("/data/d.txt")).toBe(false);
+    expect(mtimes.has("/data")).toBe(true);
+    expect(mtimes.has("/cfg/nested.txt")).toBe(true);
+  });
+
+  // --- manual Pull is a TRUE MIRROR too (disk → workspace), symmetric with Push ---
+
+  it("mirrorFolderToVfs deletes workspace-only entries but never SKIP dirs or rootSkip'd root dirs, and reports loaded/deleted", async () => {
+    const fs = new Vfs({ clock: () => 0 });
+    const mtimes: MountMtimes = new Map();
+    const root = new MockDir("project");
+    root.children.set("app.py", new MockFile(enc.encode("disk"), 1000));
+    const src = new MockDir("src");
+    src.children.set("main.ts", new MockFile(enc.encode("m1"), 1000));
+    root.children.set("src", src);
+    await loadFolderIntoVfs(root, fs, "/", mtimes);
+
+    // Workspace grows entries the disk doesn't have...
+    fs.writeFile("/app.py", "local-edit"); // content: disk must win
+    fs.writeFile("/workspace-only.txt", "w");
+    fs.mkdir("/gen", { recursive: true });
+    fs.writeFile("/gen/out.js", "g");
+    // ...plus agent-installed deps + image-owned VM dirs that must SURVIVE.
+    fs.mkdir("/node_modules/pkg", { recursive: true });
+    fs.writeFile("/node_modules/pkg/index.js", "dep");
+    fs.mkdir("/etc", { recursive: true });
+    fs.writeFile("/etc/pip.conf", "baked");
+    // And the disk deleted src/main.ts externally since the load.
+    src.children.delete("main.ts");
+
+    const result = await mirrorFolderToVfs(root, fs, mtimes, new Set(VM_PRESERVE_DIRS));
+    expect(result.deleted.sort()).toEqual(["/gen", "/src/main.ts", "/workspace-only.txt"]);
+    expect(result.loaded).toBe(1);
+    expect(fs.readFileText("/app.py")).toBe("disk"); // disk wins on content
+    expect(fs.exists("/workspace-only.txt")).toBe(false);
+    expect(fs.exists("/gen")).toBe(false);
+    expect(fs.readFileText("/node_modules/pkg/index.js")).toBe("dep"); // SKIP survives
+    expect(fs.readFileText("/etc/pip.conf")).toBe("baked"); // rootSkip survives
+    // Deleted paths' mtimes dropped; the pulled file stays recorded, so the
+    // debounced auto-save won't misread the pull as a local edit.
+    expect(mtimes.has("/src/main.ts")).toBe(false);
+    expect(mtimes.get("/app.py")).toBe(1000);
+  });
+
+  it("mirrorFolderToVfs converges a file↔directory type flip in both directions (disk wins)", async () => {
+    const fs = new Vfs({ clock: () => 0 });
+    const root = new MockDir("project");
+    // Disk: "cfg" is a FILE, "data" is a DIRECTORY.
+    root.children.set("cfg", new MockFile(enc.encode("file-on-disk"), 1000));
+    const data = new MockDir("data");
+    data.children.set("d.txt", new MockFile(enc.encode("dd"), 1000));
+    root.children.set("data", data);
+    // Workspace: "cfg" is a DIRECTORY, "data" is a FILE — the load pass could
+    // neither write a file over a VFS dir nor mkdir over a VFS file, so the
+    // workspace-side prune must remove both flips first.
+    fs.mkdir("/cfg", { recursive: true });
+    fs.writeFile("/cfg/nested.txt", "x");
+    fs.writeFile("/data", "file-in-workspace");
+
+    const result = await mirrorFolderToVfs(root, fs);
+    expect(result.deleted.sort()).toEqual(["/cfg", "/data"]);
+    expect(result.loaded).toBe(2);
+    expect(fs.readFileText("/cfg")).toBe("file-on-disk");
+    expect(fs.readFileText("/data/d.txt")).toBe("dd");
+  });
+
+  it("mirrorFolderToVfs refuses an empty disk folder over a non-empty workspace, and no-ops empty-onto-empty", async () => {
+    const fs = new Vfs({ clock: () => 0 });
+    const root = new MockDir("new");
+    // SKIP-only disk content (a bare .git) still counts as an EMPTY folder.
+    const git = new MockDir(".git");
+    git.children.set("config", new MockFile(enc.encode("[core]"), 1000));
+    root.children.set(".git", git);
+    fs.writeFile("/precious.txt", "data");
+
+    await expect(mirrorFolderToVfs(root, fs)).rejects.toThrow(/Refusing to mirror an empty folder/);
+    expect(fs.readFileText("/precious.txt")).toBe("data"); // nothing was deleted
+
+    // Empty-onto-empty: a no-op success, not a refusal.
+    fs.rm("/precious.txt");
+    expect(await mirrorFolderToVfs(root, fs)).toEqual({ loaded: 0, deleted: [] });
+
+    // Non-empty disk onto the empty workspace: the normal mirror-load runs.
+    root.children.set("app.py", new MockFile(enc.encode("print(1)"), 1000));
+    expect(await mirrorFolderToVfs(root, fs)).toEqual({ loaded: 1, deleted: [] });
+    expect(fs.readFileText("/app.py")).toBe("print(1)");
+  });
+
+  it("mirrorFolderToVfs refuses an empty disk folder when the workspace's only files are SKIP content NESTED in a deletable dir", async () => {
+    // Fix-pass regression, pull-side twin of the vendor/.git push probe: with
+    // an empty disk folder the workspace prune deletes /sub wholesale via
+    // fs.rm("/sub", {recursive:true}), taking /sub/.git with it — so a
+    // workspace whose only files live under a nested .git is NOT "empty" for
+    // the fail-safe, even though a root-level /.git (prune-skipped) would be.
+    const fs = new Vfs({ clock: () => 0 });
+    fs.mkdir("/sub/.git", { recursive: true });
+    fs.writeFile("/sub/.git/config", "[core]");
+    const root = new MockDir("empty");
+
+    await expect(mirrorFolderToVfs(root, fs)).rejects.toThrow(/Refusing to mirror an empty folder/);
+    expect(fs.readFileText("/sub/.git/config")).toBe("[core]"); // repo survives untouched
+
+    // Root-level SKIP content stays shielded from the prune AND from the
+    // count: with the nested repo gone, a workspace holding only /.git is
+    // genuinely undeletable data → empty-onto-empty no-op, not a refusal.
+    fs.rm("/sub", { recursive: true });
+    fs.mkdir("/.git", { recursive: true });
+    fs.writeFile("/.git/config", "[core]");
+    expect(await mirrorFolderToVfs(root, fs)).toEqual({ loaded: 0, deleted: [] });
+    expect(fs.readFileText("/.git/config")).toBe("[core]");
   });
 });

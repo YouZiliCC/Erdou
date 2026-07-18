@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
-import { truncate, type Studio, type TraceLine } from "../lib/studio.js";
+import type { ReactNode, SVGProps } from "react";
+import { parseArtifactDetail, truncate, type Studio, type TraceLine } from "../lib/studio.js";
+import { formatByteSize } from "../lib/project-zip.js";
 import { ApprovalPrompt } from "./ApprovalPrompt.js";
 import { Chevron } from "./ui/icons.js";
 
@@ -20,7 +21,7 @@ export function Conversation({ studio, onExample }: { studio: Studio; onExample:
 
   useEffect(() => {
     ref.current?.scrollTo({ top: ref.current.scrollHeight });
-  }, [run?.id, run?.trace.length, run?.status, studio.systemLog.length, studio.pendingApproval]);
+  }, [run?.id, run?.trace.length, run?.status, studio.pendingApproval]);
 
   if (!run) {
     return (
@@ -39,13 +40,6 @@ export function Conversation({ studio, onExample }: { studio: Studio; onExample:
             ))}
           </div>
         </div>
-        {studio.systemLog.length > 0 && (
-          <div className="syslog">
-            {studio.systemLog.map((line) => (
-              <SystemLine key={line.id} line={line} />
-            ))}
-          </div>
-        )}
       </div>
     );
   }
@@ -62,7 +56,7 @@ export function Conversation({ studio, onExample }: { studio: Studio; onExample:
           <div className="who">you</div>
           <div className="you">{run.task}</div>
         </div>
-        {renderTrace(run.trace)}
+        {renderTrace(run.trace, studio)}
         {run.status === "running" && !studio.pendingApproval && (
           <ActivityIndicator lastLine={run.trace[run.trace.length - 1]} />
         )}
@@ -102,7 +96,7 @@ function ActivityIndicator({ lastLine }: { lastLine: TraceLine | undefined }) {
   );
 }
 
-function renderTrace(trace: TraceLine[]) {
+function renderTrace(trace: TraceLine[], studio: Studio) {
   const blocks: ReactNode[] = [];
   for (let i = 0; i < trace.length; i++) {
     const line = trace[i];
@@ -114,12 +108,12 @@ function renderTrace(trace: TraceLine[]) {
       if (result) i++;
       continue;
     }
-    blocks.push(<TraceBlock key={line.id} line={line} />);
+    blocks.push(<TraceBlock key={line.id} line={line} studio={studio} />);
   }
   return blocks;
 }
 
-function TraceBlock({ line }: { line: TraceLine }) {
+function TraceBlock({ line, studio }: { line: TraceLine; studio: Studio }) {
   switch (line.kind) {
     case "user":
       return (
@@ -152,7 +146,68 @@ function TraceBlock({ line }: { line: TraceLine }) {
       );
     case "system":
       return <SystemLine line={line} />;
+    case "artifact":
+      return <ArtifactCard line={line} studio={studio} />;
   }
+}
+
+/**
+ * A kind:"artifact" trace line — a project-export download card. The blob only
+ * lives in `studio.exports` (session memory); the trace line persists. So a
+ * present exportId renders a live Download button on the object URL, and an
+ * absent one (reloaded browser, or replaced by a newer export) renders the
+ * same card disabled with an honest "expired" note. No re-generate button —
+ * the thread's reply box already covers asking for a fresh zip.
+ */
+export function ArtifactCard({ line, studio }: { line: TraceLine; studio: Studio }) {
+  const meta = parseArtifactDetail(line.detail);
+  if (!meta) return <div className="err">✖ Broken export card — its stored payload is unreadable.</div>;
+  const entry = studio.exports.get(meta.exportId);
+  return (
+    <div className={`artifact${entry ? "" : " expired"}`}>
+      <ZipIcon className="artifact-ico" />
+      <div className="artifact-meta">
+        <div className="artifact-name">{meta.name}</div>
+        <div className="artifact-sub">
+          {formatByteSize(meta.byteSize)} · {meta.fileCount} {meta.fileCount === 1 ? "file" : "files"}
+        </div>
+        {!entry && (
+          <div className="artifact-note">
+            download expired — this zip did not survive the browser restart; ask the agent to package the project
+            again
+          </div>
+        )}
+      </div>
+      {entry && (
+        <a className="btn primary artifact-dl" href={entry.url} download={meta.name}>
+          Download
+        </a>
+      )}
+    </div>
+  );
+}
+
+/** A zip archive: a document with the zipper teeth down the middle. Local to
+ *  this card (ui/icons.tsx carries only the file-tree set). */
+export function ZipIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg
+      width={16}
+      height={16}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      {...props}
+    >
+      <path d="M4 1.5h5l3 3v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1z" />
+      <path d="M6.5 3h1M7.5 5h1M6.5 7h1M7.5 9h1" />
+      <path d="M7 11h2v2H7z" />
+    </svg>
+  );
 }
 
 /**
@@ -187,7 +242,7 @@ function ToolBlock({ call, result }: { call?: TraceLine; result?: TraceLine }) {
   );
 }
 
-function SystemLine({ line }: { line: TraceLine }) {
+export function SystemLine({ line }: { line: TraceLine }) {
   return (
     <div className={`sysline ${line.kind === "error" ? "err" : ""}`}>
       <span className="dot" />

@@ -2,15 +2,22 @@ import { useState, useSyncExternalStore } from "react";
 import type { Studio } from "../lib/studio.js";
 
 /** Explicit MANUAL folder-sync controls, shown ALONGSIDE the background
- *  auto-sync (never replacing it): one button per direction so the user can
- *  force a pull or a push on demand, plus a folder swap. Wired entirely through
- *  `studio` (pullFolderNow / pushFolderNow / reselectFolder); a sibling lane
- *  mounts this in the sidebar. Self-contained: one `busy` latch disables all
- *  three while an op runs, and a single live-region line reports the result. */
+ *  auto-sync (never replacing it). Layout: a compact header with the mount
+ *  state (dot + folder name) and a demoted text-style "Re-select folder…",
+ *  then TWO direction buttons that carry their semantics visibly — both are
+ *  TRUE MIRRORS (deletions included; the tooltips say so), while the background
+ *  auto-sync stays additive/merge-like. Wired entirely through `studio`
+ *  (pullFolderNow / pushFolderNow / reselectFolder); a sibling lane mounts this
+ *  in the sidebar footer. Self-contained: one `busy` latch disables all three
+ *  while an op runs, and a single live-region line always reports counts. */
 export function FolderSyncControls({ studio }: { studio: Studio }) {
   const mounted = useSyncExternalStore(
     (cb) => studio.subscribe(cb),
     () => studio.mount !== null,
+  );
+  const mountName = useSyncExternalStore(
+    (cb) => studio.subscribe(cb),
+    () => studio.mountName,
   );
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
@@ -29,39 +36,16 @@ export function FolderSyncControls({ studio }: { studio: Studio }) {
 
   return (
     <div className="folder-sync">
-      <div className="fs-row">
-        <button
-          className="btn ghost"
-          disabled={busy || !mounted}
-          onClick={() =>
-            void run("Pulling…", async () => {
-              const n = await studio.pullFolderNow();
-              return `Pulled ${n} file${n === 1 ? "" : "s"} from disk.`;
-            })
-          }
+      <div className="fs-head">
+        <span
+          className="fs-mount"
+          title={mounted ? `Synced to local folder "${mountName}"` : "Folder not connected"}
         >
-          Pull from disk ↓
-        </button>
+          <span className={mounted ? "dot on" : "dot"} />
+          <span className="fs-name">{mountName ?? "No folder"}</span>
+        </span>
         <button
-          className="btn ghost"
-          disabled={busy || !mounted}
-          title="Mirror the workspace onto the mounted folder: write every workspace file AND delete disk files absent from the workspace. Files edited on disk since the last sync are skipped as conflicts — use Pull from disk to resolve."
-          onClick={() =>
-            void run("Pushing…", async () => {
-              const r = await studio.pushFolderNow();
-              if (!r) return "No folder mounted.";
-              const parts = [`${r.written.length} written`, `${r.deleted.length} deleted`];
-              if (r.conflicts.length > 0) {
-                parts.push(`${r.conflicts.length} conflict${r.conflicts.length === 1 ? "" : "s"} skipped — Pull from disk ↓ to resolve`);
-              }
-              return `Pushed to disk: ${parts.join(", ")}.`;
-            })
-          }
-        >
-          Push to disk ↑
-        </button>
-        <button
-          className="btn ghost"
+          className="fs-reselect"
           disabled={busy}
           onClick={() =>
             void run("Selecting…", async () => {
@@ -70,7 +54,41 @@ export function FolderSyncControls({ studio }: { studio: Studio }) {
             })
           }
         >
-          Re-select folder
+          Re-select folder…
+        </button>
+      </div>
+      <div className="fs-row">
+        <button
+          className="btn ghost fs-dir"
+          disabled={busy || !mounted}
+          title="TRUE MIRROR, disk → workspace: load every folder file AND delete workspace files absent on disk (.git/node_modules/.erdou and image-owned VM dirs untouched). The background auto-sync stays additive/merge-like — only these two buttons delete."
+          onClick={() =>
+            void run("Pulling…", async () => {
+              const r = await studio.pullFolderNow();
+              if (!r) return "No folder mounted.";
+              return `Pulled: ${r.loaded} loaded, ${r.deleted.length} deleted.`;
+            })
+          }
+        >
+          <span className="fs-verb">⬇ Pull</span>
+          <span className="fs-sem">disk → workspace</span>
+        </button>
+        <button
+          className="btn ghost fs-dir"
+          disabled={busy || !mounted}
+          title="TRUE MIRROR, workspace → disk: write every workspace file AND delete disk files absent from the workspace (.git/node_modules/.erdou untouched). Files edited on disk since the last sync are skipped as conflicts — Pull to resolve. The background auto-sync stays additive/merge-like — only these two buttons delete."
+          onClick={() =>
+            void run("Pushing…", async () => {
+              const r = await studio.pushFolderNow();
+              if (!r) return "No folder mounted.";
+              const n = r.conflicts.length;
+              const counts = `${r.written.length} written, ${r.deleted.length} deleted, ${n} conflict${n === 1 ? "" : "s"} skipped`;
+              return n > 0 ? `Pushed: ${counts} — ⬇ Pull to resolve.` : `Pushed: ${counts}.`;
+            })
+          }
+        >
+          <span className="fs-verb">⬆ Push</span>
+          <span className="fs-sem">workspace → disk</span>
         </button>
       </div>
       {status && (

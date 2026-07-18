@@ -1,9 +1,10 @@
 import type { FileSystemApi } from "@erdou/runtime-contract";
 import {
-  loadFolderIntoVfs,
+  mirrorFolderToVfs,
   mirrorVfsToFolder,
   type DirHandleLike,
   type FolderMirrorResult,
+  type FolderPullResult,
   type MountMtimes,
 } from "./local-mount.js";
 
@@ -12,17 +13,22 @@ import {
 // an auto path and reuses the same primitives, so the two directions can never
 // drift apart in how they treat the VM skeleton/preserve dirs or the mtimes map.
 
-/** Manual "Pull from disk ↓": load every file from the mounted folder into the
- *  workspace now — disk wins. This is a full re-load (`loadFolderIntoVfs`), not
- *  the mtime-gated background rescan: the user is explicitly asking to overwrite
- *  the workspace with what is on disk. Updates `mtimes` so the auto write-back
- *  doesn't then treat the pulled files as local edits. Returns the file count. */
+/** Manual "Pull from disk ↓": mirror the mounted folder into the workspace now
+ *  — load every disk file AND delete workspace entries absent on disk (the
+ *  mtime-gated background rescan stays additive; only this deliberate Pull
+ *  deletes from the workspace). `rootSkip` (VM_PRESERVE_DIRS on the VM kernel,
+ *  `undefined` on the browser kernel) protects image-owned root dirs from the
+ *  delete pass exactly as the Push path does, and an empty disk folder over a
+ *  non-empty workspace is refused outright. Updates `mtimes` so the auto
+ *  write-back doesn't then treat the pull as local edits. Returns what was
+ *  loaded / deleted so the UI can report honestly. */
 export async function pullDiskToWorkspace(
   handle: DirHandleLike,
   fs: FileSystemApi,
   mtimes?: MountMtimes,
-): Promise<number> {
-  return loadFolderIntoVfs(handle, fs, "/", mtimes);
+  rootSkip?: ReadonlySet<string>,
+): Promise<FolderPullResult> {
+  return mirrorFolderToVfs(handle, fs, mtimes, rootSkip);
 }
 
 /** Manual "Push to disk ↑": mirror the workspace onto the mounted folder now —

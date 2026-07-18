@@ -153,7 +153,7 @@ describe("egress shim: pypi simple-API link rewrite", () => {
   });
 });
 
-describe("egress shim: strips preflight-tripping request headers (Cache-Control / Pragma)", () => {
+describe("egress shim: strips preflight-tripping request headers (cache hints, npm telemetry, per-host validators)", () => {
   // The forwarded init.headers may be a Headers instance (after strip) or the
   // original form; normalize through Headers for assertions.
   const forwarded = (calls: { url: string; init?: unknown }[]): Headers =>
@@ -215,6 +215,65 @@ describe("egress shim: strips preflight-tripping request headers (Cache-Control 
     const { fetchFn, calls } = makeUpstream(fakeRes({ url: "https://registry.npmjs.org/left-pad" }));
     await wrapEgressFetch(fetchFn)("http://registry.npmjs.org/left-pad", { headers: { "Cache-Control": "no-cache" } });
     expect(forwarded(calls).has("cache-control")).toBe(false);
+  });
+
+  // npm 11.12.1 (the baked guest version) decorates EVERY install request with
+  // these telemetry headers (captured against a logging registry stub); none is
+  // CORS-safelisted and registry.npmjs.org rejects all preflights (OPTIONS 404,
+  // no allow-headers) — leaving any one in kills every in-browser npm install.
+  it("strips npm's telemetry headers (npm-command/npm-auth-type/npm-scope/pacote-*), keeps Accept + User-Agent", async () => {
+    const { fetchFn, calls } = makeUpstream(fakeRes({ url: "https://registry.npmjs.org/left-pad" }));
+    await wrapEgressFetch(fetchFn)("http://registry.npmjs.org/left-pad", {
+      headers: {
+        "user-agent": "npm/11.12.1 node/v24.17.0 linux x86 workspaces/false",
+        "pacote-version": "21.5.0",
+        "pacote-req-type": "packument",
+        "pacote-pkg-id": "registry:left-pad",
+        accept: "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*",
+        "npm-auth-type": "web",
+        "npm-command": "install",
+        "npm-scope": "@myorg",
+      },
+    });
+    const h = forwarded(calls);
+    for (const gone of ["npm-command", "npm-auth-type", "npm-scope", "pacote-version", "pacote-req-type", "pacote-pkg-id"]) {
+      expect(h.has(gone), gone).toBe(false);
+    }
+    // Accept (safelisted) and User-Agent (no preflight, Chromium-probed) survive.
+    expect(h.get("accept")).toBe("application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*");
+    expect(h.get("user-agent")).toBe("npm/11.12.1 node/v24.17.0 linux x86 workspaces/false");
+  });
+
+  // Second-session installs revalidate (npm's cacache in /root/.npm persists via
+  // workspace snapshots) — npm's OPTIONS 404 blocks the validator, so it must go:
+  // an unconditional GET (same authoritative 200) instead of a dead install.
+  it("strips If-None-Match/If-Modified-Since for registry.npmjs.org (preflight-rejected there)", async () => {
+    const { fetchFn, calls } = makeUpstream(fakeRes({ url: "https://registry.npmjs.org/left-pad" }));
+    await wrapEgressFetch(fetchFn)("http://registry.npmjs.org/left-pad", {
+      headers: { "If-None-Match": '"pk1"', "If-Modified-Since": "Wed, 17 Jun 2026 09:44:09 GMT", accept: "application/json" },
+    });
+    const h = forwarded(calls);
+    expect(h.has("if-none-match")).toBe(false);
+    expect(h.has("if-modified-since")).toBe(false);
+    expect(h.get("accept")).toBe("application/json");
+  });
+
+  it("strips validators for files.pythonhosted.org too (OPTIONS 405, no allow-headers)", async () => {
+    const { fetchFn, calls } = makeUpstream(fakeRes({ url: "https://files.pythonhosted.org/packages/b7/six-1.17.0-py2.py3-none-any.whl" }));
+    await wrapEgressFetch(fetchFn)("http://files.pythonhosted.org/packages/b7/six-1.17.0-py2.py3-none-any.whl", {
+      headers: { "if-none-match": '"abc"' },
+    });
+    expect(forwarded(calls).has("if-none-match")).toBe(false);
+  });
+
+  it("KEEPS validators for pypi.org — its Access-Control-Allow-Headers lists the If-* family, so pip's 304 revalidation stays intact", async () => {
+    const { fetchFn, calls } = makeUpstream(fakeRes({ url: "https://pypi.org/simple/six/" }));
+    await wrapEgressFetch(fetchFn)("http://pypi.org/simple/six/", {
+      headers: { "if-none-match": '"abc"', "if-modified-since": "Wed, 17 Jun 2026 09:44:09 GMT" },
+    });
+    const h = forwarded(calls);
+    expect(h.get("if-none-match")).toBe('"abc"');
+    expect(h.get("if-modified-since")).toBe("Wed, 17 Jun 2026 09:44:09 GMT");
   });
 });
 

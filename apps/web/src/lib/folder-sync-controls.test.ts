@@ -9,7 +9,7 @@ const enc = new TextEncoder();
 const dec = new TextDecoder();
 
 describe("folder sync controls", () => {
-  it("pullDiskToWorkspace applies every disk file into the VFS (disk wins)", async () => {
+  it("pullDiskToWorkspace mirrors the disk into the VFS: disk wins on content AND workspace-only entries are deleted", async () => {
     const root = new MockDir("project");
     root.children.set("README.md", new MockFile(enc.encode("# disk")));
     const src = new MockDir("src");
@@ -17,14 +17,34 @@ describe("folder sync controls", () => {
     root.children.set("src", src);
 
     const fs = new Vfs({ clock: () => 0 });
-    // A stale workspace value must be overwritten by the manual pull.
-    fs.mkdir("/", { recursive: true });
+    // A stale workspace value must be overwritten by the manual pull, and a
+    // workspace-only file deleted — the manual Pull is a TRUE MIRROR, unlike
+    // the additive background rescan.
     fs.writeFile("/README.md", "# stale workspace");
+    fs.writeFile("/workspace-only.txt", "gone after the mirror");
 
-    const count = await pullDiskToWorkspace(root, fs);
-    expect(count).toBe(2);
+    const result = await pullDiskToWorkspace(root, fs);
+    expect(result.loaded).toBe(2);
+    expect(result.deleted).toEqual(["/workspace-only.txt"]);
     expect(fs.readFileText("/README.md")).toBe("# disk");
     expect(fs.readFileText("/src/main.ts")).toBe("console.log(1)");
+    expect(fs.exists("/workspace-only.txt")).toBe(false);
+  });
+
+  it("pullDiskToWorkspace keeps VM_PRESERVE_DIRS at root out of the delete pass on the VM kernel", async () => {
+    const fs = new Vfs({ clock: () => 0 });
+    fs.mkdir("/etc", { recursive: true });
+    fs.writeFile("/etc/pip.conf", "baked"); // image-owned — never the folder's to delete
+    fs.writeFile("/app.py", "print(1)"); // stale user file, absent on disk
+
+    const root = new MockDir("project");
+    root.children.set("main.py", new MockFile(enc.encode("print(2)")));
+
+    const result = await pullDiskToWorkspace(root, fs, undefined, new Set(VM_PRESERVE_DIRS));
+    expect(result.deleted).toEqual(["/app.py"]);
+    expect(fs.readFileText("/etc/pip.conf")).toBe("baked"); // survived the mirror
+    expect(fs.readFileText("/main.py")).toBe("print(2)");
+    expect(fs.exists("/app.py")).toBe(false);
   });
 
   it("pushWorkspaceToDisk writes VFS files to the mock handle and SKIPS VM_PRESERVE_DIRS at root on the VM kernel", async () => {

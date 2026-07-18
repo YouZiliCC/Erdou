@@ -27,7 +27,8 @@ const joinP = (dir: string, name: string): string => (dir === "/" ? `/${name}` :
 /** vfsPath -> lastModified, as reported by the local disk file at last load/save/rescan. */
 export type MountMtimes = Map<string, number>;
 
-/** Load a local directory's files into the VFS under `mountPath`. Returns the file count. */
+/** Load a local directory's files into the VFS under `mountPath` (create/overwrite;
+ *  does not delete VFS entries absent on disk — see `mirrorFolderToVfs`). Returns the file count. */
 export async function loadFolderIntoVfs(
   dir: DirHandleLike,
   fs: FileSystemApi,
@@ -64,6 +65,13 @@ export interface FolderSaveResult {
 
 /** A mirror save additionally deletes disk entries absent from the VFS. */
 export interface FolderMirrorResult extends FolderSaveResult {
+  deleted: string[];
+}
+
+/** A mirror pull's outcome: files loaded disk→VFS, plus the workspace paths
+ *  deleted because they were absent (or kind-flipped) on disk. */
+export interface FolderPullResult {
+  loaded: number;
   deleted: string[];
 }
 
@@ -162,15 +170,56 @@ export async function saveVfsToFolder(
   return result;
 }
 
-/** Count real user files in the VFS subtree, honoring the same SKIP/rootSkip
- *  rules as `saveVfsToFolder` — the mirror-delete fail-safe input. */
-function countUserFiles(fs: FileSystemApi, vfsPath: string, rootSkip?: ReadonlySet<string>): number {
+/** Which walk a mirror fail-safe count must agree with. Two modes exist because
+ *  "is the source empty?" and "would the prune destroy data?" follow DIFFERENT
+ *  skip rules:
+ *  - "transfer": SKIP shields at every level (+ rootSkip at the root) — exactly
+ *    what `saveVfsToFolder`/`loadFolderIntoVfs` would copy, so 0 means the
+ *    mirror's write/load pass moves nothing.
+ *  - "prune": SKIP/rootSkip shield ROOT entries only. With an empty source the
+ *    prune never recurses (recursion needs the same-named dir on BOTH sides),
+ *    so every unshielded root entry is removed wholesale — INCLUDING any .git
+ *    or node_modules nested inside it. Counting that nested content under the
+ *    "transfer" rule is exactly how a vendored git repo could be destroyed
+ *    with no refusal; "prune" mode counts it as the deletable data it is. */
+type GuardCount = "transfer" | "prune";
+
+/** Count real user files in the VFS subtree under the given `GuardCount` rule
+ *  — the workspace-side input to both mirror fail-safes. */
+function countUserFiles(
+  fs: FileSystemApi,
+  vfsPath: string,
+  rootSkip: ReadonlySet<string> | undefined,
+  mode: GuardCount,
+): number {
   let n = 0;
+  const atRoot = vfsPath === "/";
   for (const entry of fs.readdir(vfsPath)) {
-    if (SKIP.has(entry.name)) continue;
-    if (vfsPath === "/" && rootSkip?.has(entry.name)) continue;
-    if (entry.type === "directory") n += countUserFiles(fs, joinP(vfsPath, entry.name), rootSkip);
+    if ((atRoot || mode === "transfer") && SKIP.has(entry.name)) continue;
+    if (atRoot && rootSkip?.has(entry.name)) continue;
+    if (entry.type === "directory") n += countUserFiles(fs, joinP(vfsPath, entry.name), rootSkip, mode);
     else if (entry.type === "file") n++;
+  }
+  return n;
+}
+
+/** Count real files on disk under the given `GuardCount` rule — the disk-side
+ *  input to both mirror fail-safes: a mirror is only DESTRUCTIVE when the
+ *  "prune" count is non-zero on the side being overwritten. Empty directories
+ *  are never counted in either mode — deleting one loses no data, so it must
+ *  not trip a refusal. */
+async function countDiskFiles(
+  dir: DirHandleLike,
+  rootSkip: ReadonlySet<string> | undefined,
+  mode: GuardCount,
+  atRoot = true,
+): Promise<number> {
+  let n = 0;
+  for await (const [name, handle] of dir.entries()) {
+    if ((atRoot || mode === "transfer") && SKIP.has(name)) continue;
+    if (atRoot && rootSkip?.has(name)) continue;
+    if (handle.kind === "directory") n += await countDiskFiles(handle, rootSkip, mode, false);
+    else n++;
   }
   return n;
 }
@@ -184,9 +233,13 @@ function dropMtimesUnder(mtimes: MountMtimes | undefined, prefix: string): void 
   }
 }
 
-/** Delete disk entries that no longer exist in the VFS, honoring SKIP at every
- *  level and `rootSkip` at the folder root only (same rules as the save walk —
- *  .git/node_modules/.erdou and image-owned root dirs are never touched). */
+/** Delete disk entries that no longer exist in the VFS — OR whose kind differs
+ *  from the same-named VFS entry (file↔directory type flip) — honoring SKIP at
+ *  every level and `rootSkip` at the folder root only (same rules as the save
+ *  walk — .git/node_modules/.erdou and image-owned root dirs are never touched).
+ *  Must run BEFORE the save pass: `getFileHandle`/`getDirectoryHandle` reject
+ *  with TypeMismatchError on a kind-flipped disk entry, so pruning first is what
+ *  lets a mirror converge instead of failing mid-write. */
 async function pruneDiskOnly(
   fs: FileSystemApi,
   dir: DirHandleLike,
@@ -226,31 +279,111 @@ async function pruneDiskOnly(
   }
 }
 
-/** EXPLICIT Push-to-disk as a true mirror: `saveVfsToFolder` (create/overwrite,
- *  conflict-skipping) and then delete disk entries absent from the workspace,
- *  honoring the same SKIP/rootSkip sets. The debounced background auto-save
- *  stays the additive `saveVfsToFolder` on purpose — only a deliberate Push may
- *  delete from the user's real disk.
+/** EXPLICIT Push-to-disk as a true mirror: prune disk entries that are absent
+ *  from (or kind-flipped against) the workspace, THEN `saveVfsToFolder`
+ *  (create/overwrite, conflict-skipping), honoring the same SKIP/rootSkip sets
+ *  in both passes. Prune-before-save is load-bearing: a disk directory where
+ *  the workspace has a file (or vice versa) makes the save's handle lookups
+ *  reject with TypeMismatchError, so the flipped entry must already be gone.
+ *  The debounced background auto-save stays the additive `saveVfsToFolder` on
+ *  purpose — only a deliberate Push may delete from the user's real disk.
  *
- *  Data fail-safe: refuses outright when the workspace has zero user files —
- *  mirroring an empty workspace would delete the entire folder (e.g. after a
- *  mis-ordered mount or a cleared VFS). */
+ *  Data fail-safe: refuses only when it WOULD destroy something — a workspace
+ *  with zero user files onto a disk that still has deletable files (e.g. after
+ *  a mis-ordered mount or a cleared VFS). Empty-onto-empty (a freshly created
+ *  folder) is a legitimate no-op, not a refusal. The disk side is counted in
+ *  "prune" mode: SKIP content NESTED inside a deletable dir (vendor/.git/…)
+ *  dies with its parent's recursive removeEntry, so it must count as data even
+ *  though a root-level .git (which the prune skips) does not. */
 export async function mirrorVfsToFolder(
   fs: FileSystemApi,
   dir: DirHandleLike,
   mtimes?: MountMtimes,
   rootSkip?: ReadonlySet<string>,
 ): Promise<FolderMirrorResult> {
-  if (countUserFiles(fs, "/", rootSkip) === 0) {
+  if (countUserFiles(fs, "/", rootSkip, "transfer") === 0 && (await countDiskFiles(dir, rootSkip, "prune")) > 0) {
     throw new Error(
       `Refusing to mirror an empty workspace onto "${dir.name}" — that would delete every file in the folder. ` +
         `Pull from disk first, or add files before pushing.`,
     );
   }
-  const saved = await saveVfsToFolder(fs, dir, "/", mtimes, rootSkip);
   const deleted: string[] = [];
   await pruneDiskOnly(fs, dir, "/", mtimes, rootSkip, deleted);
+  const saved = await saveVfsToFolder(fs, dir, "/", mtimes, rootSkip);
   return { ...saved, deleted };
+}
+
+/** Delete VFS entries that no longer exist on disk — or whose kind differs from
+ *  the same-named disk entry — honoring SKIP at every level (an agent-installed
+ *  /node_modules or a workspace .git must survive a pull) and `rootSkip` at the
+ *  workspace root only (image-owned VM dirs are not the folder's to delete).
+ *  The workspace-side twin of `pruneDiskOnly`, and prune-before-load is just as
+ *  load-bearing: `loadFolderIntoVfs` cannot mkdir over a VFS file or write a
+ *  file over a VFS directory. */
+async function pruneVfsOnly(
+  fs: FileSystemApi,
+  dir: DirHandleLike,
+  vfsPath: string,
+  mtimes: MountMtimes | undefined,
+  rootSkip: ReadonlySet<string> | undefined,
+  deleted: string[],
+): Promise<void> {
+  const diskKinds = new Map<string, "file" | "directory">();
+  const diskDirs = new Map<string, DirHandleLike>();
+  for await (const [name, handle] of dir.entries()) {
+    diskKinds.set(name, handle.kind);
+    if (handle.kind === "directory") diskDirs.set(name, handle);
+  }
+  for (const entry of fs.readdir(vfsPath)) {
+    if (SKIP.has(entry.name)) continue;
+    if (vfsPath === "/" && rootSkip?.has(entry.name)) continue;
+    const child = joinP(vfsPath, entry.name);
+    if (entry.type === "directory") {
+      const sub = diskDirs.get(entry.name);
+      if (sub) {
+        await pruneVfsOnly(fs, sub, child, mtimes, rootSkip, deleted);
+      } else {
+        fs.rm(child, { recursive: true });
+        dropMtimesUnder(mtimes, child);
+        deleted.push(child);
+      }
+    } else if (entry.type === "file" && diskKinds.get(entry.name) !== "file") {
+      fs.rm(child);
+      mtimes?.delete(child);
+      deleted.push(child);
+    }
+  }
+}
+
+/** EXPLICIT Pull-from-disk as a true mirror, symmetric with `mirrorVfsToFolder`:
+ *  prune workspace entries absent from (or kind-flipped against) the disk, THEN
+ *  `loadFolderIntoVfs` (disk wins on content). The background rescan and the
+ *  debounced auto-save stay additive on purpose — only the two explicit buttons
+ *  mirror. Updates `mtimes` for both loads and deletes, so the auto write-back
+ *  can't misread the pull as local edits.
+ *
+ *  Data fail-safe (mirror of the Push one): refuses when the disk folder has no
+ *  non-SKIP files (nothing would load — rootSkip deliberately NOT applied: any
+ *  non-SKIP disk file loads regardless of its name) but the workspace still has
+ *  deletable files, counted in "prune" mode — a workspace repo living under
+ *  /sub/.git dies with fs.rm("/sub", {recursive}) even though a root-level
+ *  .git survives, so nested SKIP content counts as data here too.
+ *  Empty-onto-empty is a no-op. */
+export async function mirrorFolderToVfs(
+  dir: DirHandleLike,
+  fs: FileSystemApi,
+  mtimes?: MountMtimes,
+  rootSkip?: ReadonlySet<string>,
+): Promise<FolderPullResult> {
+  if ((await countDiskFiles(dir, undefined, "transfer")) === 0 && countUserFiles(fs, "/", rootSkip, "prune") > 0) {
+    throw new Error(
+      `Refusing to mirror an empty folder over your workspace — Push to disk first, or re-select the right folder.`,
+    );
+  }
+  const deleted: string[] = [];
+  await pruneVfsOnly(fs, dir, "/", mtimes, rootSkip, deleted);
+  const loaded = await loadFolderIntoVfs(dir, fs, "/", mtimes);
+  return { loaded, deleted };
 }
 
 /** Pull disk files that changed externally into the VFS. Additive — never deletes VFS files

@@ -15,7 +15,7 @@ export type { MakeRuntime } from "./types.js";
  * Any adapter that passes this proves it satisfies the contract's observable
  * behavior for filesystem, process, shell, snapshot, port and capabilities.
  *
- * Assumes a POSIX-ish baseline of shell built-ins (echo, grep, false).
+ * Assumes a POSIX-ish baseline of shell built-ins (echo, grep, false, sleep).
  */
 export function runConformance(name: string, make: MakeRuntime): void {
   describe(`conformance: ${name}`, () => {
