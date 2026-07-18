@@ -152,7 +152,9 @@ export function App() {
           <section className="center">
             <div className="thread-head">
               <span className="t">{studio.activeRun?.title ?? "New task"}</span>
-              {studio.activeRun && <span className={"chip " + studio.activeRun.status}>{studio.activeRun.status}</span>}
+              {/* The ONLY status affordance app-wide (matches the sidebar): a
+                  pulsing dot while the thread's turn is in flight — no chips. */}
+              {studio.activeRun?.status === "running" && <span className="run-dot" title="Running" />}
             </div>
             <Conversation
               studio={studio}

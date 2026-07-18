@@ -21,15 +21,15 @@ function line(kind: TraceLine["kind"], text: string, detail?: string): TraceLine
   return { id: nextId++, kind, text, detail, ts: 0 };
 }
 
-function makeRun(trace: TraceLine[]): Run {
-  return { id: "r1", title: "t", task: "do the thing", status: "error", trace, changes: [], messages: [], createdAt: 0 };
+function makeRun(trace: TraceLine[], status: Run["status"] = "error"): Run {
+  return { id: "r1", title: "t", task: "do the thing", status, trace, changes: [], messages: [], createdAt: 0 };
 }
 
-function render(partial: { activeRun?: Run; systemLog?: TraceLine[] }) {
+function render(partial: { activeRun?: Run; systemLog?: TraceLine[]; pendingApproval?: unknown }) {
   const studio = {
     activeRun: partial.activeRun,
     systemLog: partial.systemLog ?? [],
-    pendingApproval: undefined,
+    pendingApproval: partial.pendingApproval,
   } as unknown as Studio;
   return renderToStaticMarkup(createElement(Conversation, { studio, onExample: () => {} }));
 }
@@ -95,6 +95,54 @@ describe("Conversation system-error strip (B3)", () => {
     expect(html).toContain("Runtime booted.");
     expect(html).toContain("Could not restore project.");
     expect(html).toContain("quota exceeded");
+  });
+});
+
+describe("Conversation activity indicator", () => {
+  it("shows pulsing dots with 'thinking…' on a running run whose last line is not an in-flight tool", () => {
+    const html = render({ activeRun: makeRun([line("thought", "planning the change")], "running") });
+    expect(html).toContain('class="activity"');
+    expect(html).toContain("activity-dots");
+    expect(html).toContain("thinking…");
+  });
+
+  it("names the tool when the last line is a tool call still awaiting its result", () => {
+    const html = render({
+      activeRun: makeRun([line("thought", "ok"), line("tool", "write_file", '{"path":"/a.py"}')], "running"),
+    });
+    expect(html).toContain("running write_file…");
+    expect(html).not.toContain("thinking…");
+  });
+
+  it("falls back to 'thinking…' once the tool's result has landed", () => {
+    const trace = [line("tool", "write_file"), line("result", "ok")];
+    const html = render({ activeRun: makeRun(trace, "running") });
+    expect(html).toContain("thinking…");
+    expect(html).not.toContain("running write_file…");
+  });
+
+  it("shows 'thinking…' on a running run with an empty trace", () => {
+    const html = render({ activeRun: makeRun([], "running") });
+    expect(html).toContain("thinking…");
+  });
+
+  it.each(["done", "review", "error"] as const)("renders no indicator on a %s run", (status) => {
+    const html = render({ activeRun: makeRun([line("thought", "planning")], status) });
+    expect(html).not.toContain('class="activity"');
+    expect(html).not.toContain("thinking…");
+  });
+
+  it("yields to the approval prompt while an approval is pending", () => {
+    const html = render({
+      activeRun: makeRun([line("tool", "run")], "running"),
+      pendingApproval: {
+        req: { tool: "run", command: "rm -rf build", args: {} },
+        resolve: () => {},
+        allowAlways: () => {},
+      },
+    });
+    expect(html).toContain('class="approval"');
+    expect(html).not.toContain('class="activity"');
   });
 });
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Studio } from "../lib/studio.js";
 import { DiffPanel } from "./DiffPanel.js";
 import { FilePanel } from "./FilePanel.js";
@@ -18,13 +18,52 @@ export function ReviewPane({ studio }: { studio: Studio }) {
 
   const run = studio.activeRun;
 
-  // Auto-select the Diff tab whenever the active run finishes with changes, so
+  // True while the agent's open_preview has claimed the tab for the CURRENT
+  // turn. run.changes is only assigned at the turn's settle (Studio's finally
+  // block), typically a LATER commit than the mid-turn open_preview nonce bump
+  // — without this, the settle's diff auto-select would yank the user off the
+  // preview the agent just showed them.
+  const previewedThisTurn = useRef(false);
+
+  // Scope the claim to the thread it was made on: switching threads restores
+  // the normal diff auto-select. Declared before the diff effect so the clear
+  // lands first when both fire in one commit (React runs effects in order).
+  const activeRunId = run?.id;
+  useEffect(() => {
+    previewedThisTurn.current = false;
+  }, [activeRunId]);
+
+  // ...and to a single turn: the next turn starting releases the claim. Only
+  // the false->true edge clears — the true->false edge IS the settle, where
+  // the claim must still hold.
+  const running = studio.running;
+  useEffect(() => {
+    if (running) previewedThisTurn.current = false;
+  }, [running]);
+
+  // Auto-select the Diff tab whenever the active run settles with changes, so
   // DiffPanel mounts and its markReviewed effect fires (review -> done). Keyed
   // on run id + change count so it doesn't yank the user off a tab they picked
-  // manually on unrelated re-renders.
+  // manually on unrelated re-renders. Skipped when open_preview claimed this
+  // turn: the run then simply stays "review" until the user opens Diff.
   useEffect(() => {
-    if (run && run.changes.length > 0) setTab("Diff");
+    if (run && run.changes.length > 0 && !previewedThisTurn.current) setTab("Diff");
   }, [run?.id, run?.changes.length]);
+
+  // Follow the agent's open_preview tool: a bumped previewRequest.nonce means
+  // "show the user the running app", so switch to the Preview tab and claim
+  // the turn (see above). Declared AFTER the diff auto-select so that in the
+  // rare same-commit case (changes AND nonce land together) this setTab runs
+  // last and Preview still wins. The ref seeds with the mount-time nonce so a
+  // stale pre-existing request can't yank a freshly mounted pane to Preview.
+  const previewNonce = studio.previewRequest?.nonce;
+  const seenPreviewNonce = useRef(previewNonce);
+  useEffect(() => {
+    if (previewNonce === undefined || previewNonce === seenPreviewNonce.current) return;
+    seenPreviewNonce.current = previewNonce;
+    previewedThisTurn.current = true;
+    setTab("Preview");
+  }, [previewNonce]);
 
   return (
     <div className="review-pane">

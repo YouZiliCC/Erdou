@@ -60,6 +60,7 @@ const ERDOU_ABOUT = [
   "- Erdou is a browser-first agent OS: your whole world runs inside the user's browser tab, not on a server or laptop. There is no host machine to fall back to — no ssh, no cloud box, no second terminal.",
   "- The project is the /workspace filesystem, persisted by the browser (IndexedDB / snapshots) or a mounted local folder — NOT a normal disk. Work under /workspace; files elsewhere may not survive a reload.",
   '- To show a running server to the user it MUST bind 0.0.0.0 (not localhost / 127.0.0.1) — the preview reaches it through a reverse proxy, so a loopback-only bind is invisible. For web pages prefer RELATIVE asset URLs (href="style.css", not "/style.css"); absolute root paths need care to resolve through the preview.',
+  "- When an open_preview tool is available, use it to put your work in front of the user: pass `command` to start a blocking server the sanctioned way (run_shell would hang on it), or call it bare after a server is already listening.",
   "- Design to fit this environment. When you write code or config that only exists BECAUSE of Erdou — binding 0.0.0.0, relative URLs, avoiding native/compiled deps, staying within the RAM cap — that is an Erdou adaptation; record it (see HOW TO WORK).",
 ];
 

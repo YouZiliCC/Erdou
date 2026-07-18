@@ -20,7 +20,7 @@ export function Conversation({ studio, onExample }: { studio: Studio; onExample:
 
   useEffect(() => {
     ref.current?.scrollTo({ top: ref.current.scrollHeight });
-  }, [run?.id, run?.trace.length, studio.systemLog.length, studio.pendingApproval]);
+  }, [run?.id, run?.trace.length, run?.status, studio.systemLog.length, studio.pendingApproval]);
 
   if (!run) {
     return (
@@ -63,6 +63,9 @@ export function Conversation({ studio, onExample }: { studio: Studio; onExample:
           <div className="you">{run.task}</div>
         </div>
         {renderTrace(run.trace)}
+        {run.status === "running" && !studio.pendingApproval && (
+          <ActivityIndicator lastLine={run.trace[run.trace.length - 1]} />
+        )}
         {studio.pendingApproval && run.status === "running" && <ApprovalPrompt studio={studio} />}
       </div>
       {systemErrors.length > 0 && (
@@ -73,6 +76,29 @@ export function Conversation({ studio, onExample }: { studio: Studio; onExample:
         </div>
       )}
     </>
+  );
+}
+
+/**
+ * Live-activity pulse pinned to the bottom of a running run's transcript, so
+ * "thinking" is visibly different from "hung". A `tool` trace line's result
+ * arrives as a separate later `result` line, so a trailing `tool` line means
+ * that tool is still in flight — name it; otherwise the model is between
+ * events ("thinking…"). Hidden while an approval prompt is up (the agent is
+ * waiting on the user, not working) and gone the moment the run leaves
+ * "running".
+ */
+function ActivityIndicator({ lastLine }: { lastLine: TraceLine | undefined }) {
+  const label = lastLine?.kind === "tool" ? `running ${lastLine.text}…` : "thinking…";
+  return (
+    <div className="activity" aria-live="polite">
+      <span className="activity-dots" aria-hidden="true">
+        <span />
+        <span />
+        <span />
+      </span>
+      {label}
+    </div>
   );
 }
 

@@ -1,127 +1,92 @@
-import { useState, useRef, useEffect } from "react";
-import type { KeyboardEvent } from "react";
+import { useEffect, useRef } from "react";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import "@xterm/xterm/css/xterm.css";
 import type { Studio } from "../lib/studio.js";
+import { ShellLineDiscipline, formatShellPrompt } from "../lib/shell-terminal.js";
 import { PtyTerminal } from "./PtyTerminal.js";
 
-interface Block {
-  cwd: string;
-  cmd: string;
-  stdout: string;
-  stderr: string;
-  code: number;
-}
-
 /** Dispatches to the VM kernel's streaming PTY terminal or the browser kernel's
- *  block terminal — hookless so the two branches don't fight React's rules of
- *  hooks (each render path owns its own component + hook set).
+ *  line-discipline shell terminal — both xterm-based.
  *
- *  C2: the PTY is keyed on `studio.kernelGeneration` so a vm→vm profile switch —
- *  which keeps `kernelKind === "vm"`, so this component would NOT otherwise
- *  remount — re-opens the PtySession on the new guest instead of streaming into
- *  the disposed one. (App re-renders this subtree on every notify, and a swap
- *  bumps the generation then notifies, so the new key takes effect.) */
+ *  C2: both are keyed on `studio.kernelGeneration` so a kernel swap that keeps
+ *  the same `kernelKind` — which would NOT otherwise remount — rebinds to the
+ *  new kernel's pty/shell instead of driving the disposed one. (App re-renders
+ *  this subtree on every notify, and a swap bumps the generation then
+ *  notifies, so the new key takes effect.) */
 export function TerminalPanel({ studio }: { studio: Studio }) {
   if (studio.kernelKind === "vm" && studio.kernel.openPty) {
     return <PtyTerminal key={studio.kernelGeneration} studio={studio} />;
   }
-  return <BlockTerminal studio={studio} />;
+  return <ShellTerminal key={studio.kernelGeneration} studio={studio} />;
 }
 
-/** Interactive terminal over a persistent `ShellSession` — cwd/env survive across commands. */
-function BlockTerminal({ studio }: { studio: Studio }) {
-  const shell = studio.shell;
-  const workspace = studio.mountName ?? "erdou";
-
-  const [blocks, setBlocks] = useState<Block[]>([]);
-  const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [history, setHistory] = useState<string[]>([]);
-  const [histIndex, setHistIndex] = useState<number | null>(null);
-  const outRef = useRef<HTMLDivElement>(null);
-
+/** An xterm.js terminal over the persistent `studio.shell` (RpcShellSession:
+ *  command-at-a-time exec, cwd/env survive across commands). The session has
+ *  no PTY, so lib/shell-terminal.ts supplies the line discipline — echo,
+ *  Backspace, Enter→exec, history, type-ahead while a command runs — and this
+ *  component only owns the Terminal lifecycle and the exec round-trip.
+ *
+ *  Sizing/focus: same FitAddon + ResizeObserver dance as PtyTerminal —
+ *  ReviewPane keeps the hidden Terminal tab mounted (display:none ⇒ a 0×0
+ *  container) where fit() would compute garbage, so those fits are skipped;
+ *  un-hiding resizes the container, and that observer tick re-fits AND
+ *  refocuses, so the prompt is typeable the instant the tab shows. Focus is
+ *  never dropped after Enter — nothing is disabled; xterm keeps it. */
+function ShellTerminal({ studio }: { studio: Studio }) {
+  const elRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    outRef.current?.scrollTo({ top: outRef.current.scrollHeight });
-  }, [blocks.length, busy]);
-
-  async function run() {
-    const cmd = input.trim();
-    if (cmd.length === 0 || busy) return;
-    // Capture cwd BEFORE exec — the prompt shows the dir the command ran IN.
-    const cwd = shell.cwd;
-    setInput("");
-    setBusy(true);
-    try {
-      const r = await shell.exec(cmd);
-      setBlocks((b) => [...b, { cwd, cmd, stdout: r.stdout, stderr: r.stderr, code: r.code }]);
-    } catch (err) {
-      setBlocks((b) => [...b, { cwd, cmd, stdout: "", stderr: String(err), code: 1 }]);
-    } finally {
-      setBusy(false);
-      setHistory((h) => [...h, cmd]);
-      setHistIndex(null);
-    }
-  }
-
-  function onKeyDown(e: KeyboardEvent<HTMLInputElement>) {
-    if (e.key === "Enter") {
-      void run();
-      return;
-    }
-    if (e.key === "ArrowUp") {
-      if (history.length === 0) return;
-      e.preventDefault();
-      const next = histIndex === null ? history.length - 1 : Math.max(0, histIndex - 1);
-      setHistIndex(next);
-      setInput(history[next] ?? "");
-      return;
-    }
-    if (e.key === "ArrowDown") {
-      if (histIndex === null) return;
-      e.preventDefault();
-      const next = histIndex + 1;
-      if (next >= history.length) {
-        setHistIndex(null);
-        setInput("");
-      } else {
-        setHistIndex(next);
-        setInput(history[next] ?? "");
+    const el = elRef.current;
+    if (!el) return;
+    const shell = studio.shell;
+    const term = new Terminal({ convertEol: false, fontFamily: "monospace", fontSize: 13 });
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+    term.open(el);
+    let wasVisible = false;
+    const fitIfVisible = (): void => {
+      const visible = el.clientWidth > 0 && el.clientHeight > 0;
+      if (visible) {
+        fit.fit();
+        if (!wasVisible) term.focus(); // tab just became visible — put the cursor back
       }
-    }
-  }
+      wasVisible = visible;
+    };
+    fitIfVisible();
 
-  return (
-    <div className="term">
-      <div className="out" ref={outRef}>
-        {blocks.length === 0 && (
-          <div className="hint">
-            Interactive shell into the runtime — cwd persists across commands. Try: ls / &nbsp;·&nbsp; cd /
-            &nbsp;·&nbsp; echo hi &gt; /a.txt &nbsp;·&nbsp; cat /a.txt &nbsp;·&nbsp; python -c "print(6*7)"&nbsp;
-            <span style={{ opacity: 0.7 }}>(first Python run downloads the runtime, ~10s)</span>
-          </div>
-        )}
-        {blocks.map((b, i) => (
-          <div className="blk" key={i}>
-            <div className="prompt-line">
-              <span className="ws">{workspace}</span> <span className="cwd">{b.cwd}</span>{" "}
-              <span className="p">$</span> {b.cmd}
-            </div>
-            {b.stdout.length > 0 && <div className="res">{b.stdout.replace(/\n$/, "")}</div>}
-            {b.stderr.length > 0 && <div className="res err">{b.stderr.replace(/\n$/, "")}</div>}
-            {b.code !== 0 && <div className="code">exit {b.code}</div>}
-          </div>
-        ))}
-      </div>
-      <div className="inrow">
-        <span className="ws">{workspace}</span> <span className="cwd">{shell.cwd}</span> <span className="p">$</span>
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={onKeyDown}
-          placeholder={busy ? "running…" : "type a command"}
-          disabled={busy}
-          autoFocus
-        />
-      </div>
-    </div>
-  );
+    let disposed = false;
+    const discipline = new ShellLineDiscipline(
+      () => formatShellPrompt(studio.mountName ?? "erdou", shell.cwd),
+      // Live width for the discipline's wrap math (multi-row erase on history
+      // recall / backspace over a wrapped line). Read per keystroke, so a
+      // resize (xterm reflows the wrapped line) is picked up automatically.
+      () => term.cols,
+    );
+    const apply = (u: { write: string; run: string | null }): void => {
+      if (u.write.length > 0) term.write(u.write);
+      if (u.run !== null) {
+        void shell
+          .exec(u.run)
+          // An exec rejection surfaces like a failed command: red message,
+          // exit 1 — same as the old block terminal.
+          .catch((err: unknown) => ({ stdout: "", stderr: String(err), code: 1 }))
+          .then((r) => {
+            if (disposed) return;
+            apply(discipline.commandDone(r));
+          });
+      }
+    };
+    term.write(discipline.start());
+    term.onData((d) => apply(discipline.data(d)));
+    term.focus();
+
+    const ro = new ResizeObserver(fitIfVisible);
+    ro.observe(el);
+    return () => {
+      disposed = true;
+      ro.disconnect();
+      term.dispose();
+    };
+  }, [studio]);
+  return <div className="pty-term" ref={elRef} style={{ height: "100%", width: "100%" }} />;
 }

@@ -64,10 +64,9 @@ input, textarea { font-family: var(--mono); }
 
 /* generic chips / buttons used across panels */
 .chip { font-size:10px; padding:1.5px 8px; border-radius:20px; border:1px solid var(--border); color:var(--muted); display:inline-flex; align-items:center; gap:5px; }
-.chip.run,.chip.running{color:var(--accent);border-color:color-mix(in srgb, var(--accent) 35%, transparent);}
-.chip.review{color:var(--purple);border-color:color-mix(in srgb, var(--purple) 35%, transparent);}
-.chip.done,.chip.exited{color:var(--green);border-color:color-mix(in srgb, var(--green) 32%, transparent);}
-.chip.error,.chip.killed{color:var(--red);border-color:color-mix(in srgb, var(--red) 32%, transparent);}
+.chip.running{color:var(--accent);border-color:color-mix(in srgb, var(--accent) 35%, transparent);}
+.chip.exited{color:var(--green);border-color:color-mix(in srgb, var(--green) 32%, transparent);}
+.chip.killed{color:var(--red);border-color:color-mix(in srgb, var(--red) 32%, transparent);}
 .btn { font-size:12px; border:1px solid var(--border); background:var(--elev); color:var(--ink); border-radius:6px; padding:5px 11px; cursor:pointer; }
 .btn.primary { background:var(--accent); color:var(--on-accent); border-color:transparent; font-weight:600; }
 .btn.ghost { background:transparent; color:var(--muted); }
@@ -87,14 +86,6 @@ input, textarea { font-family: var(--mono); }
 .ui-select.block .ui-select-btn { width: 100%; color: var(--ink); background: var(--elev); border-radius: 8px; padding: 9px 11px; font-size: 13px; }
 .ui-select.block .ui-select-btn:hover { background: var(--elev); }
 .ui-select.block .ui-select-pop { white-space: normal; }
-
-/* ---- custom Toggle (Task 13) ---- */
-.ui-toggle { display: inline-flex; align-items: center; gap: 8px; background: transparent; border: none; padding: 0; color: var(--muted); font-family: var(--mono); font-size: 11.5px; cursor: pointer; }
-.ui-toggle-track { position: relative; flex: 0 0 auto; width: 30px; height: 17px; border-radius: 20px; background: var(--elev2); border: 1px solid var(--border); transition: background 0.15s ease, border-color 0.15s ease; }
-.ui-toggle-knob { position: absolute; top: 1px; left: 1px; width: 13px; height: 13px; border-radius: 50%; background: var(--faint); transition: transform 0.15s ease, background 0.15s ease; }
-.ui-toggle.on { color: var(--ink); }
-.ui-toggle.on .ui-toggle-track { background: color-mix(in srgb, var(--accent) 25%, transparent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
-.ui-toggle.on .ui-toggle-knob { transform: translateX(13px); background: var(--accent); }
 
 /* generic tab bar (Task 10 — ReviewPane) */
 .tabs { flex:0 0 auto; display:flex; align-items:center; gap:3px; padding:6px 10px; border-bottom:1px solid var(--border); }
@@ -149,6 +140,27 @@ input, textarea { font-family: var(--mono); }
 .thread .row { display: flex; align-items: center; gap: 8px; }
 .thread .ttl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--ink); }
 .thread .prev { margin-top: 3px; color: var(--faint); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* hover-revealed row actions (rename / delete); `.open` keeps them shown while "Delete?" is armed */
+.thread .row-actions { display: none; align-items: center; gap: 2px; flex: 0 0 auto; }
+.thread:hover .row-actions, .thread .row-actions.open { display: inline-flex; }
+.rowbtn { border: none; background: transparent; color: var(--muted); font-family: var(--sans); font-size: 12px; line-height: 1; padding: 2px 4px; border-radius: 4px; cursor: pointer; }
+.rowbtn:hover { background: var(--elev2); color: var(--ink); }
+/* after .rowbtn:hover on purpose — equal specificity, source order decides; disabled buttons still match :hover */
+.rowbtn:disabled { color: var(--faint); background: transparent; cursor: default; }
+.rowbtn.danger { color: var(--red); font-size: 10.5px; white-space: nowrap; }
+/* inline rename input (swaps in for .ttl; sans, since the global `input` rule is mono) */
+.thread .ttl-edit { flex: 1; min-width: 0; font-family: var(--sans); font-size: 12.5px; color: var(--ink); background: var(--elev); border: 1px solid var(--accent); border-radius: 4px; padding: 1px 5px; }
+.thread .ttl-edit:focus { outline: none; }
+/* the ONLY status affordance app-wide: a pulsing dot on a running thread (sidebar rows + thread header) */
+.run-dot { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: pulse 1s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .run-dot { animation: none; } }
+/* live-activity indicator (Conversation, running run) */
+.activity { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12.5px; padding: 2px 0; margin-bottom: 16px; }
+.activity-dots { display: inline-flex; gap: 4px; }
+.activity-dots span { width: 5px; height: 5px; border-radius: 50%; background: currentColor; animation: pulse 1.2s ease-in-out infinite; }
+.activity-dots span:nth-child(2) { animation-delay: .2s; }
+.activity-dots span:nth-child(3) { animation-delay: .4s; }
+@media (prefers-reduced-motion: reduce) { .activity-dots span { animation: none; } }
 .sbf { margin-top: auto; padding: 10px 12px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 11.5px; }
 .sbf .rt { display: flex; align-items: center; gap: 6px; }
 
@@ -175,22 +187,6 @@ input, textarea { font-family: var(--mono); }
 .panel { min-height: 0; overflow: auto; padding: 8px 0; font-family: var(--mono); font-size: 12.5px; }
 
 /* terminal */
-.term { display: grid; grid-template-rows: 1fr auto; height: 100%; min-height: 0; font-family: var(--mono); }
-.term .out { overflow: auto; padding: 10px 14px; font-size: 12.5px; line-height: 1.55; }
-.term .blk { margin-bottom: 9px; }
-.term .prompt-line { color: var(--ink); word-break: break-word; }
-.term .prompt-line .ws { color: var(--accent); }
-.term .prompt-line .cwd { color: var(--muted); }
-.term .prompt-line .p { color: var(--green); }
-.term .res { white-space: pre-wrap; word-break: break-word; color: var(--ink); padding: 2px 0 0; }
-.term .res.err { color: var(--red); }
-.term .code { color: var(--red); font-size: 11.5px; padding-top: 2px; }
-.term .inrow { display: flex; align-items: center; gap: 6px; border-top: 1px solid var(--border); padding: 8px 12px; }
-.term .inrow .ws { color: var(--accent); }
-.term .inrow .cwd { color: var(--muted); }
-.term .inrow .p { color: var(--green); }
-.term input { flex: 1; background: transparent; border: none; color: var(--ink); font-size: 12.5px; font-family: var(--mono); }
-.term input:focus { outline: none; }
 
 /* processes */
 .proc { width: 100%; border-collapse: collapse; }
@@ -198,13 +194,14 @@ input, textarea { font-family: var(--mono); }
 .proc td { padding: 5px 14px; color: var(--ink); border-top: 1px solid var(--border2); }
 
 /* preview */
-.preview { display: grid; grid-template-rows: auto auto 1fr; min-height: 0; height: 100%; }
-.preview-bar { display: flex; align-items: center; gap: 10px; padding: 9px 14px; border-bottom: 1px solid var(--border); }
-.preview-bar .btn.primary { padding: 6px 12px; font-size: 12.5px; }
-.preview-bar .entry { font-family: var(--mono); font-size: 11.5px; color: var(--faint); }
+.preview { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; height: 100%; }
 .run-input { flex: 1; min-width: 0; background: var(--elev); color: var(--ink); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 12.5px; }
 .run-input:focus { outline: none; border-color: var(--accent); }
-.live-toggle { flex: 0 0 auto; }
+/* secondary manual-run row — agent-primary philosophy: the human command path sits small, below the preview */
+.preview-run-row { display: flex; align-items: center; gap: 8px; padding: 6px 14px; border-top: 1px solid var(--border2); }
+.preview-run-row .run-input { font-size: 11.5px; padding: 4px 9px; }
+.preview-run-row .btn { flex: 0 0 auto; padding: 4px 12px; font-size: 11.5px; color: var(--muted); }
+.preview-run-row .port-input { flex: 0 0 86px; }
 .ports-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 7px 14px; border-bottom: 1px solid var(--border2); }
 .ports-bar .empty { color: var(--faint); font-size: 11.5px; }
 .sibling-hint { color: var(--faint); font-size: 11px; margin-left: auto; }

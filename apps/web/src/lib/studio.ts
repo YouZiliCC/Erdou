@@ -225,6 +225,10 @@ export class Studio {
    *  tracked from `port.opened`/`port.closed` — not persisted; a fresh session
    *  starts with nothing served until something runs. */
   openPorts: { port: number }[] = [];
+  /** The agent's open_preview request: ReviewPane switches to the Preview tab
+   *  and PreviewPanel focuses `port` (or the latest open port when null)
+   *  whenever `nonce` changes. Null until the tool is first used. */
+  previewRequest: { port: number | null; nonce: number } | null = null;
   /** The Preview panel's detached serve process (`RunServeResult.pid`, VM path
    *  only — `null` on the browser kernel). Owned here, not in the panel, so
    *  `switchKernel` can kill it on the OUTGOING kernel pre-swap, and so it
@@ -1068,6 +1072,12 @@ export class Studio {
           resolve("allow"); // already always-allowed this run
           return;
         }
+        // open_preview is gated only for its server-starting form: a bare
+        // "show the user the preview panel" runs nothing and needs no approval.
+        if (req.tool === "open_preview" && typeof req.args.command !== "string") {
+          resolve("allow");
+          return;
+        }
         this.pendingApproval = {
           req,
           resolve: (d) => {
@@ -1233,6 +1243,64 @@ export class Studio {
         createSwitchEnvironmentTool((t) => this.switchEnvironmentForRun(t), {
           environments: ENVIRONMENTS.map((e) => e.id),
         }),
+        // App-UI tool (defined here, not in agent-tools — opening a panel is
+        // app business, not a runtime capability): lets the agent surface its
+        // running app to the user instead of hoping they find the Preview tab.
+        {
+          name: "open_preview",
+          description:
+            "Show the user your running app in Erdou's Preview panel. Two forms: " +
+            "(1) with `command`, starts that server as a managed preview process (the sanctioned way to run a blocking " +
+            "server — run_shell would hang on it) and then opens the panel on the port it binds; " +
+            "(2) without `command`, just opens the panel — call it right after a server you already started is listening. " +
+            "Servers must bind 0.0.0.0. `port` picks which port to focus (useful for multi-port servers); omit for the latest.",
+          parameters: {
+            type: "object",
+            properties: {
+              command: {
+                type: "string",
+                description:
+                  "Optional shell command that starts a server (e.g. `python3 -m http.server 8000` or `erdou serve dist`). " +
+                  "Run detached and tracked by the preview — omit if your server is already running.",
+              },
+              port: {
+                type: "number",
+                description: "The port to focus. Omit to focus the most recently opened port.",
+              },
+            },
+          },
+          execute: async (_ctx, args) => {
+            const port = typeof args.port === "number" ? args.port : null;
+            const command = typeof args.command === "string" && args.command.trim() !== "" ? args.command.trim() : null;
+            if (command) {
+              const r = await this.runServe(command);
+              if (!r.ok) {
+                return { ok: false, output: r.stderr?.trim() || r.stdout?.trim() || "serve failed" };
+              }
+              if (r.openedPorts.length === 0) {
+                return {
+                  ok: false,
+                  output:
+                    r.loopbackPorts.length > 0
+                      ? `The server bound 127.0.0.1 only (port ${r.loopbackPorts.join(", ")}) — bind 0.0.0.0 so the preview proxy can reach it.`
+                      : "The command exited without opening a port — a preview needs a server that binds 0.0.0.0 and keeps running.",
+                };
+              }
+              const focus = port !== null && r.openedPorts.includes(port) ? port : r.openedPorts[r.openedPorts.length - 1]!;
+              this.requestPreview(focus);
+              const portsNote = r.openedPorts.length > 1 ? ` (ports open: ${r.openedPorts.join(", ")})` : "";
+              return { ok: true, output: `Server running; preview opened for the user on port ${focus}${portsNote}.` };
+            }
+            this.requestPreview(port);
+            return {
+              ok: true,
+              output:
+                port === null
+                  ? "Preview panel opened for the user (latest port)."
+                  : `Preview panel opened for the user on port ${port}.`,
+            };
+          },
+        },
       ],
       onEvent: (e) => this.onAgentEvent(run, e),
       approve: this.makeApprove(approvalMode),
@@ -1332,6 +1400,56 @@ export class Studio {
     this.notify();
   }
 
+  /**
+   * Delete a run (task thread) from the sidebar. If it was the active run, the
+   * most recent remaining run becomes active (runs are stored most-recent
+   * first), or none. Persists through both stores like startRun: an awaited
+   * IndexedDB write + the mounted folder's debounced `.erdou/` state save.
+   *
+   * A run whose turn is IN FLIGHT is refused instead of being ripped out
+   * mid-turn: stopRun() is checkpoint-based (the abort settles asynchronously
+   * at the agent's next checkpoint), so "stop then delete once the turn
+   * settles" would mean hidden deferred-deletion state for a case the user can
+   * resolve with two clicks — Stop, then delete. The sidebar renders a running
+   * row's delete button DISABLED (with that explanation as its title), so this
+   * guard is a backstop for programmatic callers; its log line is best-effort
+   * (with a run active, only error-kind system lines are pinned on screen).
+   */
+  async deleteRun(id: string): Promise<void> {
+    const run = this.runs.find((r) => r.id === id);
+    if (!run) throw new Error(`deleteRun: no run with id "${id}"`);
+    if (run.status === "running") {
+      this.logSystem("system", "This task is still running — stop it first, then delete it.");
+      return;
+    }
+    this.runs = this.runs.filter((r) => r.id !== id);
+    if (this.activeRunId === id) this.activeRunId = this.runs[0]?.id ?? null;
+    this.notify();
+    await saveRuns(this.runs).catch((err) =>
+      this.logSystem("error", "Could not persist the deleted run history", asMessage(err)),
+    );
+    this.scheduleFolderStateSave();
+  }
+
+  /**
+   * Rename a run (task thread). `Run.title` is a stored plain field (`runTitle`
+   * only derives the initial value), so the rename survives reload by
+   * construction. Fail-fast: an empty (post-trim) title or an unknown id
+   * throws — no silent half-rename. Persists through both stores.
+   */
+  async renameRun(id: string, title: string): Promise<void> {
+    const run = this.runs.find((r) => r.id === id);
+    if (!run) throw new Error(`renameRun: no run with id "${id}"`);
+    const trimmed = title.trim();
+    if (trimmed === "") throw new Error("renameRun: the title must not be empty");
+    run.title = trimmed;
+    this.notify();
+    await saveRuns(this.runs).catch((err) =>
+      this.logSystem("error", "Could not persist the renamed run", asMessage(err)),
+    );
+    this.scheduleFolderStateSave();
+  }
+
   /** Accept a run's changes: "review" -> "done". */
   markReviewed(id: string): void {
     const run = this.runs.find((r) => r.id === id);
@@ -1392,6 +1510,14 @@ export class Studio {
    *  allows to be asynchronous — via the boot-time subscription. */
   closePort(port: number): Promise<void> {
     return this.runtime.closePort(port);
+  }
+
+  /** The agent's open_preview tool lands here: record the request (a nonce so
+   *  repeated calls to the same port still re-trigger the UI) and notify. The
+   *  UI reacts — this starts/stops nothing. */
+  requestPreview(port: number | null): void {
+    this.previewRequest = { port, nonce: (this.previewRequest?.nonce ?? 0) + 1 };
+    this.notify();
   }
 
   /**
