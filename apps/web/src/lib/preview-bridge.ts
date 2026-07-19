@@ -1,4 +1,6 @@
-import type { HttpRequest, HttpResponse } from "@erdou/runtime-contract";
+import type { HttpRequest, HttpResponse, WsConnection } from "@erdou/runtime-contract";
+import { injectPreviewScripts } from "./preview-inject.js";
+import { isWsOpenMessage, openWsTunnel } from "./preview-tools.js";
 
 /**
  * The preview reverse-proxy bridge (page side).
@@ -8,7 +10,27 @@ import type { HttpRequest, HttpResponse } from "@erdou/runtime-contract";
  * `{method,url,headers,body}`, and posts it to this page over a per-request
  * `MessageChannel`. Here we `dispatch` it into the in-browser runtime and post
  * the `HttpResponse` back down the same channel. The SW turns that into a real
- * `Response`. Request → response only: no caching, no streaming.
+ * `Response`. No caching. One reply per request — but a STREAMED response
+ * (`HttpResponse.stream`, engaged by kernels for `text/event-stream` only)
+ * posts its reply at head-time with a TRANSFERRED pull-based `ReadableStream`
+ * beside a headers-only `res`; the SW uses `stream ?? res.body` as the
+ * `Response` body, so SSE chunks reach the iframe as the runtime produces
+ * them. Everything else stays a single buffered reply, byte-identical —
+ * except previewed DOCUMENTS: the SW reports `Request.destination` as `dest`
+ * on the envelope, and `answer()` runs "document"/"iframe" HTML replies
+ * through `injectPreviewScripts` (preview-inject.ts), which injects the
+ * console/error observability hook (`window.__erdouLogs`, read by the agent's
+ * preview_logs tool) and the WebSocket shim as `<script>`s after `<head>`.
+ * Subresources, fetches, and non-HTML stay untouched.
+ *
+ * WebSockets: the SW never sees ws:// handshakes (no fetch event fires), so
+ * the injected shim tunnels same-host WebSockets instead — it posts
+ * `erdou:ws-open` (+ a MessagePort) to this window; the listener below
+ * validates it and `openWsTunnel` (preview-tools.ts) drives
+ * `runtime.upgrade(port, req)` — the contract's OPTIONAL capability method.
+ * A kernel without `upgrade` (the browser kernel) gets a precise fail-fast
+ * decline. Live tunnels are torn down when the bridge is re-aimed at a new
+ * runtime (kernel switch), so no pump outlives its kernel.
  *
  * `fetchToHttpRequest` / `httpResponseToResponse` are the pure marshalling
  * helpers (unit-tested here). The SW mirrors the same marshalling inline
@@ -152,12 +174,16 @@ export function httpResponseToResponse(res: HttpResponse): Response {
   return new Response(body, { status: res.status, headers: res.headers });
 }
 
-/** The SW → page request envelope (also declared inline in the SW). */
+/** The SW → page request envelope (also declared inline in the SW). `dest` is
+ *  the intercepted `Request.destination` — the injection policy's document
+ *  gate (see preview-inject.ts). Optional: a not-yet-updated SW omits it, and
+ *  the bridge then injects nothing (fail-safe for version skew). */
 interface ProxyRequestMessage {
   type: "erdou:req";
   id: number;
   port: number;
   req: HttpRequest;
+  dest?: string;
 }
 
 function isProxyRequest(data: unknown): data is ProxyRequestMessage {
@@ -172,15 +198,31 @@ function isProxyRequest(data: unknown): data is ProxyRequestMessage {
 
 interface DispatchRuntime {
   dispatch(port: number, req: HttpRequest): Promise<HttpResponse>;
+  /** OPTIONAL, mirroring the contract: absent on kernels without WebSocket
+   *  support (the browser kernel) — the tunnel declines fail-fast then. */
+  upgrade?(port: number, req: HttpRequest): Promise<WsConnection>;
 }
 
 let bridgeInstalled = false;
 let currentRuntime: DispatchRuntime | null = null;
+/** Cleanups for live WebSocket tunnels, so re-aiming the bridge at a NEW
+ *  runtime (kernel switch / re-boot) tears the old kernel's pumps down instead
+ *  of leaking them against a dead emulator. */
+const activeTunnels = new Set<() => void>();
+
+function retargetRuntime(runtime: DispatchRuntime): void {
+  if (currentRuntime !== null && currentRuntime !== runtime) {
+    for (const cleanup of [...activeTunnels]) cleanup();
+    activeTunnels.clear();
+  }
+  currentRuntime = runtime;
+}
 
 /** Re-aim the installed preview bridge at a new runtime (e.g. after a kernel
- *  switch). The listener is installed once (below) and reads this holder. */
+ *  switch). The listener is installed once (below) and reads this holder.
+ *  Live WebSocket tunnels belong to the OLD runtime and are closed. */
 export function setPreviewRuntime(runtime: DispatchRuntime): void {
-  currentRuntime = runtime;
+  retargetRuntime(runtime);
 }
 
 /**
@@ -189,8 +231,8 @@ export function setPreviewRuntime(runtime: DispatchRuntime): void {
  * (SSR, tests, unsupported browsers).
  */
 export function installPreviewBridge(runtime: DispatchRuntime): void {
-  currentRuntime = runtime; // always update the target…
-  if (bridgeInstalled) return; // …but install the listener only once
+  retargetRuntime(runtime); // always update the target…
+  if (bridgeInstalled) return; // …but install the listeners only once
   if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) {
     return;
   }
@@ -202,6 +244,31 @@ export function installPreviewBridge(runtime: DispatchRuntime): void {
     const rt = currentRuntime;
     if (!rt) return;
     void answer(rt, event.data, replyPort);
+  });
+  // The WebSocket tunnel listener: the injected shim (same-origin preview
+  // document) posts `erdou:ws-open` with a transferred MessagePort. The origin
+  // check means a foreign page can never open a tunnel into the runtime.
+  window.addEventListener("message", (event: MessageEvent) => {
+    if (event.origin !== window.location.origin) return;
+    if (!isWsOpenMessage(event.data)) return;
+    const tunnelPort = event.ports[0];
+    if (!tunnelPort) return;
+    const rt = currentRuntime;
+    if (!rt) return;
+    let cleanup: (() => void) | null = null;
+    void openWsTunnel(rt, event.data, tunnelPort, () => {
+      if (cleanup) activeTunnels.delete(cleanup);
+    }).then((c) => {
+      if (!c) return;
+      cleanup = c;
+      // The kernel may have been switched while the upgrade was in flight —
+      // a tunnel into the outgoing runtime must not be kept.
+      if (currentRuntime !== rt) {
+        c();
+        return;
+      }
+      activeTunnels.add(c);
+    });
   });
 }
 
@@ -261,13 +328,73 @@ async function unregisterStalePreviewWorkers(): Promise<void> {
   );
 }
 
-async function answer(
+/** The slice of `MessagePort` the reply path uses — injectable so `answer` is
+ *  unit-testable with a recording fake. */
+export interface ProxyReplyPort {
+  postMessage(message: unknown, transfer?: Transferable[]): void;
+}
+
+/**
+ * Answer one proxied request: dispatch into the runtime, reply on the SW's
+ * per-request `MessagePort`. Exported for unit tests; production traffic
+ * arrives via the listener `installPreviewBridge` installs.
+ *
+ * A STREAMED response (`res.stream` — see the contract doc on `HttpResponse`)
+ * replies at head-time: the single-use iterable is wrapped in a pull-based
+ * `ReadableStream` (pull → `it.next()`, cancel → `it.return()`) and
+ * TRANSFERRED to the SW beside a headers-only `res` with an empty body. A
+ * consumer cancel propagates natively across the transfer, so the producer
+ * learns "client gone" and stops. A mid-stream producer error rejects a pull,
+ * erroring the stream — a visible network error in the iframe, never a
+ * silently-truncated success. NULL-BODY statuses never stream (the SW's
+ * null-body rule wins); a nonsensical stream on one is released, not sent.
+ *
+ * Buffered DOCUMENT replies ("document"/"iframe" per `msg.dest`) pass through
+ * `injectPreviewScripts` first, which injects the console/error hook and the
+ * WebSocket shim into HTML (preview-inject.ts — streams and non-HTML pass
+ * through unchanged).
+ */
+export async function answer(
   runtime: DispatchRuntime,
   msg: ProxyRequestMessage,
-  replyPort: MessagePort,
+  replyPort: ProxyReplyPort,
 ): Promise<void> {
   try {
-    const res = await runtime.dispatch(msg.port, msg.req);
+    const res = injectPreviewScripts(await runtime.dispatch(msg.port, msg.req), msg.dest);
+    if (res.stream !== undefined && !NULL_BODY_STATUS.has(res.status)) {
+      const it = res.stream[Symbol.asyncIterator]();
+      const stream = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          const { done, value } = await it.next();
+          if (done) controller.close();
+          else controller.enqueue(value);
+        },
+        async cancel() {
+          await it.return?.();
+        },
+      });
+      replyPort.postMessage(
+        {
+          type: "erdou:res",
+          id: msg.id,
+          res: { status: res.status, headers: res.headers, body: new Uint8Array() },
+          stream,
+        },
+        [stream],
+      );
+      return;
+    }
+    if (res.stream !== undefined) {
+      // Null-body status + stream: unsupported by definition — release the
+      // producer (client will never read) and reply with the plain head.
+      void res.stream[Symbol.asyncIterator]().return?.();
+      replyPort.postMessage({
+        type: "erdou:res",
+        id: msg.id,
+        res: { status: res.status, headers: res.headers, body: res.body },
+      });
+      return;
+    }
     replyPort.postMessage({ type: "erdou:res", id: msg.id, res });
   } catch (err) {
     // Surface the dispatch failure so the SW can answer the iframe with a 502

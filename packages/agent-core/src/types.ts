@@ -47,7 +47,9 @@ export interface AgentOptions {
   /** Specifics for the generated environment brief. */
   environment?: EnvironmentInfo;
   onEvent?: (event: AgentEvent) => void;
-  /** When set, gated tools (run_shell, remove_path, switch_environment, open_preview) must be approved before running. */
+  /** When set, gated tools (run_shell, remove_path, switch_environment, open_preview, delegate)
+   *  must be approved before running. The delegate gate covers the whole batch: its sub-agents
+   *  run unapproved inside their isolated sandboxes and only the approved call merges diffs back. */
   approve?: (req: ApprovalRequest) => Promise<ApprovalDecision>;
   /** Cancels the run: checked at the top of each step (before the next model
    *  call) and before each tool execution. On abort the loop exits cleanly

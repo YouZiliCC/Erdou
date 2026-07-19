@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { Studio } from "../lib/studio.js";
+
+/** Studio's preview-frame registration (wired by the studio-side preview-tools
+ *  integration: `registerPreviewFrame` keeps the live iframe element so the
+ *  agent's preview_read/preview_click/preview_logs tools can reach it). Typed
+ *  as an optional structural method so this panel also typechecks/works
+ *  against a Studio build without that wiring. */
 import { detectRunCommand, staticServeCommand } from "../lib/run-detect.js";
 import { killTrackedServe } from "../lib/run-serve.js";
 import { bundleProject, hasBundleEntry } from "../lib/bundle-project.js";
@@ -276,10 +282,18 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
         {viewedPort !== null ? (
           // The service worker only controls same-origin clients, so the SW-served
           // preview needs allow-same-origin. In production, serve it from a separate
-          // origin to fully isolate it from the app. Keyed on port+nonce so a
-          // (re-)run remounts the iframe and the preview actually reloads.
+          // origin to fully isolate it from the app — BUT note the coupling: the
+          // agent's preview tools (lib/preview-tools.ts) read/click this frame via
+          // contentDocument/contentWindow, which same-origin serving alone makes
+          // possible; a separate-origin hardening severs those tools with it — the
+          // two decisions travel together. Keyed on port+nonce so a (re-)run
+          // remounts the iframe and the preview actually reloads. The ref hands the
+          // live element to Studio for the preview tools (null on unmount, so a
+          // closed preview fails their "no preview is open" check instead of
+          // pointing at a dead frame).
           <iframe
             key={`${viewedPort}:${nonce}`}
+            ref={(el) => studio.registerPreviewFrame(el)}
             className="preview-frame"
             title="preview"
             sandbox="allow-scripts allow-same-origin"

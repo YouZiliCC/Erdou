@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
+import type { HttpResponse } from "@erdou/runtime-contract";
 import {
+  answer,
   fetchToHttpRequest,
   httpResponseToResponse,
   installPreviewBridge,
@@ -160,6 +162,158 @@ describe("routePreviewRequest", () => {
       port: 8000,
       guestPath: "/api",
     });
+  });
+});
+
+describe("answer (page-side reply, streamed and buffered)", () => {
+  const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
+  const dec = new TextDecoder();
+  const msg = {
+    type: "erdou:req" as const,
+    id: 7,
+    port: 8080,
+    req: { method: "GET", url: "/events", headers: {}, body: new Uint8Array() },
+  };
+
+  interface Posted {
+    message: {
+      type: string;
+      id: number;
+      res?: HttpResponse;
+      stream?: ReadableStream<Uint8Array>;
+      error?: string;
+    };
+    transfer: Transferable[] | undefined;
+  }
+
+  function recordingPort(): { posted: Posted[]; port: { postMessage(m: unknown, t?: Transferable[]): void } } {
+    const posted: Posted[] = [];
+    return {
+      posted,
+      port: { postMessage: (m, t) => posted.push({ message: m as Posted["message"], transfer: t }) },
+    };
+  }
+
+  const runtimeOf = (res: HttpResponse) => ({ dispatch: async () => res });
+
+  // A two-chunk producer that records whether its finally (the contract's
+  // "client gone" cleanup) ran.
+  function producer(): { res: HttpResponse; finallyRan: () => boolean } {
+    let finallyRan = false;
+    async function* gen(): AsyncGenerator<Uint8Array> {
+      try {
+        yield enc("data: one\n\n");
+        yield enc("data: two\n\n");
+      } finally {
+        finallyRan = true;
+      }
+    }
+    return {
+      res: {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: new Uint8Array(),
+        stream: gen(),
+      },
+      finallyRan: () => finallyRan,
+    };
+  }
+
+  it("a plain response posts ONE reply with the body and no stream (unchanged path)", async () => {
+    const { posted, port } = recordingPort();
+    const res: HttpResponse = { status: 200, headers: { "content-type": "text/plain" }, body: enc("ok") };
+    await answer(runtimeOf(res), msg, port);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]!.message.id).toBe(7);
+    expect(posted[0]!.message.res).toEqual(res);
+    expect(posted[0]!.message.stream).toBeUndefined();
+    expect(posted[0]!.transfer).toBeUndefined();
+  });
+
+  it("a streamed response posts ONE reply: headers-only res (empty body) + a TRANSFERRED ReadableStream", async () => {
+    const { posted, port } = recordingPort();
+    const { res } = producer();
+    await answer(runtimeOf(res), msg, port);
+    expect(posted).toHaveLength(1);
+    const reply = posted[0]!.message;
+    expect(reply.res!.status).toBe(200);
+    expect(reply.res!.headers["content-type"]).toBe("text/event-stream");
+    expect(reply.res!.body.length).toBe(0);
+    expect(reply.stream).toBeInstanceOf(ReadableStream);
+    expect(posted[0]!.transfer).toEqual([reply.stream]); // the transfer list carries the stream
+  });
+
+  it("reading the posted stream pulls the producer's chunks in order and closes at exhaustion", async () => {
+    const { posted, port } = recordingPort();
+    const p = producer();
+    await answer(runtimeOf(p.res), msg, port);
+    const reader = posted[0]!.message.stream!.getReader();
+    expect(dec.decode((await reader.read()).value)).toBe("data: one\n\n");
+    expect(dec.decode((await reader.read()).value)).toBe("data: two\n\n");
+    expect((await reader.read()).done).toBe(true);
+    expect(p.finallyRan()).toBe(true);
+  });
+
+  it("reader.cancel() (client gone) propagates to the producer's return() — its finally runs", async () => {
+    const { posted, port } = recordingPort();
+    const p = producer();
+    await answer(runtimeOf(p.res), msg, port);
+    const reader = posted[0]!.message.stream!.getReader();
+    await reader.read(); // one chunk consumed…
+    expect(p.finallyRan()).toBe(false);
+    await reader.cancel("client gone");
+    expect(p.finallyRan()).toBe(true);
+  });
+
+  it("a mid-stream producer error errors the ReadableStream (fail-fast, no silent truncation)", async () => {
+    const { posted, port } = recordingPort();
+    async function* gen(): AsyncGenerator<Uint8Array> {
+      yield enc("data: one\n\n");
+      throw new Error("WSGI application error: boom");
+    }
+    await answer(
+      runtimeOf({ status: 200, headers: { "content-type": "text/event-stream" }, body: new Uint8Array(), stream: gen() }),
+      msg,
+      port,
+    );
+    const reader = posted[0]!.message.stream!.getReader();
+    await reader.read();
+    await expect(reader.read()).rejects.toThrow("WSGI application error: boom");
+  });
+
+  it("a null-body status with a (nonsensical) stream replies plain and releases the producer via return()", async () => {
+    const { posted, port } = recordingPort();
+    // A producer with an explicit return() (the shape real producers use so
+    // that a return-before-first-pull still releases resources — a plain async
+    // generator would skip its finally when never started).
+    let returned = 0;
+    const stream: AsyncIterable<Uint8Array> = {
+      [Symbol.asyncIterator]: () => ({
+        next: async () => ({ value: enc("never"), done: false }),
+        return: async () => {
+          returned++;
+          return { value: undefined, done: true };
+        },
+      }),
+    };
+    await answer(
+      runtimeOf({ status: 204, headers: {}, body: new Uint8Array(), stream }),
+      msg,
+      port,
+    );
+    expect(posted).toHaveLength(1);
+    expect(posted[0]!.message.stream).toBeUndefined();
+    expect(posted[0]!.message.res!.status).toBe(204);
+    await new Promise((r) => setTimeout(r, 0)); // it.return() is async
+    expect(returned).toBe(1);
+  });
+
+  it("a dispatch failure still posts the error reply (SW turns it into a 502)", async () => {
+    const { posted, port } = recordingPort();
+    await answer({ dispatch: async () => { throw new Error("kernel detached"); } }, msg, port);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]!.message.error).toBe("kernel detached");
+    expect(posted[0]!.message.res).toBeUndefined();
   });
 });
 

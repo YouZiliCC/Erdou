@@ -231,6 +231,36 @@ describe("extra tools", () => {
     expect(switchCb).toHaveBeenCalledWith("vm:node");
   });
 
+  it("gates the app-defined delegate tool behind approve (Confirm-mode batch gate); deny never executes it", async () => {
+    const runtime = await freshRuntime();
+    const executed = vi.fn(async () => ({ ok: true, output: "delegated" }));
+    const delegateTool: ToolDef = {
+      name: "delegate",
+      description: "app-defined multi-agent fan-out (see apps/web delegate.ts)",
+      parameters: { type: "object", properties: {} },
+      execute: executed,
+    };
+    const approve = vi.fn(async () => "deny" as const);
+    const gateway = scriptedGateway([toolCall("delegate", { agents: [{ task: "t" }] }), final("ok")]);
+    const events: AgentEvent[] = [];
+    const agent = new CodingAgent({
+      runtime,
+      gateway,
+      model,
+      extraTools: [delegateTool],
+      approve,
+      onEvent: (e) => events.push(e),
+    });
+    await agent.run("delegate something");
+
+    expect(approve).toHaveBeenCalledTimes(1);
+    expect(approve).toHaveBeenCalledWith(expect.objectContaining({ tool: "delegate" }));
+    expect(executed).not.toHaveBeenCalled();
+    expect(
+      events.some((e) => e.type === "tool_result" && e.name === "delegate" && !e.ok && e.output === "Denied by the user."),
+    ).toBe(true);
+  });
+
   it("a denied switch_environment never invokes the switch callback", async () => {
     const runtime = await freshRuntime();
     const switchCb = vi.fn(async () => "switched");

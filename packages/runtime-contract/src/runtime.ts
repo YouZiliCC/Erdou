@@ -16,7 +16,7 @@ import type { RuntimeEventListener, Unsubscribe } from "./events.js";
 import type { RuntimeCapabilities } from "./capabilities.js";
 import type { Snapshot } from "./snapshot.js";
 import type { VirtualPort } from "./port.js";
-import type { HttpRequest, HttpResponse } from "./http.js";
+import type { HttpRequest, HttpResponse, WsConnection } from "./http.js";
 
 /**
  * The frozen boundary every Runtime implementation must satisfy. Upper layers
@@ -55,8 +55,25 @@ export interface Runtime {
 
   listen(port: number): Promise<VirtualPort>;
   exposePort(port: number): Promise<string>;
-  /** Dispatch an HTTP request to whatever handler is serving `port`. */
+  /** Dispatch an HTTP request to whatever handler is serving `port`. A
+   *  STREAMED response (see `HttpResponse.stream`) resolves at head-time —
+   *  status + headers known, body chunks read by iterating `stream`; a
+   *  buffered response resolves complete. The signature is unchanged either
+   *  way. */
   dispatch(port: number, req: HttpRequest): Promise<HttpResponse>;
+  /** OPTIONAL capability: upgrade an HTTP request to a WebSocket connection
+   *  against whatever server listens on `port`. A kernel WITHOUT WebSocket
+   *  support OMITS this method entirely — absence IS the fail-fast decline
+   *  signal (the browser kernel omits it: it has no WebSocket-capable server
+   *  producer, and a speculative surface would be a lie); callers must check
+   *  for presence and surface a precise "not supported on this kernel" error.
+   *  A kernel WITH support resolves on a COMPLETED 101 handshake and rejects
+   *  fail-fast with a precise message when no server listens on `port`, the
+   *  server refuses/mangles the upgrade, or the handshake times out. `req`
+   *  carries the request line + headers verbatim (subprotocol offers ride in
+   *  `sec-websocket-protocol`); `req.body` is ignored. Unlike `dispatch`, this
+   *  MAY reject — a failed upgrade has no HttpResponse shape to resolve to. */
+  upgrade?(port: number, req: HttpRequest): Promise<WsConnection>;
   /** Stop serving `port`, freeing it for a future serve. Idempotent — closing
    *  a port nothing serves is a no-op. Emits `port.closed` when something was
    *  actually closed (delivery may be asynchronous — see events.ts). */

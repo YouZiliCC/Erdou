@@ -195,6 +195,14 @@ describe("Erdou environment orientation (both kernels)", () => {
       expect(p).toContain("ERDOU.md"); // maintain-the-notes instruction
       expect(p).toMatch(/Project adaptations/); // the section the agent extends
     });
+
+    it(`${name}: orients the agent to the delegate tool honestly (independent subtasks, different files)`, () => {
+      const p = buildSystemPrompt({}, c);
+      expect(p).toMatch(/When a delegate tool is available/);
+    expect(p).toMatch(/When the preview observation tools are available/);
+      expect(p).toMatch(/isolated copy of the workspace/i);
+      expect(p).toMatch(/DIFFERENT files/);
+    });
   }
 });
 

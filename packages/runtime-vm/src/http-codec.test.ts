@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { HttpRequest } from "@erdou/runtime-contract";
-import { serializeHttpRequest, parseHttpResponse, responseComplete } from "./http-codec.js";
+import { serializeHttpRequest, parseHttpResponse, responseComplete, parseHead, ChunkedDecoder } from "./http-codec.js";
 
 const dec = new TextDecoder();
 const bytes = (s: string): Uint8Array => new TextEncoder().encode(s);
@@ -77,6 +77,86 @@ describe("parseHttpResponse", () => {
     const res = parseHttpResponse(bytes("HTTP/1.0 200 OK\r\nCONTENT-LENGTH: 2\r\n\r\nokEXTRA"));
     expect(res.headers["content-length"]).toBeUndefined();
     expect(dec.decode(res.body)).toBe("ok"); // the value was still honored for clamping
+  });
+});
+
+describe("parseHead (incremental head parse for the streaming path)", () => {
+  it("returns null until the CRLFCRLF header terminator arrives", () => {
+    expect(parseHead(bytes(""))).toBeNull();
+    expect(parseHead(bytes("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"))).toBeNull();
+  });
+
+  it("parses status + headers and reports the body offset once the head completes", () => {
+    const wire = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: x\n\n";
+    const head = parseHead(bytes(wire))!;
+    expect(head.status).toBe(200);
+    expect(head.headers["content-type"]).toBe("text/event-stream");
+    expect(head.framing).toBe("close");
+    expect(dec.decode(bytes(wire).subarray(head.bodyOffset))).toBe("data: x\n\n");
+  });
+
+  it("reports chunked framing and strips the framing headers (consumer must not re-frame)", () => {
+    const head = parseHead(bytes("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nX-A: b\r\n\r\n"))!;
+    expect(head.framing).toBe("chunked");
+    expect(head.headers["transfer-encoding"]).toBeUndefined();
+    expect(head.headers["x-a"]).toBe("b");
+  });
+
+  it("reports content-length framing and strips the header", () => {
+    const head = parseHead(bytes("HTTP/1.0 200 OK\r\nContent-Length: 5\r\n\r\nhel"))!;
+    expect(head.framing).toBe("content-length");
+    expect(head.headers["content-length"]).toBeUndefined();
+  });
+
+  it("throws on a malformed status line (same fail-fast rule as parseHttpResponse)", () => {
+    expect(() => parseHead(bytes("NONSENSE\r\n\r\n"))).toThrow(/bad status line/);
+  });
+});
+
+describe("ChunkedDecoder (incremental)", () => {
+  const feed = (d: ChunkedDecoder, s: string): string[] => d.push(bytes(s)).map((c) => dec.decode(c));
+
+  it("decodes a whole body fed in one push and flips finished at the terminator", () => {
+    const d = new ChunkedDecoder();
+    expect(feed(d, "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n")).toEqual(["hello", " world"]);
+    expect(d.finished).toBe(true);
+  });
+
+  it("decodes across a split mid-size-line", () => {
+    const d = new ChunkedDecoder();
+    expect(feed(d, "")).toEqual([]);
+    expect(feed(d, "5")).toEqual([]); // size digit, no CRLF yet
+    expect(feed(d, "\r\nhello\r\n")).toEqual(["hello"]);
+    expect(d.finished).toBe(false);
+  });
+
+  it("decodes across a split mid-chunk (partial data emitted as it arrives)", () => {
+    const d = new ChunkedDecoder();
+    expect(feed(d, "a\r\n0123")).toEqual(["0123"]);
+    expect(feed(d, "456789")).toEqual(["456789"]);
+    expect(feed(d, "\r\n0\r\n\r\n")).toEqual([]);
+    expect(d.finished).toBe(true);
+  });
+
+  it("decodes across a split inside the chunk-closing CRLF and the terminator", () => {
+    const d = new ChunkedDecoder();
+    expect(feed(d, "3\r\nabc\r")).toEqual(["abc"]);
+    expect(feed(d, "\n0\r")).toEqual([]);
+    expect(d.finished).toBe(false);
+    expect(feed(d, "\n\r\n")).toEqual([]);
+    expect(d.finished).toBe(true);
+  });
+
+  it("handles chunk extensions on the size line and ignores bytes after the terminator", () => {
+    const d = new ChunkedDecoder();
+    expect(feed(d, "4;ext=1\r\ndata\r\n0\r\n\r\n")).toEqual(["data"]);
+    expect(d.finished).toBe(true);
+    expect(feed(d, "5\r\nnever\r\n")).toEqual([]); // post-terminator input is dropped
+  });
+
+  it("throws on a malformed chunk-size line (fail-fast, never silent truncation)", () => {
+    const d = new ChunkedDecoder();
+    expect(() => d.push(bytes("zz\r\n"))).toThrow(/malformed chunk-size/);
   });
 });
 

@@ -3,7 +3,9 @@ import { createTools, type ToolDef } from "@erdou/agent-tools";
 import type { AgentOptions, AgentRunResult, AgentEvent } from "./types.js";
 import { buildSystemPrompt } from "./prompt.js";
 
-const GATED_TOOLS = new Set(["run_shell", "remove_path", "switch_environment", "open_preview"]);
+// Centrally-gated tool names; open_preview and delegate are app-defined
+// (studio.ts extraTools) but gated here so approval policy has one home.
+const GATED_TOOLS = new Set(["run_shell", "remove_path", "switch_environment", "open_preview", "delegate"]);
 
 /**
  * The reference Coding Agent. It drives a Runtime through agent-tools using a

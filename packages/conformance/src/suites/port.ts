@@ -37,5 +37,19 @@ export function portSuite(make: MakeRuntime): void {
       const rt = await booted(make);
       await expect(rt.closePort(59998)).resolves.toBeUndefined();
     });
+
+    // `upgrade` is an OPTIONAL capability: a kernel without WebSocket support
+    // must OMIT the method entirely (absence is the fail-fast decline signal —
+    // the browser kernel's shape), and a kernel that ships it must REJECT with
+    // a message naming the port when nothing listens there — never resolve,
+    // never hang. Unlike dispatch (which resolves a 502 HttpResponse), a
+    // failed upgrade has no response shape to resolve to.
+    it("upgrade is either absent (kernel declines WebSockets) or rejects fail-fast on an unbound port", async () => {
+      const rt = await booted(make);
+      if (rt.upgrade === undefined) return; // decline-by-omission: conformant
+      await expect(
+        rt.upgrade(59997, { method: "GET", url: "/", headers: {}, body: new Uint8Array() }),
+      ).rejects.toThrow(/59997/);
+    });
   });
 }

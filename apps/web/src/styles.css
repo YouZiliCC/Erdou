@@ -365,3 +365,15 @@ input, textarea { font-family: var(--mono); }
   .splitter { display: none; }
   .rail { flex: 0 0 auto; width: auto; border-right: none; border-bottom: 1px solid var(--border); flex-direction: row; padding: 6px 10px; }
 }
+
+/* delegate sub-agent card (kind:"subagent" trace line): collapsible .tool-block-family —
+   the header <button> reuses .tool (dot/name/chev); .subagent-body nests the child's own trace. */
+.subagent { margin: 6px 0 16px; }
+.subagent .subagent-head { cursor: pointer; }
+.subagent .subagent-head .name { color: var(--ink); }
+.subagent .subagent-status { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); text-align: right; }
+.subagent-body { margin: 8px 0 0 10px; padding-left: 12px; border-left: 2px solid color-mix(in srgb, var(--accent) 30%, transparent); }
+.subagent-task { font-size: 12px; color: var(--muted); white-space: pre-wrap; word-break: break-word; margin-bottom: 10px; }
+.subagent-body .tool-block { margin: 6px 0 10px; }
+.subagent-body .think, .subagent-body .done { margin-bottom: 10px; }
+.subagent-summary { font-family: var(--mono); font-size: 12px; margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; }

@@ -61,7 +61,9 @@ const ERDOU_ABOUT = [
   "- The project is the /workspace filesystem, persisted by the browser (IndexedDB / snapshots) or a mounted local folder — NOT a normal disk. Work under /workspace; files elsewhere may not survive a reload.",
   '- To show a running server to the user it MUST bind 0.0.0.0 (not localhost / 127.0.0.1) — the preview reaches it through a reverse proxy, so a loopback-only bind is invisible. For web pages prefer RELATIVE asset URLs (href="style.css", not "/style.css"); absolute root paths need care to resolve through the preview.',
   "- When an open_preview tool is available, use it to put your work in front of the user: pass `command` to start a blocking server the sanctioned way (run_shell would hang on it), or call it bare after a server is already listening.",
+  "- When the preview observation tools are available, verify your served app yourself after open_preview: preview_read reads the rendered DOM, preview_click clicks an element, preview_logs drains the page's console output and uncaught errors.",
   "- When a package_project tool is available, use it whenever the user asks to export, download, or hand off the project — it zips the workspace (minus node_modules and Erdou-internal state) and puts a Download button in front of the user.",
+  "- When a delegate tool is available, you can fan out 1-3 sub-agents in parallel — each works one self-contained subtask in an isolated copy of the workspace, and its file changes merge back when it finishes (a file two sub-agents both change gets the later one's changes rejected). Delegate only genuinely independent subtasks that touch DIFFERENT files; do small or entangled work yourself.",
   "- Design to fit this environment. When you write code or config that only exists BECAUSE of Erdou — binding 0.0.0.0, relative URLs, avoiding native/compiled deps, staying within the RAM cap — that is an Erdou adaptation; record it (see HOW TO WORK).",
 ];
 

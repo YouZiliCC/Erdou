@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode, SVGProps } from "react";
 import { parseArtifactDetail, truncate, type Studio, type TraceLine } from "../lib/studio.js";
+import { parseSubagentDetail, type SubagentDetail } from "../lib/delegate.js";
 import { formatByteSize } from "../lib/project-zip.js";
 import { ApprovalPrompt } from "./ApprovalPrompt.js";
 import { Chevron } from "./ui/icons.js";
@@ -148,7 +149,58 @@ function TraceBlock({ line, studio }: { line: TraceLine; studio: Studio }) {
       return <SystemLine line={line} />;
     case "artifact":
       return <ArtifactCard line={line} studio={studio} />;
+    case "subagent":
+      return <SubagentCard line={line} studio={studio} />;
   }
+}
+
+/** Header status label per sub-agent state (SubagentCard). */
+const SUBAGENT_STATUS_LABEL: Record<SubagentDetail["status"], string> = {
+  running: "running…",
+  done: "done",
+  max_steps: "hit step limit",
+  aborted: "stopped",
+  error: "failed",
+  conflict: "conflict — changes rejected",
+};
+
+/**
+ * A kind:"subagent" trace line — one delegate sub-agent as a collapsible card
+ * (ToolBlock-style header: status dot, role, status + step count, chevron).
+ * The body shows the child's task brief and its OWN nested trace, rendered
+ * through the same `renderTrace` building blocks as the parent transcript
+ * (the nested lines are plain TraceLines carried in the detail JSON, so they
+ * persist and re-render after a reload). A conflict/error summary is surfaced
+ * explicitly — a rejected merge must not be discoverable only by expanding.
+ */
+export function SubagentCard({ line, studio }: { line: TraceLine; studio: Studio }) {
+  const [open, setOpen] = useState(false);
+  const meta = parseSubagentDetail(line.detail);
+  if (!meta) return <div className="err">✖ Broken sub-agent card — its stored payload is unreadable.</div>;
+  const dot = meta.status === "running" ? "busy" : meta.status === "done" ? "ok" : "fail";
+  const steps = meta.steps > 0 ? ` · ${meta.steps} ${meta.steps === 1 ? "step" : "steps"}` : "";
+  return (
+    <div className="subagent">
+      <button type="button" className="tool subagent-head" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+        <span className={`dot ${dot}`} />
+        <span className="name">sub-agent · {meta.role}</span>
+        <span className="subagent-status">
+          {SUBAGENT_STATUS_LABEL[meta.status]}
+          {steps}
+        </span>
+        <Chevron className={`chev ${open ? "open" : ""}`} />
+      </button>
+      {open && (
+        <div className="subagent-body">
+          <div className="subagent-task">{meta.task}</div>
+          {renderTrace(meta.trace, studio)}
+        </div>
+      )}
+      {(meta.status === "conflict" || meta.status === "error") && meta.summary && (
+        <div className="err subagent-summary">✖ {meta.summary}</div>
+      )}
+    </div>
+  );
 }
 
 /**

@@ -4,8 +4,22 @@
 // `{method,url,headers,body}`, and forwards it to the controlling Studio page
 // over a per-request MessageChannel. The page dispatches it into the runtime
 // (`runtime.dispatch(port, req)`) and posts the `HttpResponse` back down the
-// channel; we turn that into a real `Response` for the iframe. Request →
-// response only: no caching, no streaming.
+// channel; we turn that into a real `Response` for the iframe. No caching.
+// One reply per request — but a STREAMED response (SSE: the runtime engaged
+// `HttpResponse.stream` for `text/event-stream`) replies at head-time with a
+// TRANSFERRED ReadableStream beside a headers-only `res`; the body pick below
+// is `reply.stream ?? res.body`, so chunks flow to the iframe as the runtime
+// produces them and a reader cancel propagates back across the transfer. The
+// reply timeout therefore bounds HEAD arrival only — a live stream keeps
+// flowing long past it.
+//
+// The request envelope also carries `dest` (= `Request.destination`): the
+// page bridge injects the preview scripts (console/error observability hook +
+// WebSocket shim) into HTML replies for "document"/"iframe" destinations ONLY
+// — see src/lib/preview-inject.ts.
+// This worker itself never rewrites bodies; WebSocket handshakes never reach
+// a Service Worker at all (no fetch event), which is exactly why the injected
+// shim + page bridge tunnel them instead.
 //
 // The worker registers at ROOT scope `/` (not `/__preview__/`) so it can also
 // catch a guest's ABSOLUTE-path resources (`<link href="/style.css">`), which
@@ -22,7 +36,9 @@
 
 const SCOPE = "/__preview__/";
 // Bound the wait for the page to answer. A hung/absent dispatch becomes a 504
-// instead of leaving the iframe request pending forever.
+// instead of leaving the iframe request pending forever. This bounds the
+// REPLY (i.e. head arrival) only: a transferred stream delivers its body
+// chunks for as long as the producer keeps yielding.
 const DISPATCH_TIMEOUT_MS = 15000;
 // Statuses whose Response must have a null body (else the constructor throws).
 const NULL_BODY_STATUS = new Set([101, 204, 205, 304]);
@@ -161,7 +177,10 @@ async function proxy(event, route) {
   const id = nextId++;
   let reply;
   try {
-    reply = await exchange(client, { type: "erdou:req", id, port, req });
+    // `dest` = Request.destination — the page bridge's document gate for
+    // preview-script injection (kept in sync with ProxyRequestMessage in
+    // src/lib/preview-bridge.ts).
+    reply = await exchange(client, { type: "erdou:req", id, port, req, dest: event.request.destination });
   } catch {
     return textResponse(504, "Erdou preview: the app did not respond in time (port " + port + ").");
   }
@@ -169,7 +188,11 @@ async function proxy(event, route) {
     return textResponse(502, "Erdou preview: dispatch failed on port " + port + ": " + reply.error);
   }
   const res = reply.res;
-  const body = NULL_BODY_STATUS.has(res.status) ? null : res.body;
+  // Body pick (kept in sync with `answer()` in src/lib/preview-bridge.ts): a
+  // streamed reply carries a transferred ReadableStream beside a headers-only
+  // `res` — use it as the Response body so the iframe reads chunks as the
+  // runtime produces them; otherwise the buffered bytes, exactly as before.
+  const body = NULL_BODY_STATUS.has(res.status) ? null : (reply.stream ?? res.body);
   return new Response(body, { status: res.status, headers: res.headers });
 }
 

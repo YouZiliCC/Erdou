@@ -37,6 +37,8 @@ import {
 } from "./local-mount.js";
 import { pullDiskToWorkspace, pushWorkspaceToDisk, reselectFolder as reselectFolderOp } from "./folder-sync-controls.js";
 import { buildProjectZip } from "./project-zip.js";
+import { createDelegateTool, type SubagentDetail } from "./delegate.js";
+import { createPreviewTools } from "./preview-tools.js";
 
 const SNAPSHOT_ID = "erdou:default";
 /** Cap on `Studio.systemLog` entries so a noisy source (e.g. failing rescans) can't grow it unbounded. */
@@ -46,7 +48,18 @@ const SYSTEM_LOG_LIMIT = 200;
 const SAVE_FAILED_TEXT = "Couldn't save your project to this browser (storage may be full or restricted).";
 const RESCAN_FAILED_TEXT = "Mount rescan failed";
 
-export type TraceKind = "system" | "user" | "thought" | "tool" | "result" | "done" | "error" | "artifact";
+export type TraceKind =
+  | "system"
+  | "user"
+  | "thought"
+  | "tool"
+  | "result"
+  | "done"
+  | "error"
+  | "artifact"
+  /** One delegate sub-agent's lifecycle card; `detail` = SubagentDetail JSON
+   *  (see delegate.ts parseSubagentDetail — the parseArtifactDetail pattern). */
+  | "subagent";
 
 export interface TraceLine {
   id: number;
@@ -264,6 +277,10 @@ export class Studio {
    *  and PreviewPanel focuses `port` (or the latest open port when null)
    *  whenever `nonce` changes. Null until the tool is first used. */
   previewRequest: { port: number | null; nonce: number } | null = null;
+  /** The live preview iframe (registered by PreviewPanel's ref; null when no
+   *  preview is mounted). NOT render state — mutated without notify(); read
+   *  lazily by the preview_read/preview_click/preview_logs tools. */
+  previewFrame: HTMLIFrameElement | null = null;
   /** Session-only registry of built project zips, keyed by exportId (the key an
    *  artifact trace line carries). Deliberately NOT persisted: the values hold
    *  object URLs onto in-memory blobs, which die with the page — after a reload
@@ -1270,7 +1287,8 @@ export class Studio {
         languages: AGENT_LANGUAGES,
         commands: AGENT_COMMANDS,
         notes:
-          "You can build & preview web apps: write a React/TS project (e.g. /src/main.tsx) and the user can Bundle & Run it (bundled in-browser, npm deps from a CDN), `erdou serve <dir>` a static site, or `erdou.serve(app, port)` a Python WSGI app — any of these serves it on a port to preview.",
+          "You can build & preview web apps: write a React/TS project (e.g. /src/main.tsx) and the user can Bundle & Run it (bundled in-browser, npm deps from a CDN), `erdou serve <dir>` a static site, or `erdou.serve(app, port)` a Python WSGI app — any of these serves it on a port to preview." +
+          " After open_preview, verify the app yourself: preview_read (rendered DOM), preview_click (click an element), preview_logs (console output + uncaught errors).",
         // The environments catalog: which env the agent is in now + every env
         // it can switch into (interpreters, package managers, install recipes,
         // switch guidance). Without this, agent-core's environmentsCatalogSection
@@ -1356,6 +1374,32 @@ export class Studio {
             };
           },
         },
+        // Preview observation (spike 3): read the served app's DOM, click an
+        // element, drain its console/error hook — the agent's verify loop
+        // after open_preview. Ungated by design: they act only inside the
+        // sandboxed preview iframe on code the agent itself served (serving
+        // was the gated step); gating would break click→read→logs in Confirm
+        // mode. Reversal is one string in agent-core's GATED_TOOLS.
+        ...createPreviewTools(() => this.previewFrame),
+        // Multi-agent fan-out (spike 4): ONE batch delegate call runs 1..3
+        // sub-agents concurrently in throwaway browser-kernel sandboxes seeded
+        // from a snapshot of the CURRENT workspace, then merges their diffs
+        // back through `agentRuntime` — contract writes, so the run-scoped
+        // diff subscription above picks the merged changes up and Review/
+        // Diff/revert work with zero new plumbing. Approval-gated centrally
+        // (agent-core GATED_TOOLS) on the delegate call itself; children run
+        // ungated inside their sandboxes — nothing touches the real workspace
+        // until this already-approved call applies diffs. NOTE: the ungated-
+        // children decision leans on `pendingApproval` being a SINGLE slot
+        // (concurrent per-child prompts would overwrite each other) — a future
+        // "gate children too" change must first redesign that surface.
+        createDelegateTool({
+          runtime: this.agentRuntime,
+          gateway: this.gateway,
+          model,
+          signal: abort.signal,
+          onChildUpdate: this.makeSubagentReporter(run),
+        }),
         // App-UI tool (same inline style as open_preview): packages the
         // workspace as a .zip and puts a Download button in front of the user.
         // Read-only + UI-only, so it is deliberately NOT approval-gated (not
@@ -1446,8 +1490,17 @@ export class Studio {
   private async computeRunChanges(startSnap: Snapshot, changed: Set<string>): Promise<FileChange[]> {
     if (changed.size === 0) return [];
     const before = SnapshotReader.open(startSnap);
+    // Non-file paths read as null: `mkdir` emits file.changed for the DIRECTORY
+    // itself, and reading it threw EISDIR — which voided the entire turn's diff
+    // (status error, empty Review) for any run that created a directory. The
+    // files created inside a directory carry the actual diff; the dir entry
+    // nets out null→null and drops. (SnapshotReader.read already returns null
+    // for non-files on the `before` side.) Surfaced by the delegate merge,
+    // whose apply-back mkdirs hit this on every nested create.
     const after = (path: string): string | null =>
-      this.fs.exists(path) ? new TextDecoder().decode(this.fs.readFile(path)) : null;
+      this.fs.exists(path) && this.fs.stat(path).type === "file"
+        ? new TextDecoder().decode(this.fs.readFile(path))
+        : null;
     return buildFileChanges(changed, (p) => before.read(p), after);
   }
 
@@ -1558,6 +1611,33 @@ export class Studio {
     this.notify();
   }
 
+  /**
+   * Per-turn reporter for delegate sub-agent lifecycle: the FIRST update for a
+   * child key appends its kind:"subagent" trace line; every later update
+   * replaces that line immutably (fresh detail JSON) + debounce-persists +
+   * notifies — so the card renders live during the run and round-trips
+   * runs-store/`.erdou` like any other trace line. Keys are unique per child
+   * across delegate calls (delegate.ts's call counter), so one map covers a
+   * turn that delegates more than once.
+   */
+  private makeSubagentReporter(run: Run): (key: string, detail: SubagentDetail) => void {
+    const lineIds = new Map<string, number>();
+    return (key, detail) => {
+      const json = JSON.stringify(detail);
+      const text = `sub-agent · ${detail.role}`;
+      const existing = lineIds.get(key);
+      if (existing === undefined) {
+        const l = this.line("subagent", text, json);
+        lineIds.set(key, l.id);
+        run.trace = [...run.trace, l];
+      } else {
+        run.trace = run.trace.map((l) => (l.id === existing ? { ...l, text, detail: json } : l));
+      }
+      this.scheduleRunsSave();
+      this.notify();
+    };
+  }
+
   private onAgentEvent(run: Run, e: AgentEvent): void {
     switch (e.type) {
       case "assistant":
@@ -1651,6 +1731,12 @@ export class Studio {
   requestPreview(port: number | null): void {
     this.previewRequest = { port, nonce: (this.previewRequest?.nonce ?? 0) + 1 };
     this.notify();
+  }
+
+  /** PreviewPanel's iframe ref lands here so the agent's preview observation
+   *  tools can reach the live document. No notify(): not render state. */
+  registerPreviewFrame(el: HTMLIFrameElement | null): void {
+    this.previewFrame = el;
   }
 
   /**
