@@ -30,6 +30,9 @@ import {
   persistHandle,
   loadPersistedHandle,
   clearPersistedHandle,
+  diskHasEntry,
+  dropMtimesUnder,
+  hasMtimeUnder,
   type DirHandleLike,
   type FolderMirrorResult,
   type FolderPullResult,
@@ -644,6 +647,18 @@ export class Studio {
     // copy the current workspace into the target kernel so the project follows.
     // MUST precede A's shutdown: a VM's SyncFs reads die with its host.destroy().
     copyWorkspace(outgoing.fs, next.fs);
+    // Leak convergence (the browser-kernel /etc,/root-on-disk bug): converge
+    // any VM_PRESERVE_DIRS names sitting at the BROWSER Vfs root on a
+    // vm→browser swap. copyWorkspace never carries those names across at root
+    // in either direction, and its mirror-clear PRESERVES them (the shield
+    // exists for the live guest's bind mounts + baked config on a copy INTO a
+    // VM), so once leaked they'd survive forever — and the browser kernel's
+    // folder auto-save passes no rootSkip, dumping /etc,/root onto the user's
+    // mounted disk. BUT the name alone doesn't prove leakage (mounted repos
+    // and agents legitimately create root bin/lib/tmp/…), so the cleanup
+    // discriminates per entry — see cleanLeakedVmEntries. Runs AFTER
+    // copyWorkspace so its quarantine renames aren't erased by the mirror-clear.
+    if (outgoingIsVm && target.kind === "browser") await this.cleanLeakedVmEntries(next.fs);
     // swap: unsubscribe old runtime events, point at the new kernel, re-subscribe
     this._unsubRuntime?.();
     this.kernel = next;
@@ -670,6 +685,63 @@ export class Studio {
     this.logSystem(
       "system",
       target.kind === "vm" ? `Switched to the Linux VM (${target.profile}).` : "Switched to the browser kernel.",
+    );
+  }
+
+  /**
+   * Leak convergence for a vm→browser swap: resolve every VM_PRESERVE_DIRS
+   * name at the browser Vfs root. Such a name is USUALLY VM infrastructure
+   * leaked by a pre-R13 switch, but not always — mounted repos carry root
+   * bin/, lib/, tmp/ (Rails/Ruby layouts) into the Vfs via loadFolderIntoVfs
+   * (which applies no rootSkip), and agents/users create such dirs directly on
+   * the browser kernel. Deleting those on name alone destroys project data,
+   * and the next Push would then prune them off the user's REAL disk. So each
+   * entry is discriminated instead of blanket-removed:
+   *  - disk-backed (the mounted folder has a same-named root entry, or
+   *    recorded mount mtimes exist beneath it): project data — left untouched;
+   *  - empty (no non-directory entry anywhere beneath): removing it can lose
+   *    nothing — removed. Covers the leaked skeleton stubs (bin/lib/usr/…);
+   *  - otherwise (non-empty, not disk-backed — a pre-R13 leaked /etc,/root OR
+   *    a project dir made right here): ambiguous, so it is set ASIDE by
+   *    renaming to `<name>.vm-leaked` rather than destructively rm'd — a real
+   *    leak stops colliding with the VM's image-owned names either way, while
+   *    a misjudged project dir stays fully recoverable.
+   * Recorded mount mtimes under every removed/renamed path are dropped so the
+   * rescan can re-pull a same-named dir that legitimately appears on disk.
+   * Logs ONE line naming everything it did; silent when there is nothing to do.
+   */
+  private async cleanLeakedVmEntries(fs: FileSystemApi): Promise<void> {
+    const suspects = fs
+      .readdir("/")
+      .filter((e) => VM_PRESERVE_DIRS.includes(e.name))
+      .sort((a, b) => (a.name < b.name ? -1 : 1));
+    const removed: string[] = [];
+    const setAside: string[] = [];
+    for (const entry of suspects) {
+      const path = `/${entry.name}`;
+      const diskBacked =
+        this.mount !== null &&
+        (hasMtimeUnder(this.mountMtimes, path) || (await diskHasEntry(this.mount, entry.name)));
+      if (diskBacked) continue; // the mounted repo's own root bin/lib/tmp/… — never leakage
+      if (entry.type === "directory" && !dirHasContent(fs, path)) {
+        fs.rm(path, { recursive: true, force: true });
+        removed.push(path);
+      } else {
+        let target = `${path}.vm-leaked`;
+        for (let i = 2; fs.exists(target); i++) target = `${path}.vm-leaked-${i}`;
+        fs.rename(path, target);
+        setAside.push(`${path} → ${target}`);
+      }
+      dropMtimesUnder(this.mountMtimes, path);
+    }
+    if (removed.length === 0 && setAside.length === 0) return;
+    const actions = [
+      removed.length > 0 ? `removed ${removed.join(", ")}` : "",
+      setAside.length > 0 ? `set aside ${setAside.join(", ")} (delete these if they are not project files)` : "",
+    ].filter((s) => s !== "");
+    this.logSystem(
+      "system",
+      `Cleaned VM system entries that had leaked into the browser workspace: ${actions.join("; ")}.`,
     );
   }
 
@@ -700,13 +772,17 @@ export class Studio {
     // only ever ADDS files, so mounting into a non-empty workspace would make
     // it old ∪ folder — and the next auto-save/Push would then write last
     // session's files onto the freshly mounted disk (e.g. polluting a clean
-    // git repo). So a non-empty workspace is cleared first (the VM's
-    // image-owned root dirs kept), with the folder auto-save suspended across
-    // the clear+load so the churn can't mirror a half-loaded state onto any
-    // disk. Note the replaced in-browser project is NOT retained anywhere: the
-    // snapshot save that follows the load overwrites it with the folder
-    // contents.
-    const hadProject = this.fs.readdir("/").some((e) => !VM_PRESERVE_DIRS.includes(e.name));
+    // git repo). So a non-empty workspace is cleared first (on the VM kernel
+    // its image-owned root dirs are kept; on the browser kernel EVERY root
+    // entry counts and goes — a preserve-named /lib or /etc there is the old
+    // project's, or stale VM leakage, never the guest's), with the folder
+    // auto-save suspended across the clear+load so the churn can't mirror a
+    // half-loaded state onto any disk. Note the replaced in-browser project is
+    // NOT retained anywhere: the snapshot save that follows the load
+    // overwrites it with the folder contents.
+    const hadProject = this.fs
+      .readdir("/")
+      .some((e) => this.kernelKind !== "vm" || !VM_PRESERVE_DIRS.includes(e.name));
     const suspend = hadProject && !this.swappingFolder; // a swap already suspended + pre-cleared
     if (suspend) {
       this.swappingFolder = true;
@@ -1005,13 +1081,19 @@ export class Studio {
     }
   }
 
-  /** Delete every project entry from the VFS root, leaving the VM kernel's
-   *  image-owned root dirs (`VM_PRESERVE_DIRS` — skeleton bind mounts + baked
-   *  /etc,/root) untouched. Mirrors `copyWorkspace`'s top-level clear; used by a
-   *  folder swap so the newly-mounted folder is the workspace's only source. */
+  /** Delete every project entry from the VFS root so a newly-mounted folder is
+   *  the workspace's only source. On the VM kernel the image-owned root dirs
+   *  (`VM_PRESERVE_DIRS` — skeleton bind mounts + baked /etc,/root) are the
+   *  GUEST's, not the project's, and stay (mirrors `copyWorkspace`'s top-level
+   *  clear). On the BROWSER kernel nothing at root is image-owned — a
+   *  preserve-named /lib or /etc there is the old project's own dir or stale
+   *  VM leakage, and keeping it would union it onto the freshly mounted
+   *  folder's disk via the auto-save: exactly the A2 pollution this clear
+   *  exists to prevent. */
   private clearWorkspace(): void {
+    const preserved: readonly string[] = this.kernelKind === "vm" ? VM_PRESERVE_DIRS : [];
     for (const entry of this.fs.readdir("/")) {
-      if (VM_PRESERVE_DIRS.includes(entry.name)) continue;
+      if (preserved.includes(entry.name)) continue;
       this.fs.rm(`/${entry.name}`, { recursive: true, force: true });
     }
   }
@@ -1803,6 +1885,13 @@ export class Studio {
     await clearRuns();
     location.reload();
   }
+}
+
+/** True when the directory subtree at `dirPath` contains ANY non-directory
+ *  entry — i.e. removing it could lose data. The VM's leaked bind-mount stubs
+ *  are empty directory trees and read false: deleting one loses nothing. */
+function dirHasContent(fs: FileSystemApi, dirPath: string): boolean {
+  return fs.readdir(dirPath).some((e) => e.type !== "directory" || dirHasContent(fs, `${dirPath}/${e.name}`));
 }
 
 const asMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { ShellLineDiscipline, formatShellPrompt } from "./shell-terminal.js";
+import { ShellLineDiscipline, formatShellPrompt, type CompletionSource } from "./shell-terminal.js";
 
 const RED = "\x1b[31m";
 const RESET = "\x1b[0m";
@@ -13,12 +13,18 @@ const ok = { stdout: "", stderr: "", code: 0 };
 /** Discipline over a mutable fake shell state — tests flip `cwd` the way a
  *  real `cd` would (the NEXT prompt picks it up) and `cols` the way a resize
  *  would (the next wrap-sensitive key picks it up). The prompt "ws / $ " is
- *  7 columns wide. */
-function make(cols = 80): { d: ShellLineDiscipline; state: { cwd: string; cols: number } } {
+ *  7 columns wide. Completion tests hand in a scripted source; everything
+ *  else runs with an empty one (Tab is then a silent no-op). */
+function make(
+  cols = 80,
+  complete: CompletionSource = () => [],
+): { d: ShellLineDiscipline; state: { cwd: string; cols: number } } {
   const state = { cwd: "/", cols };
   const d = new ShellLineDiscipline(
     () => `ws ${state.cwd} $ `,
     () => state.cols,
+    () => state.cwd,
+    complete,
   );
   return { d, state };
 }
@@ -427,5 +433,156 @@ describe("cursor movement and mid-line editing", () => {
     d.data("ab" + LEFT + "X"); // buffered while busy
     d.commandDone(ok); // replay: type ab, Left, insert X -> aXb
     expect(d.data("\r")).toMatchObject({ run: "aXb" });
+  });
+});
+
+describe("tab completion", () => {
+  const TAB = "\t";
+  const LEFT = "\x1b[D";
+  const RIGHT = "\x1b[C";
+
+  it("asks for command kind on the first token, path kind elsewhere, with the live cwd", () => {
+    const calls: Array<[string, string, string]> = [];
+    const { d, state } = make(80, (kind, prefix, cwd) => {
+      calls.push([kind, prefix, cwd]);
+      return [];
+    });
+    d.start();
+    d.data("ec" + TAB);
+    d.data(" src/ap" + TAB);
+    state.cwd = "/src"; // a cd moved the shell while the line was being edited
+    d.data(TAB);
+    expect(calls).toEqual([
+      ["command", "ec", "/"],
+      ["path", "src/ap", "/"],
+      ["path", "src/ap", "/src"],
+    ]);
+  });
+
+  it("a unique command match completes with a trailing space", () => {
+    const { d } = make(80, (kind) => (kind === "command" ? ["echo", "env"] : []));
+    d.start();
+    d.data("ec");
+    expect(d.data(TAB)).toEqual({ write: "ho ", run: null });
+    d.data("hi");
+    expect(d.data("\r").run).toBe("echo hi");
+  });
+
+  it("a unique file completes with a space; a directory gets its / and NO space", () => {
+    const { d } = make(80, (kind) => (kind === "path" ? ["readme.md", "src/"] : []));
+    d.start();
+    d.data("cat re");
+    expect(d.data(TAB)).toEqual({ write: "adme.md ", run: null });
+    d.data("s");
+    expect(d.data(TAB)).toEqual({ write: "rc/", run: null });
+    expect(d.data("\r").run).toBe("cat readme.md src/");
+  });
+
+  it("multiple matches extend to the longest common prefix (no space)", () => {
+    const { d } = make(80, () => ["apple", "apply"]);
+    d.start();
+    d.data("cat a");
+    expect(d.data(TAB)).toEqual({ write: "ppl", run: null });
+    expect(d.data("\r").run).toBe("cat appl");
+  });
+
+  it("no matches: Tab stays silent (even doubled) and the line is untouched", () => {
+    const { d } = make(80, () => ["zebra"]);
+    d.start();
+    d.data("xy");
+    expect(d.data(TAB)).toEqual({ write: "", run: null });
+    expect(d.data(TAB)).toEqual({ write: "", run: null }); // nothing to list either
+    expect(d.data("\r").run).toBe("xy");
+  });
+
+  it("Tab at the LCP is silent once; Tab again lists candidates and reprints the line", () => {
+    const { d } = make(80, () => ["apple", "apply"]);
+    d.start();
+    d.data("cat appl");
+    expect(d.data(TAB)).toEqual({ write: "", run: null }); // no progress: first Tab silent
+    expect(d.data(TAB)).toEqual({
+      write: "\r\napple  apply\r\nws / $ cat appl",
+      run: null,
+    });
+  });
+
+  it("a progress Tab chains: the immediately following Tab lists", () => {
+    const { d } = make(80, () => ["apple", "apply"]);
+    d.start();
+    d.data("cat a");
+    expect(d.data(TAB).write).toBe("ppl");
+    expect(d.data(TAB).write).toBe("\r\napple  apply\r\nws / $ cat appl");
+  });
+
+  it("any key between two Tabs breaks the listing chain", () => {
+    const { d } = make(80, () => ["apple", "apply"]);
+    d.start();
+    d.data("cat appl");
+    d.data(TAB); // no progress, silent
+    d.data(RIGHT); // visual no-op at end of line, but not a Tab
+    expect(d.data(TAB)).toEqual({ write: "", run: null }); // chain restarts
+    expect(d.data(TAB).write).toBe("\r\napple  apply\r\nws / $ cat appl");
+  });
+
+  it("Tab on an empty line offers every command on double-Tab", () => {
+    const { d } = make(80, (kind) => (kind === "command" ? ["echo", "ls"] : []));
+    d.start();
+    d.data(TAB);
+    expect(d.data(TAB)).toEqual({ write: "\r\necho  ls\r\nws / $ ", run: null });
+  });
+
+  it("candidates pack into terminal-width columns, sorted", () => {
+    const { d } = make(10, () => ["ac", "aa", "ab"]);
+    d.start();
+    d.data("ls a");
+    d.data(TAB); // LCP "a" = what's typed: no progress
+    // colWidth 4 (max name 2 + 2 pad), 10 cols -> 2 per row, sorted:
+    expect(d.data(TAB).write).toBe("\r\naa  ab\r\nac\r\nws / $ ls a");
+  });
+
+  it("mid-line: completes the token AT the cursor, byte-exact redraw, cursor restored", () => {
+    const prefixes: string[] = [];
+    const { d } = make(80, (kind, prefix) => {
+      prefixes.push(prefix);
+      return kind === "path" ? ["readme.md"] : [];
+    });
+    d.start();
+    d.data("cat re out.txt");
+    d.data(LEFT.repeat(8)); // cursor just after "re" — NOT the last token
+    // Insert "adme.md " at the cursor via the full-redraw path: erase the row,
+    // rewrite prompt + new line, park the cursor after the insertion (col 21).
+    expect(d.data(TAB).write).toBe(
+      ERASE_LINE + "ws / $ cat readme.md  out.txt" + "\r\x1b[21C",
+    );
+    expect(prefixes).toEqual(["re"]); // the cursor's token, not "out.txt"
+    expect(d.data("\r").run).toBe("cat readme.md  out.txt");
+  });
+
+  it("wrapped line: extension redraws every row; the listing round-trips the wrap", () => {
+    const { d } = make(10, (kind) => (kind === "path" ? ["abc1", "abc2"] : []));
+    d.start();
+    d.data("cat ab XY"); // 7 + 9 = 16 visible -> 2 rows
+    d.data(LEFT.repeat(3)); // cursor after "ab" (row 2, col 3)
+    // Tab 1: "ab" -> "abc" mid-line — erase BOTH rows, rewrite, re-park:
+    expect(d.data(TAB).write).toBe(
+      `${ERASE_LINE}${ERASE_UP}ws / $ cat abc XY` + "\r\x1b[4C",
+    );
+    // Tab 2: no progress -> hop to the end of the wrapped line, list below,
+    // reprint prompt+line, hop back across the wrap to the cursor:
+    expect(d.data(TAB).write).toBe(
+      "\r\x1b[7C" + "\r\n" + "abc1\r\nabc2\r\n" + "ws / $ cat abc XY" + "\r\x1b[4C",
+    );
+    expect(d.data("\r").run).toBe("cat abc XY");
+  });
+
+  it("a Tab buffered while a command runs replays as a completion afterwards", () => {
+    const { d } = make(80, (kind) => (kind === "command" ? ["echo"] : []));
+    d.start();
+    d.data("slow\r");
+    expect(d.data("ec" + TAB)).toEqual({ write: "", run: null }); // buffered raw
+    // Replay after the prompt: "ec" echoes, then the Tab completes against the
+    // CURRENT (post-command) state — same key path as live typing.
+    expect(d.commandDone(ok)).toEqual({ write: "ws / $ echo ", run: null });
+    expect(d.data("hi\r").run).toBe("echo hi");
   });
 });

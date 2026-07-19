@@ -22,6 +22,17 @@ export interface DirHandleLike {
 // ".erdou" is session metadata written directly to the handle by folder-state.ts,
 // never a project file — keep it out of the VFS and the file tree.
 const SKIP = new Set([".git", "node_modules", ".erdou"]);
+/** Chrome's File System Access API stages every `createWritable()` as a sibling
+ *  `<name>.crswap` temp file and renames it over the target on `close()` — a
+ *  crash/reload mid-write strands the temp on disk. Browser plumbing, never
+ *  project data (and never OUR data: losing one loses nothing), so the
+ *  fail-safe counts ignore it in BOTH GuardCount modes, unlike SKIP names. */
+const isCrswap = (name: string): boolean => name.endsWith(".crswap");
+/** THE skip predicate for every disk↔VFS sync walk — load, save, rescan and
+ *  both mirror prunes all route here (single source): whole-name SKIP entries
+ *  plus Chrome's `.crswap` atomic-write temps, which must never be loaded,
+ *  pulled, pruned, or written back in either direction. */
+const skipEntry = (name: string): boolean => SKIP.has(name) || isCrswap(name);
 const joinP = (dir: string, name: string): string => (dir === "/" ? `/${name}` : `${dir}/${name}`);
 
 /** vfsPath -> lastModified, as reported by the local disk file at last load/save/rescan. */
@@ -38,7 +49,7 @@ export async function loadFolderIntoVfs(
   fs.mkdir(mountPath, { recursive: true });
   let count = 0;
   for await (const [name, handle] of dir.entries()) {
-    if (SKIP.has(name)) continue;
+    if (skipEntry(name)) continue;
     const child = joinP(mountPath, name);
     if (handle.kind === "directory") {
       count += await loadFolderIntoVfs(handle, fs, child, mtimes);
@@ -90,6 +101,36 @@ function isNotFound(err: unknown): boolean {
   return err instanceof Error && err.message.includes("ENOENT");
 }
 
+/** The real API rejects a handle lookup with "TypeMismatchError" when the name
+ *  exists as the OTHER kind — for an existence probe that still means "exists". */
+function isTypeMismatch(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "TypeMismatchError";
+}
+
+/** Probe whether the mounted folder's ROOT has an entry named `name`, of any
+ *  kind. The vm→browser leak cleanup uses it to tell a mounted repo's own root
+ *  bin/lib/tmp/… (disk-backed project data) from leaked VM infrastructure.
+ *  NotFound → false; TypeMismatch → true (exists as the other kind); any other
+ *  failure propagates — a broken mount must fail the caller loud, not silently
+ *  read as "not on disk" and unlock a destructive path. */
+export async function diskHasEntry(dir: DirHandleLike, name: string): Promise<boolean> {
+  try {
+    await dir.getDirectoryHandle(name);
+    return true;
+  } catch (err) {
+    if (isTypeMismatch(err)) return true;
+    if (!isNotFound(err)) throw err;
+  }
+  try {
+    await dir.getFileHandle(name);
+    return true;
+  } catch (err) {
+    if (isTypeMismatch(err)) return true;
+    if (!isNotFound(err)) throw err;
+    return false;
+  }
+}
+
 /** Write the VFS subtree at `vfsPath` back into the local directory (create/overwrite;
  *  does not delete files that exist only in the folder — see `mirrorVfsToFolder`).
  *  A file whose disk mtime no longer matches the recorded one is only overwritten
@@ -115,7 +156,7 @@ export async function saveVfsToFolder(
 ): Promise<FolderSaveResult> {
   const result: FolderSaveResult = { written: [], conflicts: [] };
   for (const entry of fs.readdir(vfsPath)) {
-    if (SKIP.has(entry.name)) continue;
+    if (skipEntry(entry.name)) continue;
     if (vfsPath === "/" && rootSkip?.has(entry.name)) continue;
     const child = joinP(vfsPath, entry.name);
     if (entry.type === "directory") {
@@ -195,6 +236,7 @@ function countUserFiles(
   let n = 0;
   const atRoot = vfsPath === "/";
   for (const entry of fs.readdir(vfsPath)) {
+    if (isCrswap(entry.name)) continue; // a stranded browser temp is not data in ANY mode
     if ((atRoot || mode === "transfer") && SKIP.has(entry.name)) continue;
     if (atRoot && rootSkip?.has(entry.name)) continue;
     if (entry.type === "directory") n += countUserFiles(fs, joinP(vfsPath, entry.name), rootSkip, mode);
@@ -216,6 +258,7 @@ async function countDiskFiles(
 ): Promise<number> {
   let n = 0;
   for await (const [name, handle] of dir.entries()) {
+    if (isCrswap(name)) continue; // a stranded browser temp is not data in ANY mode
     if ((atRoot || mode === "transfer") && SKIP.has(name)) continue;
     if (atRoot && rootSkip?.has(name)) continue;
     if (handle.kind === "directory") n += await countDiskFiles(handle, rootSkip, mode, false);
@@ -224,13 +267,27 @@ async function countDiskFiles(
   return n;
 }
 
-/** Drop every recorded mtime at `prefix` or inside it (after a disk delete). */
-function dropMtimesUnder(mtimes: MountMtimes | undefined, prefix: string): void {
+/** Drop every recorded mtime at `prefix` or inside it (after a disk delete, or
+ *  after the vm→browser leak cleanup removes/renames a workspace entry — stale
+ *  recorded mtimes would otherwise stop the rescan from ever re-pulling a
+ *  same-named dir that legitimately lives on disk). */
+export function dropMtimesUnder(mtimes: MountMtimes | undefined, prefix: string): void {
   if (!mtimes) return;
   const dirPrefix = `${prefix}/`;
   for (const key of [...mtimes.keys()]) {
     if (key === prefix || key.startsWith(dirPrefix)) mtimes.delete(key);
   }
+}
+
+/** True when any recorded mtime sits at `prefix` or inside it — i.e. that
+ *  workspace subtree is disk-originated (loaded/saved/rescanned against the
+ *  mounted folder at some point), so it is project data, not VM leakage. */
+export function hasMtimeUnder(mtimes: MountMtimes, prefix: string): boolean {
+  const dirPrefix = `${prefix}/`;
+  for (const key of mtimes.keys()) {
+    if (key === prefix || key.startsWith(dirPrefix)) return true;
+  }
+  return false;
 }
 
 /** Delete disk entries that no longer exist in the VFS — OR whose kind differs
@@ -260,7 +317,7 @@ async function pruneDiskOnly(
   for await (const e of dir.entries()) diskEntries.push(e);
   const vfsTypes = new Map(fs.readdir(vfsPath).map((e) => [e.name, e.type]));
   for (const [name, handle] of diskEntries) {
-    if (SKIP.has(name)) continue;
+    if (skipEntry(name)) continue;
     if (vfsPath === "/" && rootSkip?.has(name)) continue;
     const child = joinP(vfsPath, name);
     if (handle.kind === "directory") {
@@ -335,7 +392,7 @@ async function pruneVfsOnly(
     if (handle.kind === "directory") diskDirs.set(name, handle);
   }
   for (const entry of fs.readdir(vfsPath)) {
-    if (SKIP.has(entry.name)) continue;
+    if (skipEntry(entry.name)) continue;
     if (vfsPath === "/" && rootSkip?.has(entry.name)) continue;
     const child = joinP(vfsPath, entry.name);
     if (entry.type === "directory") {
@@ -396,7 +453,7 @@ export async function rescanFolder(
 ): Promise<string[]> {
   const pulled: string[] = [];
   for await (const [name, handle] of dir.entries()) {
-    if (SKIP.has(name)) continue;
+    if (skipEntry(name)) continue;
     const child = joinP(mountPath, name);
     if (handle.kind === "directory") {
       pulled.push(...(await rescanFolder(handle, fs, mtimes, child)));

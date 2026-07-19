@@ -6,6 +6,9 @@ import {
   mirrorVfsToFolder,
   mirrorFolderToVfs,
   rescanFolder,
+  diskHasEntry,
+  dropMtimesUnder,
+  hasMtimeUnder,
   type MountMtimes,
 } from "./local-mount.js";
 import { VM_PRESERVE_DIRS } from "./kernel.js";
@@ -517,5 +520,134 @@ describe("local folder mount", () => {
     fs.writeFile("/.git/config", "[core]");
     expect(await mirrorFolderToVfs(root, fs)).toEqual({ loaded: 0, deleted: [] });
     expect(fs.readFileText("/.git/config")).toBe("[core]");
+  });
+
+  // --- Chrome File System Access *.crswap atomic-write temps: never synced ---
+  // Chrome stages every createWritable() as a sibling `<name>.crswap` and
+  // renames it over the target on close(); a crash/reload mid-write strands
+  // the temp on disk. Browser plumbing, not project data — no sync direction
+  // may load, pull, prune, or write one back.
+
+  it("loadFolderIntoVfs skips *.crswap temps at any depth and excludes them from the count", async () => {
+    const root = new MockDir("project");
+    root.children.set("app.py", new MockFile(enc.encode("print(1)"), 1000));
+    root.children.set(".npmrc.crswap", new MockFile(enc.encode("stranded"), 1000));
+    const src = new MockDir("src");
+    src.children.set("main.ts", new MockFile(enc.encode("m"), 1000));
+    src.children.set("main.ts.crswap", new MockFile(enc.encode("stranded"), 1000));
+    root.children.set("src", src);
+
+    const fs = new Vfs({ clock: () => 0 });
+    const count = await loadFolderIntoVfs(root, fs, "/");
+    expect(count).toBe(2);
+    expect(fs.exists("/.npmrc.crswap")).toBe(false);
+    expect(fs.exists("/src/main.ts.crswap")).toBe(false);
+    expect(fs.readFileText("/src/main.ts")).toBe("m");
+  });
+
+  it("rescanFolder never pulls a *.crswap temp into the workspace", async () => {
+    const fs = new Vfs({ clock: () => 0 });
+    const mtimes: MountMtimes = new Map();
+    const root = new MockDir("project");
+    root.children.set("a.txt", new MockFile(enc.encode("v1"), 1000));
+    await loadFolderIntoVfs(root, fs, "/", mtimes);
+
+    // Chrome starts an atomic write: the temp appears beside the target file.
+    root.children.set("a.txt.crswap", new MockFile(enc.encode("half-written"), 2000));
+    const pulled = await rescanFolder(root, fs, mtimes, "/");
+    expect(pulled).toEqual([]);
+    expect(fs.exists("/a.txt.crswap")).toBe(false);
+  });
+
+  it("saveVfsToFolder never writes a workspace-side *.crswap back to disk", async () => {
+    // A temp that entered the VFS before this fix must not round-trip to disk.
+    const fs = new Vfs({ clock: () => 0 });
+    fs.writeFile("/app.py", "print(1)");
+    fs.writeFile("/.npmrc.crswap", "leaked-earlier");
+    const root = new MockDir("project");
+    const result = await saveVfsToFolder(fs, root, "/");
+    expect(result.written).toEqual(["/app.py"]);
+    expect(root.children.has(".npmrc.crswap")).toBe(false);
+  });
+
+  it("mirrorFolderToVfs (Pull) neither loads a disk *.crswap nor prunes a workspace-side one — skip means untouched on both sides", async () => {
+    const fs = new Vfs({ clock: () => 0 });
+    const root = new MockDir("project");
+    root.children.set("app.py", new MockFile(enc.encode("disk"), 1000));
+    root.children.set("app.py.crswap", new MockFile(enc.encode("half-written"), 1000));
+    fs.writeFile("/stale.crswap", "leaked-earlier");
+
+    const result = await mirrorFolderToVfs(root, fs);
+    expect(result.loaded).toBe(1);
+    expect(result.deleted).toEqual([]);
+    expect(fs.exists("/app.py.crswap")).toBe(false); // never loaded
+    expect(fs.exists("/stale.crswap")).toBe(true); // never pruned either
+    expect(fs.readFileText("/app.py")).toBe("disk");
+  });
+
+  it("mirrorVfsToFolder (Push) never writes or prune-deletes *.crswap temps, and a crswap-only workspace counts as empty", async () => {
+    const fs = new Vfs({ clock: () => 0 });
+    const mtimes: MountMtimes = new Map();
+    const root = new MockDir("project");
+    root.children.set("old.txt", new MockFile(enc.encode("old"), 1000));
+    root.children.set("doc.md.crswap", new MockFile(enc.encode("half-written"), 1000));
+    fs.writeFile("/app.py", "print(1)");
+    fs.writeFile("/junk.crswap", "leaked-earlier");
+
+    const result = await mirrorVfsToFolder(fs, root, mtimes);
+    expect(result.written).toEqual(["/app.py"]);
+    expect(result.deleted).toEqual(["/old.txt"]); // disk-only real file mirrored away…
+    expect(root.children.has("doc.md.crswap")).toBe(true); // …but Chrome's temp is untouchable
+    expect(root.children.has("junk.crswap")).toBe(false); // the VFS-side one never reaches disk
+
+    // Fail-safe: a workspace whose only file is a stranded temp IS empty —
+    // pushing it must refuse (the disk still holds app.py), not empty the folder.
+    fs.rm("/app.py");
+    await expect(mirrorVfsToFolder(fs, root, mtimes)).rejects.toThrow(/Refusing to mirror an empty workspace/);
+  });
+
+  it("mirrorFolderToVfs treats a folder holding only *.crswap temps as empty and refuses over a non-empty workspace", async () => {
+    const fs = new Vfs({ clock: () => 0 });
+    fs.writeFile("/precious.txt", "data");
+    const root = new MockDir("new");
+    root.children.set("ghost.crswap", new MockFile(enc.encode("x"), 1000));
+    await expect(mirrorFolderToVfs(root, fs)).rejects.toThrow(/Refusing to mirror an empty folder/);
+    expect(fs.readFileText("/precious.txt")).toBe("data"); // nothing was deleted
+  });
+});
+
+describe("leak-cleanup discriminators (diskHasEntry / hasMtimeUnder / dropMtimesUnder)", () => {
+  it("diskHasEntry sees root dirs AND files (TypeMismatch counts as exists) and misses absent names", async () => {
+    const root = new MockDir("repo");
+    root.children.set("lib", new MockDir("lib"));
+    root.children.set("Rakefile", new MockFile(enc.encode("task")));
+    expect(await diskHasEntry(root, "lib")).toBe(true);
+    // "Rakefile" is a FILE: the dir probe rejects with TypeMismatchError (the
+    // shared MockDir mirrors the real API here) — that still means "exists".
+    expect(await diskHasEntry(root, "Rakefile")).toBe(true);
+    expect(await diskHasEntry(root, "etc")).toBe(false);
+  });
+
+  it("hasMtimeUnder matches the exact path and nested paths — never a sibling that merely shares the prefix", () => {
+    const mtimes: MountMtimes = new Map([
+      ["/lib/util.rb", 1],
+      ["/library.txt", 2],
+    ]);
+    expect(hasMtimeUnder(mtimes, "/lib")).toBe(true);
+    expect(hasMtimeUnder(mtimes, "/library.txt")).toBe(true);
+    expect(hasMtimeUnder(mtimes, "/li")).toBe(false); // prefix-sibling, not a subtree
+    expect(hasMtimeUnder(mtimes, "/etc")).toBe(false);
+  });
+
+  it("dropMtimesUnder drops the subtree only, leaving prefix-siblings recorded", () => {
+    const mtimes: MountMtimes = new Map([
+      ["/lib", 3],
+      ["/lib/util.rb", 1],
+      ["/library.txt", 2],
+    ]);
+    dropMtimesUnder(mtimes, "/lib");
+    expect(mtimes.has("/lib")).toBe(false);
+    expect(mtimes.has("/lib/util.rb")).toBe(false);
+    expect(mtimes.has("/library.txt")).toBe(true);
   });
 });

@@ -1,6 +1,8 @@
 import "fake-indexeddb/auto";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Studio } from "./studio.js";
+import { Vfs } from "@erdou/runtime-browser";
+import type { Runtime } from "@erdou/runtime-contract";
 import type { DirHandleLike, FileHandleLike, MountMtimes } from "./local-mount.js";
 
 // Studio persists the mount handle to IndexedDB, which isn't polyfilled in this
@@ -66,7 +68,14 @@ class MockDir implements DirHandleLike {
     }
     return f as MockFile;
   }
+  async removeEntry(name: string, _opts?: { recursive?: boolean }): Promise<void> {
+    if (!this.children.delete(name)) throw new Error("ENOENT");
+  }
 }
+
+// A minimal incoming-VM runtime: `subscribe` is all subscribeRuntime /
+// setPreviewRuntime touch post-swap (same stub studio-switch.test.ts uses).
+const stubRuntime = (): Runtime => ({ subscribe: () => () => {} }) as unknown as Runtime;
 
 type Internals = {
   mountMtimes: MountMtimes;
@@ -245,5 +254,76 @@ describe("Studio.mountFolder — the INITIAL mount replaces a restored workspace
     await studio.mountFolder(folder);
     expect(await studio.readFileText("/f.txt")).toBe("x");
     expect(studio.systemLog.some((l) => l.text.startsWith("Replaced the in-browser workspace"))).toBe(false);
+  });
+
+  it("mounting on the BROWSER kernel clears a preserve-named leftover too — it never unions onto the fresh repo's disk", async () => {
+    // A stale /lib in the browser VFS (an old project's dir, or pre-fix VM
+    // leakage). On the browser kernel NOTHING at root is image-owned, so the
+    // mount-replaces-workspace contract must clear it — keeping it would let
+    // the auto-save dump it onto the freshly mounted repo.
+    const studio = new Studio();
+    await studio.boot();
+    studio.fs.mkdir("/lib", { recursive: true });
+    studio.fs.writeFile("/lib/old.rb", enc.encode("stale"));
+
+    const repo = new MockDir("repo");
+    repo.children.set("repo.txt", new MockFile(enc.encode("repo"), 1000));
+    vi.useFakeTimers();
+    await studio.mountFolder(repo);
+
+    expect(studio.fs.exists("/lib")).toBe(false); // folder is the sole source of truth
+    expect(await studio.readFileText("/repo.txt")).toBe("repo");
+    expect(studio.systemLog.some((l) => l.text.startsWith("Replaced the in-browser workspace"))).toBe(true);
+
+    studio.fs.writeFile("/notes.txt", enc.encode("work"));
+    await vi.advanceTimersByTimeAsync(1000); // fire the debounced folder auto-save
+    expect(repo.children.has("lib")).toBe(false); // the stale dir never reached the repo's disk
+    expect(repo.children.has("notes.txt")).toBe(true);
+  });
+});
+
+describe("vm→browser leak cleanup vs a mounted project's own root dirs (data safety)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("document", { hidden: false, addEventListener: vi.fn(), visibilityState: "visible" });
+    vi.stubGlobal("window", { addEventListener: vi.fn(), removeEventListener: vi.fn() });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("a mounted repo's root lib/ survives browser→vm→browser, and neither the auto-save nor Push deletes it from the real disk", async () => {
+    // The probe scenario from the leak-fix review: a Rails/Ruby-style repo
+    // whose root legitimately carries a VM_PRESERVE_DIRS name.
+    const repo = new MockDir("rails-repo");
+    const lib = new MockDir("lib");
+    lib.children.set("util.rb", new MockFile(enc.encode("module Util; end"), 1000));
+    repo.children.set("lib", lib);
+    repo.children.set("README.md", new MockFile(enc.encode("# repo"), 1000));
+
+    const studio = new Studio();
+    await studio.boot();
+    await studio.mountFolder(repo);
+    expect(await studio.readFileText("/lib/util.rb")).toBe("module Util; end");
+
+    vi.useFakeTimers();
+    const fakeVm = { kind: "vm" as const, runtime: stubRuntime(), fs: new Vfs(), openShell: () => studio.shell };
+    await studio.switchKernel("vm", { makeKernel: async () => fakeVm });
+    await studio.switchKernel("browser");
+
+    // Disk-backed project data is discriminated from VM leakage: /lib is
+    // untouched (not deleted, not renamed) and no cleanup line is logged.
+    expect(await studio.readFileText("/lib/util.rb")).toBe("module Util; end");
+    expect(studio.fs.exists("/lib.vm-leaked")).toBe(false);
+    expect(studio.systemLog.some((l) => l.text.includes("leaked into the browser workspace"))).toBe(false);
+
+    // The disk-deletion cascade is closed end-to-end: the debounced auto-save
+    // and then an explicit Push leave the repo's lib/ on disk.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect((repo.children.get("lib") as MockDir).children.has("util.rb")).toBe(true);
+    const result = await studio.pushFolderNow();
+    expect(result!.deleted).toEqual([]);
+    expect((repo.children.get("lib") as MockDir).children.has("util.rb")).toBe(true);
+    expect(await studio.readFileText("/lib/util.rb")).toBe("module Util; end");
   });
 });

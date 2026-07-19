@@ -2,9 +2,34 @@ import { useEffect, useRef } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+import type { FileSystemApi } from "@erdou/runtime-contract";
 import type { Studio } from "../lib/studio.js";
-import { ShellLineDiscipline, formatShellPrompt } from "../lib/shell-terminal.js";
+import { ShellLineDiscipline, formatShellPrompt, type CompletionSource } from "../lib/shell-terminal.js";
 import { PtyTerminal } from "./PtyTerminal.js";
+
+/** The browser kernel's shell builtins, mirrored as a static list: the live
+ *  ProgramRegistry is private inside BrowserRuntime and the Kernel seam does
+ *  not expose it, so command completion derives its names from this copy of
+ *  runtime-browser's createBuiltins() table (keep in sync when a builtin is
+ *  added there) plus the REGISTERED programs (the languages: python/pip/wasi/
+ *  git) read live from capabilities.interpreters. */
+const SHELL_BUILTINS: readonly string[] = [
+  "awk", "cat", "cd", "cp", "echo", "env", "erdou", "export", "false", "find",
+  "grep", "head", "jobs", "kill", "ls", "mkdir", "mv", "ps", "pwd", "rm",
+  "sed", "tail", "touch", "true", "which",
+];
+
+/** Path-completion source: the entry names of the prefix's directory (the part
+ *  up to its last "/", resolved against the shell cwd — the kernel FS
+ *  normalizes "." and ".."), directories suffixed "/". A prefix whose
+ *  directory doesn't exist (or is a file) has no completions — the same
+ *  silence as a real shell, not an error. */
+function pathCandidates(fs: FileSystemApi, prefix: string, cwd: string): string[] {
+  const dirPart = prefix.slice(0, prefix.lastIndexOf("/") + 1); // "" -> the cwd itself
+  const dir = dirPart.startsWith("/") ? dirPart : cwd + "/" + dirPart;
+  if (!fs.exists(dir) || fs.stat(dir).type !== "directory") return [];
+  return fs.readdir(dir).map((e) => (e.type === "directory" ? e.name + "/" : e.name));
+}
 
 /** Dispatches to the VM kernel's streaming PTY terminal or the browser kernel's
  *  line-discipline shell terminal — both xterm-based.
@@ -24,8 +49,10 @@ export function TerminalPanel({ studio }: { studio: Studio }) {
 /** An xterm.js terminal over the persistent `studio.shell` (RpcShellSession:
  *  command-at-a-time exec, cwd/env survive across commands). The session has
  *  no PTY, so lib/shell-terminal.ts supplies the line discipline — echo,
- *  Backspace, Enter→exec, history, type-ahead while a command runs — and this
- *  component only owns the Terminal lifecycle and the exec round-trip.
+ *  Backspace, Enter→exec, history, Tab completion, type-ahead while a command
+ *  runs — and this component only owns the Terminal lifecycle, the exec
+ *  round-trip, and the completion source (command names from the builtins
+ *  mirror + capabilities.interpreters; paths from a studio.fs readdir).
  *
  *  Sizing/focus: same FitAddon + ResizeObserver dance as PtyTerminal —
  *  ReviewPane keeps the hidden Terminal tab mounted (display:none ⇒ a 0×0
@@ -55,12 +82,26 @@ function ShellTerminal({ studio }: { studio: Studio }) {
     fitIfVisible();
 
     let disposed = false;
+    // Registered program names (python/pip/wasi/git…) for Tab command
+    // completion — capabilities is the one contract surface that lists them.
+    // Resolves in a microtask on the browser kernel, so it's populated long
+    // before the first Tab; until then completion offers just the builtins.
+    let interpreters: string[] = [];
+    void studio.runtime.getCapabilities().then((caps) => {
+      if (!disposed) interpreters = caps.interpreters;
+    });
+    const completions: CompletionSource = (kind, prefix, cwd) =>
+      kind === "command"
+        ? [...new Set([...SHELL_BUILTINS, ...interpreters])]
+        : pathCandidates(studio.fs, prefix, cwd);
     const discipline = new ShellLineDiscipline(
       () => formatShellPrompt(studio.mountName ?? "erdou", shell.cwd),
       // Live width for the discipline's wrap math (multi-row erase on history
       // recall / backspace over a wrapped line). Read per keystroke, so a
       // resize (xterm reflows the wrapped line) is picked up automatically.
       () => term.cols,
+      () => shell.cwd,
+      completions,
     );
     const apply = (u: { write: string; run: string | null }): void => {
       if (u.write.length > 0) term.write(u.write);

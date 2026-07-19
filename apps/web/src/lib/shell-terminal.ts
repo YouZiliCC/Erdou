@@ -21,6 +21,23 @@
  * kill the running command (RpcShellSession has no kill); it is buffered like
  * any other key, not faked.
  *
+ * Completion: Tab completes the token at the CURSOR (mid-line that may not be
+ * the last token) against a SYNCHRONOUS completion source injected at
+ * construction — the first whitespace-delimited token as a command name, any
+ * other as a path (the source receives the whole token; for a path it returns
+ * the entry names of the token's directory, "/"-suffixed for directories, and
+ * the discipline matches the part after the last "/"). Bash semantics: a
+ * unique match is inserted plus a trailing space (none after a directory's
+ * "/" — the next Tab descends instead), multiple matches extend to their
+ * longest common prefix, a Tab immediately after another Tab with no further
+ * progress prints the sorted candidates in ls-style columns below the line and
+ * then reprints prompt+line with the cursor restored (the same wrap-aware
+ * redraw machinery as mid-line editing), and no matches stay silent — real
+ * shells do too. A Tab typed while a command runs is buffered as-is with the
+ * rest of the type-ahead and replayed through the same key path after the next
+ * prompt, so it completes against the post-command state (cwd, programs) — the
+ * honest reading of a late Tab, consistent with every other replayed key.
+ *
  * Wrapping: the component supplies the live column count (getCols) and the
  * discipline simulates xterm's line wrapping — deferred wrap on an exactly-full
  * row, early wrap for a wide char at the last column — so in-line redraws
@@ -81,6 +98,36 @@ function layout(visible: string, cols: number): { rows: number; col: number } {
   return { rows, col };
 }
 
+/** Visible width in cells of already-CSI-free text (same per-char widths as
+ *  `layout`) — the candidate-column padding math. */
+function visWidth(s: string): number {
+  let w = 0;
+  for (const ch of s) w += WIDE.test(ch) ? 2 : 1;
+  return w;
+}
+
+/** Longest common prefix of a non-empty candidate list. */
+function commonPrefix(items: string[]): string {
+  let p = items[0]!;
+  for (const s of items) {
+    let k = 0;
+    while (k < p.length && k < s.length && p[k] === s[k]) k += 1;
+    p = p.slice(0, k);
+  }
+  return p;
+}
+
+/** Which universe a Tab completes from: the line's first token is a command
+ *  name; every other token is a path. */
+export type CompletionKind = "command" | "path";
+
+/** Synchronous completion source (the browser kernel's FS is sync). `prefix`
+ *  is the whole token at the cursor; the source returns the candidate
+ *  UNIVERSE for it — command names, or the entry names of the prefix's
+ *  directory ("/"-suffixed for directories) resolved against `cwd`. The
+ *  discipline does the prefix matching itself. */
+export type CompletionSource = (kind: CompletionKind, prefix: string, cwd: string) => string[];
+
 /** The prompt: accent-ish workspace, dim cwd, green `$` — same info as the old
  *  block terminal's prompt row, in ANSI instead of spans. */
 export function formatShellPrompt(workspace: string, cwd: string): string {
@@ -113,12 +160,21 @@ export class ShellLineDiscipline {
   private typeAhead = "";
   private readonly history: string[] = [];
   private histIndex: number | null = null;
+  /** True while the LAST processed key was a Tab — the consecutive-Tab chain
+   *  that turns a no-progress Tab into the candidate listing (readline's
+   *  `rl_last_func == rl_complete` rule). Any other key breaks the chain. */
+  private lastKeyWasTab = false;
 
   constructor(
     private readonly getPrompt: () => string,
     /** Live terminal width (the component passes () => term.cols) — read at
      *  every wrap-sensitive operation so resizes are picked up. */
     private readonly getCols: () => number,
+    /** Live shell cwd (the component passes () => shell.cwd) — relayed to the
+     *  completion source so path completion resolves relative prefixes. */
+    private readonly getCwd: () => string,
+    /** Completion source for Tab (see `CompletionSource`). */
+    private readonly getCompletions: CompletionSource,
   ) {}
 
   /** Initial write on mount: a bare prompt — the whole empty state. */
@@ -162,6 +218,8 @@ export class ShellLineDiscipline {
     let i = 0;
     while (i < input.length) {
       const ch = input[i]!;
+      const wasTab = this.lastKeyWasTab;
+      this.lastKeyWasTab = false; // every key breaks the Tab chain; the Tab branch re-arms it
       if (ch === "\x1b") {
         const [consumed, w] = this.escape(input, i);
         i += consumed;
@@ -241,8 +299,14 @@ export class ShellLineDiscipline {
         write += this.cursorTo(this.line.length);
         continue;
       }
+      if (ch === "\t") {
+        i += 1;
+        write += this.complete(wasTab);
+        this.lastKeyWasTab = true;
+        continue;
+      }
       if (ch < " ") {
-        i += 1; // other control chars (Tab, Ctrl+…): no binding, ignore
+        i += 1; // other control chars (Ctrl+…): no binding, ignore
         continue;
       }
       // Printable: consume a whole code point (a surrogate pair arrives as two
@@ -308,6 +372,78 @@ export class ShellLineDiscipline {
     const snap = this.snapshotForRedraw();
     this.line = this.line.slice(0, this.cursor) + this.line.slice(this.cursor + units);
     return this.redraw(snap);
+  }
+
+  /** Tab: complete the token at the cursor (its start = after the last
+   *  whitespace BEFORE the cursor; text after the cursor stays put, readline
+   *  style). `wasTab` = the previous key was also a Tab — the double-Tab that
+   *  lists candidates when no further progress is possible. */
+  private complete(wasTab: boolean): string {
+    const before = this.line.slice(0, this.cursor);
+    const tokenStart = /\S*$/.exec(before)!.index;
+    const prefix = before.slice(tokenStart);
+    const kind: CompletionKind =
+      before.slice(0, tokenStart).trim().length === 0 ? "command" : "path";
+    // For a path the source returns the entry NAMES of the prefix's directory,
+    // so the part being matched is what follows the last "/"; for a command
+    // the whole prefix matches against the returned command names.
+    const base = kind === "path" ? prefix.slice(prefix.lastIndexOf("/") + 1) : prefix;
+    const matches = this.getCompletions(kind, prefix, this.getCwd()).filter((n) =>
+      n.startsWith(base),
+    );
+    if (matches.length === 0) return ""; // no matches: real shells stay silent
+    if (matches.length === 1) {
+      const m = matches[0]!;
+      // Unique: complete it — a trailing space readies the next token, except
+      // after a directory's "/" (the natural next Tab descends into it).
+      return this.insert(m.slice(base.length) + (m.endsWith("/") ? "" : " "));
+    }
+    const ext = commonPrefix(matches).slice(base.length);
+    if (ext.length > 0) return this.insert(ext);
+    return wasTab ? this.listCandidates(matches) : "";
+  }
+
+  /** Insert `text` at the cursor — the same at-end echo / mid-line full-redraw
+   *  split as typing, for a multi-character completion insertion. */
+  private insert(text: string): string {
+    if (text.length === 0) return "";
+    if (this.cursor === this.line.length) {
+      this.line += text;
+      this.cursor = this.line.length;
+      return text;
+    }
+    const snap = this.snapshotForRedraw();
+    this.line = this.line.slice(0, this.cursor) + text + this.line.slice(this.cursor);
+    this.cursor += text.length;
+    return this.redraw(snap);
+  }
+
+  /** Double-Tab listing: park the physical cursor after the (possibly wrapped)
+   *  line, print the sorted candidates in ls-style columns sized to the live
+   *  width, reprint prompt+line (xterm re-wraps it naturally), and hop the
+   *  cursor back to its logical spot — the same wrap-aware moveCursor as
+   *  mid-line editing, so a wrapped edit line round-trips exactly. */
+  private listCandidates(matches: string[]): string {
+    const cols = this.getCols();
+    const names = [...matches].sort();
+    const colWidth = Math.max(...names.map(visWidth)) + 2;
+    const perRow = Math.max(1, Math.floor(cols / colWidth));
+    let rows = "";
+    for (let r = 0; r < names.length; r += perRow) {
+      const row = names.slice(r, r + perRow);
+      rows +=
+        row
+          .map((n, k) => (k < row.length - 1 ? n + " ".repeat(colWidth - visWidth(n)) : n))
+          .join("") + "\r\n";
+    }
+    return (
+      this.moveCursor(this.cursor, this.line.length) +
+      "\r\n" +
+      rows +
+      this.prompt +
+      this.line +
+      this.moveCursor(this.line.length, this.cursor)
+    );
   }
 
   /** Move the logical cursor to `to` (clamped), emitting the physical move. */

@@ -146,6 +146,81 @@ describe("Studio.switchKernel", () => {
     expect(vmShutdown).not.toHaveBeenCalled();
   });
 
+  it("vm→browser cleans leaked VM_PRESERVE_DIRS out of the browser VFS (empty stubs removed, non-empty set aside) and never copies the guest's /etc,/root over", async () => {
+    const studio = new Studio();
+    await studio.boot();
+    const browserFs = studio.fs;
+    // A stale leak from an earlier (pre-fix) session: VM image dirs sitting in
+    // the BROWSER workspace root — exactly what the browser-kernel folder
+    // auto-save (which passes no rootSkip) was dumping onto mounted disks.
+    // /bin is an empty bind-mount stub; /etc,/root carry leaked baked config.
+    browserFs.mkdir("/bin", { recursive: true });
+    browserFs.mkdir("/etc", { recursive: true });
+    browserFs.writeFile("/etc/pip.conf", "leaked");
+    browserFs.mkdir("/root", { recursive: true });
+    browserFs.writeFile("/root/.ash_history", "leaked");
+    browserFs.writeFile("/keep.txt", "project");
+
+    // A fake guest whose fs carries image-owned dirs like a real 9p root.
+    const vmFs = new Vfs();
+    vmFs.mkdir("/etc", { recursive: true });
+    vmFs.writeFile("/etc/resolv.conf", "guest-config");
+    vmFs.mkdir("/root", { recursive: true });
+    vmFs.writeFile("/root/.npmrc", "guest-config");
+    const fakeVm = { kind: "vm" as const, runtime: stubRuntime(), fs: vmFs, openShell: () => studio.shell };
+    await studio.switchKernel("vm", { makeKernel: async () => fakeVm });
+    studio.fs.writeFile("/made-on-vm.txt", "guest-file");
+
+    await studio.switchKernel("browser");
+    expect(studio.fs).toBe(browserFs);
+    // The stale leak is gone from the root AND the guest's image dirs did not copy across…
+    expect(browserFs.exists("/etc")).toBe(false);
+    expect(browserFs.exists("/root")).toBe(false);
+    // …the empty stub was removed outright (nothing to lose, nothing kept)…
+    expect(browserFs.exists("/bin")).toBe(false);
+    expect(browserFs.exists("/bin.vm-leaked")).toBe(false);
+    // …while the non-empty (ambiguous) dirs were set ASIDE, bytes intact, not destroyed.
+    expect(new TextDecoder().decode(browserFs.readFile("/etc.vm-leaked/pip.conf"))).toBe("leaked");
+    expect(new TextDecoder().decode(browserFs.readFile("/root.vm-leaked/.ash_history"))).toBe("leaked");
+    // Real project files follow the switch in both directions.
+    expect(new TextDecoder().decode(browserFs.readFile("/keep.txt"))).toBe("project");
+    expect(new TextDecoder().decode(browserFs.readFile("/made-on-vm.txt"))).toBe("guest-file");
+    // One honest system-log line names what was cleaned, and how.
+    const cleaned = studio.systemLog.filter((l) => l.text.includes("leaked into the browser workspace"));
+    expect(cleaned).toHaveLength(1);
+    expect(cleaned[0]!.text).toContain("removed /bin");
+    expect(cleaned[0]!.text).toContain("/etc → /etc.vm-leaked");
+    expect(cleaned[0]!.text).toContain("/root → /root.vm-leaked");
+  });
+
+  it("vm→browser sets aside a non-empty preserve-named project dir (an agent-made /lib) instead of destroying it", async () => {
+    const studio = new Studio();
+    await studio.boot();
+    // No mount: the agent built a Ruby-style project right on the browser kernel.
+    studio.fs.mkdir("/lib", { recursive: true });
+    studio.fs.writeFile("/lib/util.rb", "module Util; end");
+    const fakeVm = { kind: "vm" as const, runtime: stubRuntime(), fs: new Vfs(), openShell: () => studio.shell };
+    await studio.switchKernel("vm", { makeKernel: async () => fakeVm });
+    await studio.switchKernel("browser");
+    // The name collision with the VM's image-owned /lib is resolved by a
+    // recoverable rename — never a silent rm of real content.
+    expect(studio.fs.exists("/lib")).toBe(false);
+    expect(new TextDecoder().decode(studio.fs.readFile("/lib.vm-leaked/util.rb"))).toBe("module Util; end");
+    const line = studio.systemLog.find((l) => l.text.includes("leaked into the browser workspace"));
+    expect(line?.text).toContain("/lib → /lib.vm-leaked");
+  });
+
+  it("vm→browser with a clean browser VFS logs no leak-cleanup line", async () => {
+    const studio = new Studio();
+    await studio.boot();
+    studio.fs.writeFile("/keep.txt", "project");
+    const fakeVm = { kind: "vm" as const, runtime: stubRuntime(), fs: new Vfs(), openShell: () => studio.shell };
+    await studio.switchKernel("vm", { makeKernel: async () => fakeVm });
+    await studio.switchKernel("browser");
+    expect(studio.systemLog.some((l) => l.text.includes("leaked into the browser workspace"))).toBe(false);
+    expect(new TextDecoder().decode(studio.fs.readFile("/keep.txt"))).toBe("project");
+  });
+
   it("an unbaked profile fails LOUD at boot and keeps the user on the working kernel", async () => {
     const studio = new Studio();
     await studio.boot();
