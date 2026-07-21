@@ -1,6 +1,6 @@
 import "fake-indexeddb/auto";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { Studio, type Run } from "./studio.js";
+import { Studio, type Run, type TraceLine } from "./studio.js";
 import { Vfs } from "@erdou/runtime-browser";
 import type { Runtime } from "@erdou/runtime-contract";
 import type { ModelGateway } from "@erdou/model-gateway";
@@ -159,7 +159,10 @@ describe("Studio mount watcher", () => {
 describe("Studio.reselectFolder — a folder swap REPLACES the workspace (data safety)", () => {
   beforeEach(() => {
     // boot() installs the A4 unload-flush handlers, so the document stub needs
-    // addEventListener alongside the watcher's `hidden` read.
+    // addEventListener alongside the watcher's `hidden` read. The swap's
+    // unconditional session-state flush reads theme/approval/model, so this
+    // (node) environment needs a localStorage too.
+    vi.stubGlobal("localStorage", makeLocalStorage());
     vi.stubGlobal("document", { hidden: false, addEventListener: vi.fn(), visibilityState: "visible" });
     vi.stubGlobal("window", { addEventListener: vi.fn(), removeEventListener: vi.fn() });
   });
@@ -365,6 +368,10 @@ const mkRun = (id: string, status: Run["status"], createdAt: number, title = id)
   messages: [],
   createdAt,
 });
+
+/** A persisted trace line stamped `ts` — the merge's same-id LAST-ACTIVITY
+ *  comparison reads the final line's ts (createdAt when a copy has none). */
+const tl = (id: number, text: string, ts: number): TraceLine => ({ id, kind: "user", text, ts });
 
 /** Seed `<folder>/.erdou/runs.json` with `runs`. config.json is then dropped:
  *  the config-hydration plumbing (theme/localStorage/applyTheme) is exercised
@@ -604,6 +611,227 @@ describe("Studio.mountFolder — .erdou hydration MERGES instead of wiping live 
     expect(studio.runs.find((r) => r.id === "A")!.title).toBe("fresh title"); // same-id: the folder's copy wins
     expect(studio.activeRunId).toBeNull(); // B was superseded away; the selection resets honestly
   });
+
+  it("same-id: the memory copy with LATER last-activity (a reply the folder flush missed) wins and reaches runs.json", async () => {
+    await clearRuns();
+    // Last session: a reply to run X finished and reached IndexedDB, but the
+    // browser closed inside the folder-save debounce — the folder still holds
+    // the pre-reply copy. turnRunIds can't protect it (fresh session), and the
+    // memory-only recency rule can't either (same id on both sides, and the
+    // folder holds a newer other run): only same-id LAST-ACTIVITY can.
+    await saveRuns([
+      { ...mkRun("X", "done", 1000), trace: [tl(1, "original ask", 2000), tl(2, "the reply the folder missed", 5000)] },
+    ]);
+    const folder = new MockDir("proj");
+    folder.children.set("f.txt", new MockFile(enc.encode("x"), 1000));
+    await seedFolderState(folder, [
+      mkRun("newer-folder-run", "done", 9000),
+      { ...mkRun("X", "done", 1000), trace: [tl(1, "original ask", 2000)] },
+    ]);
+
+    const studio = new Studio();
+    await studio.boot(); // memory now holds the IndexedDB copy of X (with the reply)
+    await studio.mountFolder(folder);
+
+    const x = studio.runs.find((r) => r.id === "X")!;
+    expect(x.trace.some((l) => l.text === "the reply the folder missed")).toBe(true);
+    expect(studio.runs.some((r) => r.id === "newer-folder-run")).toBe(true);
+    // Rescued ⇒ persisted: the reply must reach .erdou/runs.json, or the next
+    // hydration would revert it after all.
+    studio.flushPendingSaves();
+    await vi.waitFor(async () => {
+      const st = await readFolderState(folder);
+      const savedX = st!.runs.find((r) => r.id === "X");
+      expect(savedX?.trace.some((l) => l.text === "the reply the folder missed")).toBe(true);
+    });
+  });
+
+  it("same-id ties and folder-later copies keep the FOLDER's copy (staleness bias unchanged); traceless copies compare by createdAt", async () => {
+    await clearRuns();
+    await saveRuns([
+      { ...mkRun("tie", "done", 1000, "memory-tie"), trace: [tl(1, "t", 3000)] },
+      { ...mkRun("folder-ahead", "done", 1000, "memory-stale"), trace: [tl(1, "t", 3000)] },
+      mkRun("traceless", "done", 5000, "memory-newer"),
+    ]);
+    const folder = new MockDir("proj");
+    folder.children.set("f.txt", new MockFile(enc.encode("x"), 1000));
+    await seedFolderState(folder, [
+      { ...mkRun("tie", "done", 1000, "folder-tie"), trace: [tl(1, "t", 3000)] },
+      { ...mkRun("folder-ahead", "done", 1000, "folder-advanced"), trace: [tl(1, "t", 3000), tl(2, "another machine's reply", 4000)] },
+      mkRun("traceless", "done", 2000, "folder-older"),
+    ]);
+
+    const studio = new Studio();
+    await studio.boot();
+    await studio.mountFolder(folder);
+
+    expect(studio.runs.find((r) => r.id === "tie")!.title).toBe("folder-tie"); // equal activity → the folder stays truth
+    expect(studio.runs.find((r) => r.id === "folder-ahead")!.title).toBe("folder-advanced"); // folder measurably ahead → folder wins
+    expect(studio.runs.find((r) => r.id === "traceless")!.title).toBe("memory-newer"); // no trace either side: createdAt IS the activity
+  });
+
+  it("same-id: a boot-interrupted memory copy does NOT out-recency a genuinely newer folder copy — the marker is bookkeeping, not activity", async () => {
+    await clearRuns();
+    // Crash mid-run: IndexedDB still holds run X status "running", last REAL
+    // activity ts=1000. The folder's copy of X was advanced elsewhere (a
+    // second browser/machine sharing the folder) with a reply at ts=5000.
+    // Boot normalizes the memory copy to an interrupted error BEFORE the
+    // mount hydration — if that marker line were stamped Date.now(), the
+    // stale copy would out-recency the folder's newer reply and the
+    // rescued-persist path would overwrite it in runs.json too.
+    await saveRuns([
+      { ...mkRun("X", "running", 500, "stale interrupted copy"), trace: [tl(1, "original ask", 1000)] },
+    ]);
+    const folder = new MockDir("proj");
+    folder.children.set("f.txt", new MockFile(enc.encode("x"), 1000));
+    await seedFolderState(folder, [
+      {
+        ...mkRun("X", "done", 500, "advanced elsewhere"),
+        trace: [tl(1, "original ask", 1000), tl(2, "the other machine's reply", 5000)],
+      },
+    ]);
+
+    const studio = new Studio();
+    await studio.boot(); // normalizes X to interrupted here, pre-hydration
+    await studio.mountFolder(folder);
+
+    // The folder copy — the one with genuinely newer activity — won in memory...
+    const x = studio.runs.find((r) => r.id === "X")!;
+    expect(x.title).toBe("advanced elsewhere");
+    expect(x.status).toBe("done");
+    expect(x.trace.some((l) => l.text === "the other machine's reply")).toBe(true);
+    // ...and the reply is still in the folder's runs.json after every pending
+    // save fires (the buggy rescue overwrote it on disk as well).
+    studio.flushPendingSaves();
+    await vi.waitFor(async () => {
+      const st = await readFolderState(folder);
+      const savedX = st!.runs.find((r) => r.id === "X");
+      expect(savedX?.status).toBe("done");
+      expect(savedX?.trace.some((l) => l.text === "the other machine's reply")).toBe(true);
+    });
+  });
+
+  it("same-id: a boot-interrupted memory copy whose REAL activity is later still wins (the rescue leg survives the marker fix)", async () => {
+    await clearRuns();
+    // The mirror case: the reply reached IndexedDB (ts=6000), the page then
+    // closed mid-followup ("running"), and the folder still holds only the
+    // pre-reply copy (ts=2000). Neutralizing the interruption marker must not
+    // overcorrect into "interrupted runs always lose".
+    await saveRuns([
+      {
+        ...mkRun("X", "running", 500, "memory-with-reply"),
+        trace: [tl(1, "original ask", 1000), tl(2, "the reply the folder missed", 6000)],
+      },
+    ]);
+    const folder = new MockDir("proj");
+    folder.children.set("f.txt", new MockFile(enc.encode("x"), 1000));
+    await seedFolderState(folder, [
+      { ...mkRun("X", "done", 500, "folder-pre-reply"), trace: [tl(1, "original ask", 2000)] },
+    ]);
+
+    const studio = new Studio();
+    await studio.boot(); // normalizes X: status error + interruption marker
+    await studio.mountFolder(folder);
+
+    const x = studio.runs.find((r) => r.id === "X")!;
+    expect(x.title).toBe("memory-with-reply");
+    expect(x.status).toBe("error"); // honestly interrupted, not resurrected as running
+    expect(x.trace.some((l) => l.text === "the reply the folder missed")).toBe(true);
+    // Rescued ⇒ persisted: the reply reaches runs.json.
+    studio.flushPendingSaves();
+    await vi.waitFor(async () => {
+      const st = await readFolderState(folder);
+      const savedX = st!.runs.find((r) => r.id === "X");
+      expect(savedX?.trace.some((l) => l.text === "the reply the folder missed")).toBe(true);
+    });
+  });
+});
+
+describe("Studio.mountFolder — re-picking the CURRENTLY mounted folder reconnects (merge), never swaps", () => {
+  beforeEach(() => {
+    vi.stubGlobal("localStorage", makeLocalStorage());
+    vi.stubGlobal("document", { hidden: false, addEventListener: vi.fn(), visibilityState: "visible" });
+    vi.stubGlobal("window", { addEventListener: vi.fn(), removeEventListener: vi.fn() });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("re-picking the same handle with a turn LIVE keeps the turn running — no stop, no ghost 'running' copy", async () => {
+    await clearRuns();
+    const folderA = new MockDir("A");
+    folderA.children.set("a.txt", new MockFile(enc.encode("a"), 1000));
+    await seedFolderState(folderA, []);
+
+    const studio = new Studio();
+    await studio.boot();
+    let releaseChat!: () => void;
+    const chatGate = new Promise<void>((r) => (releaseChat = r));
+    (studio as unknown as GatewaySlot).gateway = gatewayWith(
+      vi.fn().mockImplementation(async () => {
+        await chatGate;
+        return { content: "done", toolCalls: [] };
+      }),
+    );
+    await studio.mountFolder(folderA);
+
+    const turn = studio.startRun("live through the re-pick", DEFAULT_MODEL, "auto");
+    await vi.waitFor(() => expect(studio.running).toBe(true));
+    const live = studio.runs.find((r) => r.task === "live through the re-pick")!;
+
+    await studio.mountFolder(folderA); // the sidebar Open-folder path, SAME folder
+
+    // Same project, not a project change: the live turn was neither stopped
+    // nor detached — its object survived the re-mount.
+    expect(studio.stopping).toBe(false);
+    expect(studio.runs).toContain(live);
+    expect(studio.systemLog.some((l) => l.text.startsWith("Stopped the running task"))).toBe(false);
+
+    releaseChat();
+    await turn;
+    // The turn settled INTO the kept object: exactly one copy, not "running",
+    // and no false "the page was closed" interruption anywhere.
+    expect(studio.runs.filter((r) => r.task === "live through the re-pick")).toEqual([live]);
+    expect(live.status).not.toBe("running");
+    expect(live.trace.some((l) => l.text.startsWith("Interrupted"))).toBe(false);
+    // The settled state reaches the folder's runs.json — no ghost persisted.
+    studio.flushPendingSaves();
+    await vi.waitFor(async () => {
+      const st = await readFolderState(folderA);
+      const saved = st!.runs.filter((r) => r.task === "live through the re-pick");
+      expect(saved).toHaveLength(1);
+      expect(saved[0]!.status).not.toBe("running");
+    });
+  });
+
+  it("a FRESH handle for the same directory (the real re-pick) is detected via isSameEntry and merges instead of replacing", async () => {
+    await clearRuns();
+    const folderA = new MockDir("A");
+    folderA.children.set("a.txt", new MockFile(enc.encode("a"), 1000));
+    await seedFolderState(folderA, []);
+    // The File System Access picker returns a NEW handle object for the same
+    // directory — identity can't detect the re-pick; the platform's
+    // isSameEntry does. The double shares folderA's children (same disk dir).
+    const repick = new MockDir("A");
+    repick.children = folderA.children;
+    (repick as DirHandleLike & { isSameEntry?: (o: DirHandleLike) => Promise<boolean> }).isSameEntry = async (o) =>
+      o === folderA;
+
+    const studio = new Studio();
+    await studio.boot();
+    (studio as unknown as GatewaySlot).gateway = gatewayWith(
+      vi.fn().mockResolvedValue({ content: "done", toolCalls: [] }),
+    );
+    await studio.mountFolder(folderA);
+    await studio.startRun("history in A", DEFAULT_MODEL, "auto"); // completes fully
+    const run = studio.runs.find((r) => r.task === "history in A")!;
+
+    await studio.mountFolder(repick);
+
+    expect(studio.mount).toBe(repick); // the fresh handle is adopted...
+    expect(studio.runs).toContain(run); // ...and the SAME project's history is kept as the same objects (merge, not replace)
+    expect(studio.systemLog.some((l) => l.text.startsWith("Stopped the running task"))).toBe(false);
+  });
 });
 
 describe("Studio folder swap (re-select) — project A's chat history must not contaminate project B", () => {
@@ -650,7 +878,7 @@ describe("Studio folder swap (re-select) — project A's chat history must not c
     // Memory shows only B's history; the dangling selection reset honestly.
     expect(studio.runs.map((r) => r.id)).toEqual(["b-run"]);
     expect(studio.activeRunId).toBeNull();
-    // A kept its OWN chat: the swap flushed A's pending state save before pruning.
+    // A kept its OWN chat: the swap flushed A's state to A's .erdou before pruning.
     const stA = await readFolderState(folderA);
     expect(stA!.runs.some((r) => r.task === "task in A")).toBe(true);
     // B's runs.json never learns about A's chat — even after every pending save fires.
@@ -665,7 +893,7 @@ describe("Studio folder swap (re-select) — project A's chat history must not c
     expect((await loadRuns()).map((r) => r.id)).toEqual(["b-run"]);
   });
 
-  it("a turn in flight DURING the swap survives it (the one documented carry-over) and settles into B's history", async () => {
+  it("a turn in flight when the swap starts is STOPPED — its chat stays in A's .erdou and never follows into B", async () => {
     await clearRuns();
     const { folderA, folderB } = await folderPair();
     stubGlobalsWithPicker(folderB);
@@ -687,19 +915,129 @@ describe("Studio folder swap (re-select) — project A's chat history must not c
     const live = studio.runs.find((r) => r.task === "live through the swap")!;
 
     await studio.reselectFolder();
-    // NOT dropped: pruning the live turn's object would detach the running
-    // turn — its final status/trace would land on an orphan.
-    expect(studio.runs).toContain(live);
-    expect(studio.runs.some((r) => r.id === "b-run")).toBe(true);
+
+    // The swap is an explicit project change: the A-turn was stopped (not
+    // carried), surfaced in the log, and B's history is ALL memory holds.
+    expect(studio.runs).not.toContain(live);
+    expect(studio.runs.map((r) => r.id)).toEqual(["b-run"]);
+    expect(studio.systemLog.some((l) => l.text.startsWith("Stopped the running task"))).toBe(true);
+    // A's .erdou kept the thread (flushed before the prune, still status
+    // "running" — A's next mount normalizes it to an interrupted error).
+    const stA = await readFolderState(folderA);
+    expect(stA!.runs.some((r) => r.task === "live through the swap")).toBe(true);
 
     releaseChat();
-    await turn;
-    expect(live.status).not.toBe("running");
+    await turn; // the orphaned turn settles without wedging the studio...
+    expect(studio.running).toBe(false);
+    // ...and B's runs.json never learns about it, even after every save fires.
     studio.flushPendingSaves();
     await vi.waitFor(async () => {
       const stB = await readFolderState(folderB);
-      expect(stB!.runs.some((r) => r.task === "live through the swap" && r.status !== "running")).toBe(true);
-      expect(stB!.runs.some((r) => r.id === "b-run")).toBe(true);
+      expect(stB!.runs.map((r) => r.id)).toEqual(["b-run"]);
     });
+  });
+
+  it("the swap flushes a mid-turn trace tail to A's .erdou even when no state save is pending (no silent loss)", async () => {
+    await clearRuns();
+    const { folderA, folderB } = await folderPair();
+    stubGlobalsWithPicker(folderB);
+
+    const studio = new Studio();
+    await studio.boot();
+    const chat = vi.fn().mockResolvedValue({ content: "done", toolCalls: [] });
+    (studio as unknown as GatewaySlot).gateway = gatewayWith(chat);
+    await studio.mountFolder(folderA);
+    await studio.startRun("task in A", DEFAULT_MODEL, "auto"); // completes fully
+    studio.flushPendingSaves(); // settle the turn-end debounce: NO folder-state timer pending anymore
+    await vi.waitFor(async () => {
+      expect((await readFolderState(folderA))!.runs.some((r) => r.task === "task in A")).toBe(true);
+    });
+
+    // A reply whose "you" line lands while the turn parks on the model: trace
+    // appends schedule ONLY the IndexedDB runs-save, never a folder-state
+    // save — so at swap time A's runs.json lacks the line and no debounce
+    // timer exists for a pending-only flush to catch.
+    let releaseChat!: () => void;
+    const gate = new Promise<void>((r) => (releaseChat = r));
+    chat.mockImplementation(async () => {
+      await gate;
+      return { content: "done", toolCalls: [] };
+    });
+    const runId = studio.runs.find((r) => r.task === "task in A")!.id;
+    const reply = studio.replyToRun(runId, "urgent follow-up", DEFAULT_MODEL, "auto");
+    await vi.waitFor(() => expect(studio.running).toBe(true));
+
+    await studio.reselectFolder();
+
+    // The follow-up reached A's runs.json via the swap's UNCONDITIONAL flush —
+    // after the swap, A's own .erdou is the only place A's history survives.
+    const stA = await readFolderState(folderA);
+    const savedX = stA!.runs.find((r) => r.id === runId)!;
+    expect(savedX.trace.some((l) => l.text === "urgent follow-up")).toBe(true);
+    expect(studio.runs.map((r) => r.id)).toEqual(["b-run"]);
+
+    releaseChat();
+    await reply;
+    expect(studio.running).toBe(false);
+  });
+
+  it("mounting a DIFFERENT folder over a mounted project (the Open-folder path) is a swap too — A's chat never merges into B", async () => {
+    await clearRuns();
+    const { folderA, folderB } = await folderPair();
+    stubGlobalsWithPicker(folderB); // picker unused here; the suite's globals are still needed
+
+    const studio = new Studio();
+    await studio.boot();
+    (studio as unknown as GatewaySlot).gateway = gatewayWith(
+      vi.fn().mockResolvedValue({ content: "done", toolCalls: [] }),
+    );
+    await studio.mountFolder(folderA);
+    await studio.startRun("task in A", DEFAULT_MODEL, "auto");
+
+    await studio.mountFolder(folderB); // direct mount over a mounted project, NOT re-select
+
+    expect(studio.mount).toBe(folderB);
+    // Without the swap routing, the hydration MERGE rescued A's (memory-newer,
+    // turn-driven) run straight into B — the cross-project contamination.
+    expect(studio.runs.map((r) => r.id)).toEqual(["b-run"]);
+    const stA = await readFolderState(folderA);
+    expect(stA!.runs.some((r) => r.task === "task in A")).toBe(true); // A kept its own chat
+    studio.flushPendingSaves();
+    await vi.waitFor(async () => {
+      const stB = await readFolderState(folderB);
+      expect(stB!.runs.map((r) => r.id)).toEqual(["b-run"]);
+    });
+    expect((await loadRuns()).map((r) => r.id)).toEqual(["b-run"]); // IndexedDB mirrors the change
+  });
+
+  it("a task submitted while the swap is still loading B is refused — it could not survive the replace hydration", async () => {
+    await clearRuns();
+    const folderA = new MockDir("A");
+    folderA.children.set("a.txt", new MockFile(enc.encode("a"), 1000));
+    await seedFolderState(folderA, []);
+    const folderB = new GatedErdouDir("B");
+    folderB.children.set("b.txt", new MockFile(enc.encode("b"), 1000));
+    await seedFolderState(folderB, [mkRun("b-run", "done", 500)]);
+    stubGlobalsWithPicker(folderB);
+
+    const studio = new Studio();
+    await studio.boot();
+    (studio as unknown as GatewaySlot).gateway = gatewayWith(
+      vi.fn().mockResolvedValue({ content: "done", toolCalls: [] }),
+    );
+    await studio.mountFolder(folderA);
+
+    const swap = studio.reselectFolder();
+    await vi.waitFor(() => expect(folderB.hydrationStarted).toBe(true)); // parked inside B's readFolderState
+
+    await studio.startRun("mid-swap task", DEFAULT_MODEL, "auto");
+    expect(studio.runs.some((r) => r.task === "mid-swap task")).toBe(false);
+    expect(
+      studio.systemLog.some((l) => l.text === "Please wait for the folder to finish loading before starting a task."),
+    ).toBe(true);
+
+    folderB.release();
+    await swap;
+    expect(studio.runs.map((r) => r.id)).toEqual(["b-run"]);
   });
 });

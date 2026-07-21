@@ -343,9 +343,12 @@ export class Studio {
   private mountWatch?: { interval: ReturnType<typeof setInterval>; onFocus: () => void };
   /** Set once a rescan fails, so we log it only once instead of every 5s until a rescan succeeds again. */
   private mountRescanFailed = false;
-  /** True only while a folder SWAP (re-select) is repointing the mount to a
-   *  different disk folder. Suspends the folder auto-save for the whole swap so
-   *  the clear+load's file.changed churn can never mirror onto the wrong disk. */
+  /** True while a folder SWAP is repointing the mount to a different disk
+   *  folder (and briefly while a plain mount clears+loads over a non-empty
+   *  workspace). Suspends the folder auto-save so the clear+load's
+   *  file.changed churn can never mirror onto the wrong disk, and blocks
+   *  startRun/replyToRun — a turn started mid-swap could not survive the
+   *  "replace" hydration (see hydrateRuns). */
   private swappingFolder = false;
 
   get activeRun(): Run | undefined {
@@ -401,7 +404,9 @@ export class Studio {
       const handle = await loadPersistedHandle();
       if (handle) {
         const perm = (await handle.queryPermission?.({ mode: "readwrite" })) ?? "prompt";
-        if (perm === "granted") await this.mountFolder(handle);
+        // Boot's auto-remount re-attaches the SAME project this browser
+        // already holds — hydration must MERGE (see hydrateRuns).
+        if (perm === "granted") await this.mountFolderWith(handle, "merge");
         else {
           this.pendingMount = handle;
           this.mountName = handle.name;
@@ -777,7 +782,42 @@ export class Studio {
     ].join("\n");
   }
 
+  /** Mount a local folder. With NOTHING mounted this is the boot/reconnect/
+   *  first-mount path: the folder's files replace the workspace (A2) and its
+   *  `.erdou` session state hydrates in "merge" mode (the async-mount race
+   *  protection — see hydrateRuns). With a folder ALREADY mounted, picking a
+   *  DIFFERENT one is an EXPLICIT project change: it routes through
+   *  `swapMountedFolder` (the exact contract of the re-select control), so the
+   *  old project's chat history can never merge into the new project's
+   *  `.erdou/` — before this routing, the sidebar's Open-folder path ran the
+   *  merge and rescued the old project's memory-newer runs straight into the
+   *  new folder's runs.json (cross-project contamination). Re-picking the
+   *  folder that is ALREADY mounted (`isCurrentMount`) is NOT a project
+   *  change — it re-attaches the SAME project, so it takes the merge path
+   *  like any reconnect: the swap's stop+replace would kill a live turn for
+   *  no reason and then read back its just-flushed "running" copy as a
+   *  detached ghost — stuck "running" in the sidebar for the session,
+   *  persisted that way, and later mis-normalized as "the page was closed". */
   async mountFolder(handle: DirHandleLike): Promise<void> {
+    if (this.mount && !(await this.isCurrentMount(handle))) return this.swapMountedFolder(handle);
+    return this.mountFolderWith(handle, "merge");
+  }
+
+  /** True when `handle` designates the directory that is already mounted. A
+   *  real re-pick hands back a FRESH FileSystemDirectoryHandle object for the
+   *  same directory, so identity alone can't detect it — the platform's
+   *  `isSameEntry` does (typed structurally here: `DirHandleLike` is the sync
+   *  seam's minimal surface and predates the method; every real handle has
+   *  it). Without identity and without the method the handle counts as a
+   *  DIFFERENT folder — the data-safe default is the swap's stop+flush+replace. */
+  private async isCurrentMount(handle: DirHandleLike): Promise<boolean> {
+    if (this.mount === null) return false;
+    if (handle === this.mount) return true;
+    const h = handle as DirHandleLike & { isSameEntry?: (other: DirHandleLike) => Promise<boolean> };
+    return (await h.isSameEntry?.(this.mount)) === true;
+  }
+
+  private async mountFolderWith(handle: DirHandleLike, hydration: "merge" | "replace"): Promise<void> {
     // A2 (data safety): the folder is the source of truth on mount — the same
     // rule `swapMountedFolder` enforces. boot() restores the previous project
     // into the VFS before a persisted mount reconnects, and `loadFolderIntoVfs`
@@ -849,15 +889,15 @@ export class Studio {
     try {
       if (stateFailed) throw stateError;
       if (state) {
-        const rescued = this.hydrateRuns(state.runs);
+        const rescued = this.hydrateRuns(state.runs, hydration);
         // Folder-hydrated runs join `this.runs`, so the boot-time interrupted-run
         // normalization must apply here too (skipped while a run is actually live now).
         if (!this.running && this.normalizeInterruptedRuns()) this.scheduleFolderStateSave();
         // A rescued run's CURRENT state exists only in memory — the folder's
-        // runs.json lacks it entirely (memory-only run) or holds a stale
-        // pre-turn copy (a same-id run a turn drove this session) — so persist
-        // the merged list (this is exactly the state the old wholesale replace
-        // kept out of `.erdou/runs.json` forever).
+        // runs.json lacks it entirely (memory-only run) or holds a superseded
+        // same-id copy — so persist the merged list (this is exactly the state
+        // the old wholesale replace kept out of `.erdou/runs.json` forever).
+        // A "replace" hydration rescues nothing: runs.json already IS the list.
         if (rescued > 0) this.scheduleFolderStateSave();
         if (state.config) {
           applyTheme(state.config.theme);
@@ -878,21 +918,35 @@ export class Studio {
   }
 
   /**
-   * Hydrate `this.runs` from a mounted folder's `.erdou/runs.json` — a MERGE,
-   * not a wholesale replace. boot()'s auto-remount (and a manual mount) is
-   * async while the UI stays fully interactive, so a run can be created while
-   * `readFolderState` is still in flight; replacing the array wholesale wiped
-   * that run mid-turn — it vanished from the sidebar and never reached
-   * `.erdou/runs.json` (nor IndexedDB after the turn's final save). Semantics:
+   * Hydrate `this.runs` from a mounted folder's `.erdou/runs.json`. Two modes,
+   * chosen EXPLICITLY by the caller — which one applies is a product decision
+   * about what the mount MEANS, never a race outcome:
+   *
+   * `"merge"` — boot()'s auto-remount, `reconnectMount`, and a first mount
+   * with nothing mounted yet. These re-attach the project whose history this
+   * browser already holds, asynchronously, while the UI stays fully
+   * interactive — so a run can be created (or finish) while `readFolderState`
+   * is still in flight, and a wholesale replace wiped it mid-turn: it
+   * vanished from the sidebar and never reached `.erdou/runs.json` (nor
+   * IndexedDB after the turn's final save). Merge semantics:
    *  - a run an agent turn drove THIS SESSION (`turnRunIds` — includes the
    *    turn in flight right now) always keeps its memory object, same-id or
    *    not, even against future-dated folder timestamps (another machine's
    *    clock): this session's copy is strictly ahead of the folder's. This is
    *    what saves a reply to a folder-shared run that COMPLETED inside the
-   *    mount window — it is neither "live" nor "memory-only", so every other
-   *    rule below would let the folder's stale copy wipe the reply;
-   *  - otherwise, same id on both sides → the FOLDER's copy wins: for shared
-   *    history the folder is the source of truth (the normal remount path);
+   *    mount window;
+   *  - otherwise, same id on both sides → LAST-ACTIVITY recency decides: the
+   *    copy whose final trace line has the later `ts` wins (`createdAt` when
+   *    a copy has no trace). This rescues a PREVIOUS session's reply that
+   *    reached IndexedDB but missed the folder's debounced flush — under the
+   *    old flat "folder wins" rule the folder's pre-reply copy silently
+   *    reverted it. A tie keeps the FOLDER's copy: for shared history the
+   *    folder stays the source of truth (the cross-machine staleness bias).
+   *    Recency counts REAL activity only: the boot-time "Interrupted" marker
+   *    is stamped with its run's prior last-activity ts, never Date.now()
+   *    (see normalizeInterruptedRuns), so a crashed session's stale copy
+   *    cannot out-recency a folder copy genuinely advanced on another
+   *    machine;
    *  - a memory-only run STRICTLY NEWER (`createdAt`) than every folder run
    *    is kept, ahead of the folder's runs (most-recent-first order): e.g.
    *    last session's tail that reached IndexedDB but missed the folder flush;
@@ -906,22 +960,42 @@ export class Studio {
    *    redundant with `turnRunIds`; still checked so a stale "running" copy
    *    that slipped past the skipped-while-live normalization errs toward
    *    keeping (sidebar noise, chosen over risking a live turn).
-   * NONE of this applies to a folder SWAP: `swapMountedFolder` drops the old
-   * project's non-live runs AND their `turnRunIds` marks before mounting, so
-   * an explicit project change can never rescue project A's chat into project
-   * B's `.erdou/` (cross-project contamination).
-   * A dangling `activeRunId` (its run was dropped) resets to null. Returns
-   * how many memory runs were kept so the caller can persist the merged list
-   * back to `.erdou/` — a kept run is one whose current state the folder
-   * doesn't have yet (memory-only, or a stale same-id folder copy).
+   *
+   * `"replace"` — an EXPLICIT folder swap (`swapMountedFolder`: the re-select
+   * control, and `mountFolder` over an already-mounted folder). The user
+   * chose a different project, so its `.erdou` is the sole source of truth
+   * and NO memory run may survive into it: rescuing the old project's chat
+   * here wrote its task text and traces into the new project's runs.json —
+   * cross-project contamination (`.erdou/.gitignore` only covers config.json,
+   * so that chat became committable into the new repo). Wholesale replace is
+   * lossless only because of `swapMountedFolder`'s ordered steps: it stops a
+   * live turn, flushes the old project's FULL in-memory state to its own
+   * `.erdou` first (aborting the swap if that write fails), and blocks new
+   * turns until the swap settles — see its doc for where the old history
+   * actually lives afterwards.
+   *
+   * Either way a dangling `activeRunId` (its run was dropped) resets to null.
+   * Returns how many memory runs were kept so the caller can persist the
+   * merged list back to `.erdou/` — a kept run is one whose current state the
+   * folder doesn't have yet (memory-only, or a superseded same-id copy).
+   * Always 0 in "replace" mode.
    */
-  private hydrateRuns(folderRuns: Run[]): number {
+  private hydrateRuns(folderRuns: Run[], mode: "merge" | "replace"): number {
+    if (mode === "replace") {
+      this.runs = [...folderRuns];
+      if (this.activeRunId !== null && !this.runs.some((r) => r.id === this.activeRunId)) this.activeRunId = null;
+      return 0;
+    }
     const isLive = (r: Run): boolean => this.running && r.status === "running";
-    const folderIds = new Set(folderRuns.map((r) => r.id));
+    const lastActivity = (r: Run): number => r.trace.at(-1)?.ts ?? r.createdAt;
+    const folderById = new Map(folderRuns.map((r) => [r.id, r]));
     const newestFolder = folderRuns.reduce((max, r) => Math.max(max, r.createdAt), 0);
-    const kept = this.runs.filter(
-      (r) => isLive(r) || this.turnRunIds.has(r.id) || (!folderIds.has(r.id) && r.createdAt > newestFolder),
-    );
+    const kept = this.runs.filter((r) => {
+      if (isLive(r) || this.turnRunIds.has(r.id)) return true;
+      const folderCopy = folderById.get(r.id);
+      if (folderCopy !== undefined) return lastActivity(r) > lastActivity(folderCopy);
+      return r.createdAt > newestFolder;
+    });
     const keptIds = new Set(kept.map((r) => r.id));
     this.runs = [...kept, ...folderRuns.filter((r) => !keptIds.has(r.id))];
     if (this.activeRunId !== null && !this.runs.some((r) => r.id === this.activeRunId)) this.activeRunId = null;
@@ -962,13 +1036,14 @@ export class Studio {
     this.scheduleFolderStateSave();
   }
 
-  /** Re-grant permission to a persisted mount (needs a user gesture). */
+  /** Re-grant permission to a persisted mount (needs a user gesture). The
+   *  SAME project reconnecting — hydration merges (see hydrateRuns). */
   async reconnectMount(): Promise<boolean> {
     const handle = this.pendingMount;
     if (!handle) return false;
     const perm = (await handle.requestPermission?.({ mode: "readwrite" })) ?? "denied";
     if (perm !== "granted") return false;
-    await this.mountFolder(handle);
+    await this.mountFolderWith(handle, "merge");
     return true;
   }
 
@@ -1131,8 +1206,8 @@ export class Studio {
   /** Manual "Re-select folder": re-run the directory picker to swap to a
    *  DIFFERENT local folder, replacing the current mount. Needs a user gesture.
    *  Returns true if a new folder was mounted, false if the user cancelled the
-   *  picker. Routes through `swapMountedFolder` (NOT the additive `mountFolder`)
-   *  so the newly-picked folder becomes the sole source of truth. */
+   *  picker. Routes through `swapMountedFolder` so the newly-picked folder
+   *  becomes the sole source of truth — files AND session state. */
   async reselectFolder(): Promise<boolean> {
     const picker = (window as unknown as { showDirectoryPicker?: (o?: unknown) => Promise<unknown> })
       .showDirectoryPicker;
@@ -1145,60 +1220,80 @@ export class Studio {
   }
 
   /**
-   * Swap the mounted folder for a DIFFERENT one, which becomes the SOLE source
-   * of truth. `mountFolder` clears a non-empty workspace itself (A2), but a
-   * swap must ALSO hold the folder auto-save suspension across the ENTIRE
-   * clear→load flow and drop the OLD folder's pending save + stale mtimes even
-   * when the workspace happens to be empty — the ~600 ms folder auto-save must
-   * never mirror a half-swapped workspace onto either disk (e.g. dirtying a
-   * `.git` repo). So it pre-clears here with the suspension held for the whole
-   * swap, THEN loads the new folder via `mountFolder`.
+   * Swap the mounted folder for a DIFFERENT one (reached from the re-select
+   * control AND from `mountFolder` over an already-mounted folder — both are
+   * the user explicitly choosing another project), which becomes the SOLE
+   * source of truth: files AND session state. `mountFolderWith` clears a
+   * non-empty workspace itself (A2), but a swap must ALSO hold the folder
+   * auto-save suspension across the ENTIRE clear→load flow and drop the OLD
+   * folder's pending save + stale mtimes even when the workspace happens to
+   * be empty — the ~600 ms folder auto-save must never mirror a half-swapped
+   * workspace onto either disk (e.g. dirtying a `.git` repo).
+   *
+   * Session state hydrates in "replace" mode: NO memory run survives into
+   * the new folder (see hydrateRuns — the merge's rescue rules carried the
+   * old project's chat straight into the new project's runs.json). That is
+   * lossless ONLY because of the ordered steps below; after them, the old
+   * project's history survives in EXACTLY ONE place — its own
+   * `.erdou/runs.json`. It is NOT in IndexedDB anymore (the final step
+   * overwrites that with the new folder's history, or a reload would
+   * resurrect it) and not in memory.
    */
   private async swapMountedFolder(handle: DirHandleLike): Promise<void> {
-    this.swappingFolder = true;
-    // Kill any save the OLD folder had pending — it must not fire against the new one.
-    if (this.folderSaveTimer) {
-      clearTimeout(this.folderSaveTimer);
-      this.folderSaveTimer = undefined;
-    }
-    // A swap is an EXPLICIT project change, not a race window. hydrateRuns's
-    // rescue rules (recency + this session's `turnRunIds`) exist to protect
-    // THIS project's work across an async (re)mount — carried across a swap
-    // they rescued project A's chat history (task text, traces) straight into
-    // project B's `.erdou/runs.json`: the same cross-project pollution class
-    // the A2 workspace clear exists to prevent, and `.erdou/.gitignore` only
-    // covers config.json, so A's chat became committable into B's repo. So:
-    // 1) settle A's pending session-state save against A NOW — flushed before
-    //    the prune below so A keeps its own history (a debounced save firing
-    //    after the prune would have ERASED it instead);
-    if (this.folderStateTimer) {
-      clearTimeout(this.folderStateTimer);
-      this.folderStateTimer = undefined;
-      await this.saveStateToFolder(); // still mounted on A here; catches internally
-    }
-    // 2) drop every non-live run and all session `turnRunIds` marks. The one
-    //    documented carry-over is a turn in flight RIGHT NOW: its object is
-    //    the running turn's only truth (dropping it detaches the turn — final
-    //    status/trace would evaporate at turn end), so it follows the user
-    //    into B and lands in B's history when it settles;
-    this.runs = this.runs.filter((r) => this.running && r.status === "running");
-    this.turnRunIds = new Set(this.runs.map((r) => r.id));
-    if (this.activeRunId !== null && !this.runs.some((r) => r.id === this.activeRunId)) this.activeRunId = null;
-    // 3) stand "unmounted" until mountFolder announces B: a state save
-    //    scheduled mid-swap (e.g. that live turn ending during a slow load)
-    //    would otherwise write the pruned list — or B's half-hydrated history
-    //    — onto A's disk (scheduleFolderStateSave/saveStateToFolder no-op
-    //    while unmounted; A's watcher tick guards on `this.mount` too).
-    this.mount = null;
+    const prev = this.mount;
+    if (!prev) throw new Error("swapMountedFolder requires a mounted folder to swap away from");
+    this.swappingFolder = true; // suspends the folder auto-save AND blocks startRun/replyToRun until the swap settles
     try {
+      // 1) Kill any file auto-save the OLD folder had pending — it must not
+      //    fire against either disk mid-swap.
+      if (this.folderSaveTimer) {
+        clearTimeout(this.folderSaveTimer);
+        this.folderSaveTimer = undefined;
+      }
+      // 2) A turn in flight is the OLD project's work, driving its tools
+      //    against the workspace we are about to replace — stop it now
+      //    (abort at its next agent checkpoint + deny a parked approval).
+      //    Its object is pruned in step 4; everything it did up to here is
+      //    flushed to the old folder in step 3, whose "running" copy the next
+      //    mount normalizes to an honest interrupted-error. Known residue: a
+      //    tool already executing when the abort lands can still finish, and
+      //    that post-flush tail dies with the pruned object.
+      if (this.running) {
+        this.stopRun();
+        this.logSystem("system", "Stopped the running task — swapping to a different project folder.");
+      }
+      // 3) Flush the old project's session state to its `.erdou`
+      //    UNCONDITIONALLY — not just a pending debounce: mid-turn trace
+      //    lines only schedule the IndexedDB runs-save, never a folder-state
+      //    save, so runs.json can lag the in-memory truth with NO timer
+      //    pending. THROWS on failure, aborting the swap before anything is
+      //    destroyed (the old folder stays mounted, runs stay in memory) —
+      //    a failed swap beats silently losing unsaved chat.
+      if (this.folderStateTimer) {
+        clearTimeout(this.folderStateTimer);
+        this.folderStateTimer = undefined;
+      }
+      await writeFolderState(prev, this.currentState());
+      // 4) Drop the old project's session state from memory wholesale: runs,
+      //    the session `turnRunIds` marks (they must not rescue anything
+      //    through the new folder's hydration), and the selection.
+      this.runs = [];
+      this.turnRunIds = new Set();
+      this.activeRunId = null;
+      // 5) Stand "unmounted" until mountFolderWith announces the new folder:
+      //    a state save scheduled mid-swap (e.g. the stopped turn settling
+      //    during a slow load) would otherwise write onto the old disk
+      //    (scheduleFolderStateSave/saveStateToFolder no-op while unmounted;
+      //    the old watcher tick guards on `this.mount` too).
+      this.mount = null;
       this.clearWorkspace();
       this.mountMtimes.clear();
-      await this.mountFolder(handle);
-      // 4) mirror the project change into IndexedDB: boot() seeds `this.runs`
-      //    from there, so leaving A's history behind would resurrect it into
-      //    B through the NEXT session's auto-remount hydration (the same
-      //    contamination, one reload later). Logged, not thrown — the swap
-      //    itself succeeded.
+      await this.mountFolderWith(handle, "replace");
+      // 6) Mirror the project change into IndexedDB: boot() seeds `this.runs`
+      //    from there, so leaving the old history behind would resurrect it
+      //    into the new folder through the NEXT session's auto-remount
+      //    hydration (the same contamination, one reload later). Logged, not
+      //    thrown — the swap itself succeeded.
       await this.flushRunsSave().catch((err) =>
         this.logSystem("error", "Could not persist the swapped run history to this browser", asMessage(err)),
       );
@@ -1323,13 +1418,26 @@ export class Studio {
   /** Mark every stored run still claiming "running" as interrupted — an
    *  error-status run with an explanatory trace line — because a loaded run
    *  can never actually be in flight. Returns true when anything changed
-   *  (the caller persists to wherever those runs came from). */
+   *  (the caller persists to wherever those runs came from).
+   *
+   *  The marker line is BOOKKEEPING, not activity, so it carries the run's
+   *  OWN last-activity ts (its final real trace line, or createdAt) instead
+   *  of `this.line`'s Date.now(). hydrateRuns' same-id merge resolves by
+   *  last-activity recency, and boot runs this normalization BEFORE the
+   *  mount hydration — a "now" stamp let a crashed session's STALE copy
+   *  out-recency a folder copy genuinely advanced elsewhere (a second
+   *  browser/machine sharing the folder), and the rescued-persist path then
+   *  overwrote the newer reply in `.erdou/runs.json` too. */
   private normalizeInterruptedRuns(): boolean {
     let changed = false;
     for (const run of this.runs) {
       if (run.status !== "running") continue;
       run.status = "error";
-      run.trace = [...run.trace, this.line("error", "Interrupted — the page was closed while this run was in progress.")];
+      const lastActivityTs = run.trace.at(-1)?.ts ?? run.createdAt;
+      run.trace = [
+        ...run.trace,
+        { ...this.line("error", "Interrupted — the page was closed while this run was in progress."), ts: lastActivityTs },
+      ];
       changed = true;
     }
     return changed;
@@ -1380,6 +1488,12 @@ export class Studio {
   async startRun(task: string, model: ModelConfig, approvalMode: ApprovalMode): Promise<void> {
     if (this.running || this.switchingKernel) {
       this.logSystem("system", "Please wait for the kernel switch to finish before starting a task.");
+      return;
+    }
+    if (this.swappingFolder) {
+      // A run created inside the swap window would be wiped by the "replace"
+      // hydration while live — refuse loudly instead (see hydrateRuns).
+      this.logSystem("system", "Please wait for the folder to finish loading before starting a task.");
       return;
     }
     const run: Run = {
@@ -1442,6 +1556,12 @@ export class Studio {
   async replyToRun(runId: string, task: string, model: ModelConfig, approvalMode: ApprovalMode): Promise<void> {
     if (this.running || this.switchingKernel) {
       this.logSystem("system", "Please wait for the kernel switch to finish before starting a task.");
+      return;
+    }
+    if (this.swappingFolder) {
+      // Same guard as startRun: a reply driven inside the swap window could
+      // not survive the "replace" hydration (see hydrateRuns).
+      this.logSystem("system", "Please wait for the folder to finish loading before starting a task.");
       return;
     }
     const run = this.runs.find((r) => r.id === runId);
