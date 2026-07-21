@@ -19,13 +19,41 @@ export class SnapshotReader {
   }
 
   read(path: string): string | null {
-    let node: SnapshotFsNode | undefined = this.root;
-    for (const part of path.split("/").filter(Boolean)) {
-      if (!node || node.type !== "directory") return null;
-      node = node.children[part];
-    }
+    const node = this.lookup(path);
     if (!node || node.type !== "file") return null;
     return new TextDecoder().decode(b64ToBytes(node.data));
+  }
+
+  /**
+   * Every FILE path at or under `path`, when `path` is a directory in the
+   * snapshot; `[]` otherwise (missing, file, symlink). The run diff's expansion
+   * source: deleting/renaming a directory emits ONE file.changed for the
+   * directory itself, and the files that lived beneath it are what the diff
+   * must show as deleted. Symlinks are skipped, matching `read`.
+   */
+  filesUnder(path: string): string[] {
+    const node = this.lookup(path);
+    if (!node || node.type !== "directory") return [];
+    const base = "/" + path.split("/").filter(Boolean).join("/");
+    const out: string[] = [];
+    const walk = (dir: Extract<SnapshotFsNode, { type: "directory" }>, prefix: string): void => {
+      for (const [name, child] of Object.entries(dir.children)) {
+        const childPath = prefix === "/" ? `/${name}` : `${prefix}/${name}`;
+        if (child.type === "file") out.push(childPath);
+        else if (child.type === "directory") walk(child, childPath);
+      }
+    };
+    walk(node, base);
+    return out;
+  }
+
+  private lookup(path: string): SnapshotFsNode | undefined {
+    let node: SnapshotFsNode | undefined = this.root;
+    for (const part of path.split("/").filter(Boolean)) {
+      if (!node || node.type !== "directory") return undefined;
+      node = node.children[part];
+    }
+    return node;
   }
 }
 

@@ -64,4 +64,13 @@ describe("SnapshotReader", () => {
     expect(reader.read("/sub")).toBeNull();
     expect(reader.read("/link")).toBeNull();
   });
+
+  it("filesUnder lists every file beneath a directory (symlinks skipped), and [] for non-directories", () => {
+    const reader = SnapshotReader.open(snap);
+    expect(reader.filesUnder("/").sort()).toEqual(["/a.txt", "/sub/b.txt"]);
+    expect(reader.filesUnder("/sub")).toEqual(["/sub/b.txt"]);
+    expect(reader.filesUnder("/a.txt")).toEqual([]); // a file
+    expect(reader.filesUnder("/link")).toEqual([]); // a symlink
+    expect(reader.filesUnder("/missing")).toEqual([]);
+  });
 });

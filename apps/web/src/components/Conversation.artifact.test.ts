@@ -66,4 +66,13 @@ describe("Conversation artifact card", () => {
     expect(html).not.toContain('class="artifact"');
     expect(html).toContain("Broken export card");
   });
+
+  it("agent text interleaves with the card as a plain block, not monologue framing", () => {
+    const thought: TraceLine = { id: 2, kind: "thought", text: "Packaged the project for download.", ts: 0 };
+    const html = render({ trace: [thought, artifactLine(detail)] });
+    expect(html).toContain("Packaged the project for download.");
+    expect(html).toContain('class="msg agent"');
+    expect(html).not.toContain("agent · thinking");
+    expect(html).not.toContain('class="think"');
+  });
 });

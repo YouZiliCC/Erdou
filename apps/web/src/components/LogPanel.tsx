@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { Studio } from "../lib/studio.js";
-import { ArtifactCard, SystemLine } from "./Conversation.js";
+import { ArtifactCard } from "./Conversation.js";
+import type { TraceLine } from "../lib/studio.js";
 
 /** The system channel's home: the full `studio.systemLog` (mount/restore/sync
  *  chatter plus errors), newest at the bottom. Auto-scroll stays pinned to the
@@ -46,10 +47,26 @@ export function LogPanel({ studio }: { studio: Studio }) {
           line.kind === "artifact" ? (
             <ArtifactCard key={line.id} line={line} studio={studio} />
           ) : (
-            <SystemLine key={line.id} line={line} />
+            <TimedLine key={line.id} line={line} />
           ),
         )}
       </div>
+    </div>
+  );
+}
+
+/** One Log-tab line: wall-clock time + content (the user asked for time, not a
+ *  status dot, in this surface; the sysbar/empty-state keep SystemLine's dot).
+ *  `ts` is epoch ms (Studio.line stamps Date.now()); local HH:MM:SS. */
+function TimedLine({ line }: { line: TraceLine }) {
+  const d = new Date(line.ts);
+  const two = (n: number) => String(n).padStart(2, "0");
+  const t = `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
+  return (
+    <div className={`sysline ${line.kind === "error" ? "err" : ""}`}>
+      <span className="log-time">{t}</span>
+      {line.text}
+      {line.detail && line.detail !== line.text && <span className="detail"> — {line.detail}</span>}
     </div>
   );
 }

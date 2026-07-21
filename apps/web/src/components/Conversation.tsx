@@ -109,6 +109,12 @@ function renderTrace(trace: TraceLine[], studio: Studio) {
       if (result) i++;
       continue;
     }
+    // Threads persisted BEFORE the append-time dedupe (studio.onAgentEvent's
+    // "done" case) carry the model's final text twice — a thought line followed
+    // by a done line with the same string. Suppress that echo defensively here
+    // so old threads render honestly too; a done line that says something new
+    // ("Stopped by the user.") still renders.
+    if (line.kind === "done" && trace[i - 1]?.text.trim() === line.text.trim()) continue;
     blocks.push(<TraceBlock key={line.id} line={line} studio={studio} />);
   }
   return blocks;
@@ -124,12 +130,13 @@ function TraceBlock({ line, studio }: { line: TraceLine; studio: Studio }) {
         </div>
       );
     case "thought":
-      return (
-        <div className="msg">
-          <div className="who">agent · thinking</div>
-          <div className="think">{line.text}</div>
-        </div>
-      );
+      // The model's words ARE the conversation (Claude-Code style): a plain
+      // agent text block interleaved between tool blocks — no "agent ·
+      // thinking" label, no dimmed monologue framing. No who marker either:
+      // the user's turns are already visually distinct bubbles (.who/.you), so
+      // the you/agent alternation stays legible without one. The TraceKind
+      // stays "thought" so persisted threads round-trip unchanged.
+      return <div className="msg agent">{line.text}</div>;
     case "result":
       // Only reached for a result with no preceding tool call.
       return <ToolBlock result={line} />;

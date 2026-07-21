@@ -10,6 +10,10 @@
 //   C4 — the empty-state example chips are real <button>s (not dead spans) and
 //        every example is a genuine agent task ("Open a local folder" is a
 //        sidebar UI action, not a task).
+// Plus the agent-text contract: a "thought" line is the model's reply, not
+// internal monologue — plain text, no label/dim framing — and a done line that
+// merely echoes the previous line's text is suppressed (historical threads
+// persisted before studio's append-time dedupe).
 import { describe, it, expect } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -96,6 +100,44 @@ describe("Conversation system-error strip (B3)", () => {
     });
     expect(html).not.toContain("Runtime booted.");
     expect(html).not.toContain("Could not restore project.");
+  });
+});
+
+describe("Conversation agent text (thought lines)", () => {
+  it("renders a thought as a plain agent text block — no label, no monologue framing", () => {
+    const html = render({ activeRun: makeRun([line("thought", "Hello! How can I help?")], "done") });
+    expect(html).toContain("Hello! How can I help?");
+    expect(html).toContain('class="msg agent"');
+    expect(html).not.toContain("agent · thinking");
+    expect(html).not.toContain('class="think"');
+  });
+
+  it("suppresses a done line that merely echoes the previous line (old persisted threads)", () => {
+    const reply = "Hello! How can I help?";
+    const html = render({ activeRun: makeRun([line("thought", reply), line("done", reply)], "done") });
+    // The reply appears exactly once, and no completion marker frames it.
+    expect(html.split(reply).length - 1).toBe(1);
+    expect(html).not.toContain("◆");
+  });
+
+  it("the echo suppression is trim-tolerant", () => {
+    const html = render({
+      activeRun: makeRun([line("thought", "All wired up."), line("done", " All wired up.\n")], "done"),
+    });
+    expect(html).not.toContain("◆");
+  });
+
+  it("still renders a done line that adds information", () => {
+    const html = render({
+      activeRun: makeRun([line("thought", "Working on it."), line("done", "Stopped by the user.")], "done"),
+    });
+    expect(html).toContain("◆ Stopped by the user.");
+  });
+
+  it("renders a done line after a tool/result pair (the pairing does not confuse the echo check)", () => {
+    const trace = [line("tool", "run_shell", "npm test"), line("result", "ok"), line("done", "Done.")];
+    const html = render({ activeRun: makeRun(trace, "done") });
+    expect(html).toContain("◆ Done.");
   });
 });
 

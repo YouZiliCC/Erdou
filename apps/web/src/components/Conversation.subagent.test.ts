@@ -86,4 +86,13 @@ describe("Conversation subagent card", () => {
     expect(html).not.toContain('class="subagent"');
     expect(html).toContain("Broken sub-agent card");
   });
+
+  it("agent text interleaves with the card as a plain block, not monologue framing", () => {
+    const thought: TraceLine = { id: 2, kind: "thought", text: "Fanning the work out to a sub-agent.", ts: 0 };
+    const html = render([thought, subagentLine(detailOf({}))]);
+    expect(html).toContain("Fanning the work out to a sub-agent.");
+    expect(html).toContain('class="msg agent"');
+    expect(html).not.toContain("agent · thinking");
+    expect(html).not.toContain('class="think"');
+  });
 });

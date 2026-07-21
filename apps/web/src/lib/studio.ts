@@ -196,11 +196,23 @@ export class Studio {
   private runsSaveTimer: ReturnType<typeof setTimeout> | undefined;
   /** Cancels the in-flight agent run (D1); non-null only while one runs. */
   private runAbort: AbortController | null = null;
+  /** Ids of runs an agent turn has DRIVEN this browser session (stamped at
+   *  turn start; cleared only by a folder swap, which is a project change).
+   *  `hydrateRuns` keeps these runs' memory objects through an `.erdou`
+   *  hydration: this session's work is strictly ahead of whatever the folder
+   *  holds. Without it, a reply to a folder-shared run (same id on both
+   *  sides) that COMPLETED inside the mount window was neither "live" nor
+   *  "memory-only", so the folder's stale copy silently wiped the reply. */
+  private turnRunIds = new Set<string>();
   private _shell?: RpcShellSession;
   private _unsubRuntime?: Unsubscribe;
   /** Re-points the run-scoped diff subscription onto the active kernel after a
    *  mid-run environment switch (set only while a run is in flight). */
   private repointRunDiff?: () => void;
+  /** Drops rescan-pulled paths (the user's external disk edits) from the
+   *  in-flight run's changed set so the run diff doesn't blame the agent for
+   *  them (set only while a run is in flight — see runAgentTurn). */
+  private discountExternalPulls?: (paths: readonly string[]) => Promise<void>;
 
   /**
    * The STABLE `Runtime` handed to the agent at construction (S4 critical fix
@@ -807,6 +819,23 @@ export class Studio {
     } finally {
       if (suspend) this.swappingFolder = false;
     }
+    // Read `.erdou/` BEFORE `this.mount` is set: scheduleFolderStateSave no-ops
+    // while unmounted, so a debounced state save — e.g. one scheduled by a run
+    // started while this async mount is still in flight (boot() is
+    // fire-and-forget in use-studio.ts; the UI is fully interactive) — can
+    // never fire mid-read and clobber the folder's runs.json with memory-only
+    // state that hydration would then read back as "the folder's history".
+    // The result is applied below, after the mount is announced, so the log
+    // order the user sees is unchanged.
+    let state: FolderState | null = null;
+    let stateFailed = false;
+    let stateError: unknown;
+    try {
+      state = await readFolderState(handle);
+    } catch (err) {
+      stateFailed = true;
+      stateError = err;
+    }
     this.mount = handle;
     this.mountName = handle.name;
     this.pendingMount = null;
@@ -818,16 +847,22 @@ export class Studio {
     // an `.erdou/`, hydrate from it (chat history + theme/approval/model incl.
     // the api key); otherwise seed it from what we have now.
     try {
-      const st = await readFolderState(handle);
-      if (st) {
-        this.runs = st.runs;
-        // Folder-hydrated runs replace `this.runs`, so the boot-time interrupted-run
+      if (stateFailed) throw stateError;
+      if (state) {
+        const rescued = this.hydrateRuns(state.runs);
+        // Folder-hydrated runs join `this.runs`, so the boot-time interrupted-run
         // normalization must apply here too (skipped while a run is actually live now).
         if (!this.running && this.normalizeInterruptedRuns()) this.scheduleFolderStateSave();
-        if (st.config) {
-          applyTheme(st.config.theme);
-          saveApprovalMode(st.config.approvalMode);
-          saveModel(st.config.model);
+        // A rescued run's CURRENT state exists only in memory — the folder's
+        // runs.json lacks it entirely (memory-only run) or holds a stale
+        // pre-turn copy (a same-id run a turn drove this session) — so persist
+        // the merged list (this is exactly the state the old wholesale replace
+        // kept out of `.erdou/runs.json` forever).
+        if (rescued > 0) this.scheduleFolderStateSave();
+        if (state.config) {
+          applyTheme(state.config.theme);
+          saveApprovalMode(state.config.approvalMode);
+          saveModel(state.config.model);
           this.configVersion++;
         }
         this.logSystem("system", "Loaded session state from .erdou/ — the folder is now the source of truth.");
@@ -840,6 +875,57 @@ export class Studio {
 
     this.startMountWatcher();
     this.notify();
+  }
+
+  /**
+   * Hydrate `this.runs` from a mounted folder's `.erdou/runs.json` — a MERGE,
+   * not a wholesale replace. boot()'s auto-remount (and a manual mount) is
+   * async while the UI stays fully interactive, so a run can be created while
+   * `readFolderState` is still in flight; replacing the array wholesale wiped
+   * that run mid-turn — it vanished from the sidebar and never reached
+   * `.erdou/runs.json` (nor IndexedDB after the turn's final save). Semantics:
+   *  - a run an agent turn drove THIS SESSION (`turnRunIds` — includes the
+   *    turn in flight right now) always keeps its memory object, same-id or
+   *    not, even against future-dated folder timestamps (another machine's
+   *    clock): this session's copy is strictly ahead of the folder's. This is
+   *    what saves a reply to a folder-shared run that COMPLETED inside the
+   *    mount window — it is neither "live" nor "memory-only", so every other
+   *    rule below would let the folder's stale copy wipe the reply;
+   *  - otherwise, same id on both sides → the FOLDER's copy wins: for shared
+   *    history the folder is the source of truth (the normal remount path);
+   *  - a memory-only run STRICTLY NEWER (`createdAt`) than every folder run
+   *    is kept, ahead of the folder's runs (most-recent-first order): e.g.
+   *    last session's tail that reached IndexedDB but missed the folder flush;
+   *  - any other memory-only run is dropped: browser-local history the folder
+   *    state supersedes (the pre-existing "folder is the source of truth"
+   *    rule, now scoped to runs the folder can actually supersede);
+   *  - belt-and-suspenders: a run that is status "running" while
+   *    `this.running` keeps its memory object too — that object is the only
+   *    truth of the running turn (dropping/replacing it detaches the turn, so
+   *    its final status/trace/changes would evaporate at turn end). Normally
+   *    redundant with `turnRunIds`; still checked so a stale "running" copy
+   *    that slipped past the skipped-while-live normalization errs toward
+   *    keeping (sidebar noise, chosen over risking a live turn).
+   * NONE of this applies to a folder SWAP: `swapMountedFolder` drops the old
+   * project's non-live runs AND their `turnRunIds` marks before mounting, so
+   * an explicit project change can never rescue project A's chat into project
+   * B's `.erdou/` (cross-project contamination).
+   * A dangling `activeRunId` (its run was dropped) resets to null. Returns
+   * how many memory runs were kept so the caller can persist the merged list
+   * back to `.erdou/` — a kept run is one whose current state the folder
+   * doesn't have yet (memory-only, or a stale same-id folder copy).
+   */
+  private hydrateRuns(folderRuns: Run[]): number {
+    const isLive = (r: Run): boolean => this.running && r.status === "running";
+    const folderIds = new Set(folderRuns.map((r) => r.id));
+    const newestFolder = folderRuns.reduce((max, r) => Math.max(max, r.createdAt), 0);
+    const kept = this.runs.filter(
+      (r) => isLive(r) || this.turnRunIds.has(r.id) || (!folderIds.has(r.id) && r.createdAt > newestFolder),
+    );
+    const keptIds = new Set(kept.map((r) => r.id));
+    this.runs = [...kept, ...folderRuns.filter((r) => !keptIds.has(r.id))];
+    if (this.activeRunId !== null && !this.runs.some((r) => r.id === this.activeRunId)) this.activeRunId = null;
+    return kept.length;
   }
 
   /** Snapshot of what would be written to `.erdou/` right now. */
@@ -914,6 +1000,9 @@ export class Studio {
           this.logSystem("system", "Mount rescan recovered — external disk edits are syncing again.");
         }
         if (pulled.length) {
+          // Pulled paths are the USER's external edits — keep them out of an
+          // in-flight run's diff (see the attribution rule in runAgentTurn).
+          await this.discountExternalPulls?.(pulled);
           // Two-sided edits resolve disk-wins here: a file the auto-save just
           // skipped as an external-edit conflict is now being pulled over the
           // workspace copy — say so instead of letting the local edit vanish.
@@ -1072,10 +1161,47 @@ export class Studio {
       clearTimeout(this.folderSaveTimer);
       this.folderSaveTimer = undefined;
     }
+    // A swap is an EXPLICIT project change, not a race window. hydrateRuns's
+    // rescue rules (recency + this session's `turnRunIds`) exist to protect
+    // THIS project's work across an async (re)mount — carried across a swap
+    // they rescued project A's chat history (task text, traces) straight into
+    // project B's `.erdou/runs.json`: the same cross-project pollution class
+    // the A2 workspace clear exists to prevent, and `.erdou/.gitignore` only
+    // covers config.json, so A's chat became committable into B's repo. So:
+    // 1) settle A's pending session-state save against A NOW — flushed before
+    //    the prune below so A keeps its own history (a debounced save firing
+    //    after the prune would have ERASED it instead);
+    if (this.folderStateTimer) {
+      clearTimeout(this.folderStateTimer);
+      this.folderStateTimer = undefined;
+      await this.saveStateToFolder(); // still mounted on A here; catches internally
+    }
+    // 2) drop every non-live run and all session `turnRunIds` marks. The one
+    //    documented carry-over is a turn in flight RIGHT NOW: its object is
+    //    the running turn's only truth (dropping it detaches the turn — final
+    //    status/trace would evaporate at turn end), so it follows the user
+    //    into B and lands in B's history when it settles;
+    this.runs = this.runs.filter((r) => this.running && r.status === "running");
+    this.turnRunIds = new Set(this.runs.map((r) => r.id));
+    if (this.activeRunId !== null && !this.runs.some((r) => r.id === this.activeRunId)) this.activeRunId = null;
+    // 3) stand "unmounted" until mountFolder announces B: a state save
+    //    scheduled mid-swap (e.g. that live turn ending during a slow load)
+    //    would otherwise write the pruned list — or B's half-hydrated history
+    //    — onto A's disk (scheduleFolderStateSave/saveStateToFolder no-op
+    //    while unmounted; A's watcher tick guards on `this.mount` too).
+    this.mount = null;
     try {
       this.clearWorkspace();
       this.mountMtimes.clear();
       await this.mountFolder(handle);
+      // 4) mirror the project change into IndexedDB: boot() seeds `this.runs`
+      //    from there, so leaving A's history behind would resurrect it into
+      //    B through the NEXT session's auto-remount hydration (the same
+      //    contamination, one reload later). Logged, not thrown — the swap
+      //    itself succeeded.
+      await this.flushRunsSave().catch((err) =>
+        this.logSystem("error", "Could not persist the swapped run history to this browser", asMessage(err)),
+      );
     } finally {
       this.swappingFolder = false;
     }
@@ -1339,6 +1465,10 @@ export class Studio {
     approvalMode: ApprovalMode,
   ): Promise<void> {
     this.running = true;
+    // From here on this session's copy of the run is the truth of the thread —
+    // an `.erdou` hydration landing later (async mount) must not replace it
+    // with the folder's pre-turn copy, even after the turn ends (hydrateRuns).
+    this.turnRunIds.add(run.id);
     this.autoAllow = new Set();
     const abort = new AbortController();
     this.runAbort = abort; // D1: stopRun() aborts this turn
@@ -1356,6 +1486,21 @@ export class Studio {
     this.repointRunDiff = () => {
       unsub();
       unsub = this.runtime.subscribe(collect);
+    };
+    // Attribution rule for external disk edits (mounted-folder rescan): a pull
+    // writes the USER's edit into the VFS, whose file.changed lands in
+    // `changed` like any other — blaming the agent for it in the run diff. The
+    // watcher reports each pull's paths here and they are DISCOUNTED after the
+    // pull's own events settle. If the agent later writes the same path, that
+    // write re-adds it (its own event), so agent edits to user-edited files
+    // stay attributed — spanning run-start content to the agent's content. A
+    // pull that clobbers an EARLIER agent write drops the path: honest, since
+    // the agent's content no longer exists in the workspace. (Known narrow
+    // race: an agent write to the same path landing between the pull and its
+    // settle is discounted with it — bounded by one rescan tick.)
+    this.discountExternalPulls = async (paths) => {
+      await eventsSettled(); // VM-kernel events may deliver a macrotask late
+      for (const p of paths) changed.delete(p);
     };
 
     const agent = new CodingAgent({
@@ -1541,6 +1686,7 @@ export class Studio {
       await eventsSettled();
       unsub();
       this.repointRunDiff = undefined;
+      this.discountExternalPulls = undefined;
       try {
         const turnChanges = await this.computeRunChanges(startSnap, changed);
         run.changes = this.mergeChanges(run.changes, turnChanges);
@@ -1583,7 +1729,42 @@ export class Studio {
       this.fs.exists(path) && this.fs.stat(path).type === "file"
         ? new TextDecoder().decode(this.fs.readFile(path))
         : null;
-    return buildFileChanges(changed, (p) => before.read(p), after);
+    // Directory expansion: `rm -r`/`mv` on a directory emits ONE file.changed
+    // for the directory path, and a directory nets null→null above — so a run
+    // that deleted or renamed a whole tree used to show an EMPTY diff. A
+    // changed path that is a directory in the start snapshot expands to the
+    // files that lived beneath it (their deletions); one that is a directory
+    // live expands to the files beneath it now (their creations, e.g. `cp -r`).
+    // Files also touched individually are already in `changed` — a Set dedupes.
+    // An EMPTY new directory still shows nothing: a content diff has no line to
+    // render for it (documented, tested). The gate must be lstat, NOT stat:
+    // stat FOLLOWS symlinks, so a run-created symlink-to-directory (tool-git
+    // checkouts, `ln -s` in the VM) expanded through the link and fabricated
+    // phantom `create` entries for the REAL target's files — reverting one
+    // deleted a file the agent never touched. lstat sees the link itself, so
+    // symlinks stay invisible here, mirroring the symlink skip in both
+    // liveFilesUnder and SnapshotReader.filesUnder.
+    const paths = new Set(changed);
+    for (const path of changed) {
+      for (const f of before.filesUnder(path)) paths.add(f);
+      if (this.fs.exists(path) && this.fs.lstat(path).type === "directory") {
+        for (const f of this.liveFilesUnder(path)) paths.add(f);
+      }
+    }
+    return buildFileChanges(paths, (p) => before.read(p), after);
+  }
+
+  /** Every FILE path under the live directory at `dirPath` (symlinks skipped —
+   *  mirrors SnapshotReader.filesUnder). Caller guarantees `dirPath` is a
+   *  directory. */
+  private liveFilesUnder(dirPath: string): string[] {
+    const out: string[] = [];
+    for (const entry of this.fs.readdir(dirPath)) {
+      const childPath = dirPath === "/" ? `/${entry.name}` : `${dirPath}/${entry.name}`;
+      if (entry.type === "file") out.push(childPath);
+      else if (entry.type === "directory") out.push(...this.liveFilesUnder(childPath));
+    }
+    return out;
   }
 
   /**
@@ -1595,30 +1776,43 @@ export class Studio {
    * known content (first time this run touched the path) and `after` becomes
    * the latest. `kind` is re-derived from that span (net create/delete/modify),
    * and a path that nets out unchanged since the run started is dropped.
+   *
+   * `FileChange.before`/`after` store "" for an ABSENT file too, so existence
+   * must come from `kind`, not content: a span whose FIRST change was a
+   * "create" started absent; a turn change of kind "delete" ends absent.
+   * Deciding from content alone made an empty-file create/delete vanish from
+   * the diff entirely and misread truncate-to-empty as a delete.
    */
   private mergeChanges(existing: FileChange[], turnChanges: FileChange[]): FileChange[] {
     const byPath = new Map(existing.map((c) => [c.path, c]));
     for (const c of turnChanges) {
       const prior = byPath.get(c.path);
       const before = prior ? prior.before : c.before;
-      if (before === c.after) {
+      const existedAtStart = prior ? prior.kind !== "create" : c.kind !== "create";
+      const existsNow = c.kind !== "delete";
+      if (existedAtStart === existsNow && before === c.after) {
         byPath.delete(c.path); // net no-op since the run started
         continue;
       }
-      const kind: FileChange["kind"] =
-        c.after === "" ? "delete" : prior?.kind === "create" ? "create" : prior ? "modify" : c.kind;
+      const kind: FileChange["kind"] = !existedAtStart ? "create" : !existsNow ? "delete" : "modify";
       byPath.set(c.path, { path: c.path, kind, before, after: c.after });
     }
     return [...byPath.values()].sort((x, y) => (x.path < y.path ? -1 : 1));
   }
 
-  /** Undo a single file change from a run: creates are removed, others restored. */
+  /** Undo a single file change from a run: creates are removed, others restored.
+   *  A restore recreates missing parent directories first — a file deleted via
+   *  `rm -r <dir>` lost its parents too, and writeFile does not mkdir them. */
   async revertChange(runId: string, path: string): Promise<void> {
     const run = this.runs.find((r) => r.id === runId);
     const change = run?.changes.find((c) => c.path === path);
     if (!change) return;
     if (change.kind === "create") await this.runtime.rm(path, { force: true });
-    else await this.runtime.writeFile(path, change.before);
+    else {
+      const parent = path.slice(0, path.lastIndexOf("/"));
+      if (parent !== "") await this.runtime.mkdir(parent, { recursive: true });
+      await this.runtime.writeFile(path, change.before);
+    }
     this.notify();
   }
 
@@ -1731,9 +1925,21 @@ export class Studio {
       case "tool_result":
         this.appendLine(run, "result", firstLine(e.output), e.output, e.ok);
         break;
-      case "done":
-        this.appendLine(run, "done", e.summary || (e.reason === "max_steps" ? "Stopped at the step limit." : "Done."));
+      case "done": {
+        // On a clean finish the agent emits its final text TWICE — an
+        // `assistant` event (already appended as the last "thought" line) and
+        // then `done` with the same string as the summary (agent-core run()).
+        // Appending both renders the reply twice, reframed as a completion
+        // marker. When the summary adds nothing beyond the last trace line
+        // (identical after trim), append nothing — the run's status change is
+        // the completion signal. Summaries that DO add information ("Stopped
+        // by the user.", the step-limit notice, "Done." after a tool-only
+        // turn) still land as a done line.
+        const summary = e.summary || (e.reason === "max_steps" ? "Stopped at the step limit." : "Done.");
+        const last = run.trace[run.trace.length - 1];
+        if (last?.text.trim() !== summary.trim()) this.appendLine(run, "done", summary);
         break;
+      }
     }
   }
 

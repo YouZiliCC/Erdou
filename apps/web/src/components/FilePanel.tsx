@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import type { Studio, FileNode } from "../lib/studio.js";
+import { DEFAULT_SPLIT, loadSplit, saveSplit, splitForDrag } from "../lib/filepanel-split.js";
 import { Chevron, File, Folder, FolderOpen } from "./ui/icons.js";
 
 export function FilePanel({ studio }: { studio: Studio }) {
@@ -46,6 +47,49 @@ export function FilePanel({ studio }: { studio: Studio }) {
     });
   }
 
+  // Draggable tree/preview split: `split` is the tree's fraction of the body
+  // height (persisted + clamped in filepanel-split.ts). The drag mirrors the
+  // ResizableShell .splitter pattern — pointer capture on the handle, deltas
+  // clamped through the pure helper, persisted once on release.
+  const [split, setSplit] = useState(loadSplit);
+  // Mirror of `split` for persist-on-release: the pointerup handler closes
+  // over the render it was attached in, so reading state there could miss the
+  // final pointermove's not-yet-committed update.
+  const splitRef = useRef(split);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const dragging = useRef(false);
+
+  function onSplitPointerDown(e: ReactPointerEvent<HTMLDivElement>) {
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    e.currentTarget.classList.add("active");
+    dragging.current = true;
+  }
+
+  function onSplitPointerMove(e: ReactPointerEvent<HTMLDivElement>) {
+    if (!dragging.current) return;
+    const body = bodyRef.current;
+    if (!body) return;
+    const rect = body.getBoundingClientRect();
+    const ratio = splitForDrag(e.clientY - rect.top, rect.height);
+    splitRef.current = ratio;
+    setSplit(ratio);
+  }
+
+  function endSplitDrag(e: ReactPointerEvent<HTMLDivElement>) {
+    if (!dragging.current) return;
+    dragging.current = false;
+    e.currentTarget.classList.remove("active");
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+    saveSplit(splitRef.current);
+  }
+
+  function resetSplit() {
+    splitRef.current = DEFAULT_SPLIT;
+    setSplit(DEFAULT_SPLIT);
+    saveSplit(DEFAULT_SPLIT);
+  }
+
   // Manual export path: build the zip and trigger the browser download right
   // away via a temporary anchor (no card needed — the file lands in the
   // downloads bar). Errors (e.g. an empty workspace) surface inline here.
@@ -64,7 +108,7 @@ export function FilePanel({ studio }: { studio: Studio }) {
   }
 
   return (
-    <div className="panel">
+    <div className="panel fp">
       <div className="fhead">
         <span className="fhead-title">Workspace</span>
         <button
@@ -77,22 +121,44 @@ export function FilePanel({ studio }: { studio: Studio }) {
         </button>
       </div>
       {exportError && <div className="fhead-err">{exportError}</div>}
-      {tree.length === 0 ? (
-        <div className="hint">The filesystem is empty. Ask the agent to create a project, or use the terminal.</div>
-      ) : (
-        <div className="tree">
-          <TreeNodes nodes={tree} sel={sel} onOpen={setSel} expanded={expanded} onToggle={toggle} depth={0} />
+      <div className="fp-body" ref={bodyRef}>
+        {/* With a preview open the tree is pinned to the persisted fraction of
+            the body (the viewer flexes into the rest); without one it just
+            fills, so the splitter and its sizing leave no trace. */}
+        <div className="fp-tree" style={sel ? { flex: `0 0 ${split * 100}%` } : undefined}>
+          {tree.length === 0 ? (
+            <div className="hint">The filesystem is empty. Ask the agent to create a project, or use the terminal.</div>
+          ) : (
+            <div className="tree">
+              <TreeNodes nodes={tree} sel={sel} onOpen={setSel} expanded={expanded} onToggle={toggle} depth={0} />
+            </div>
+          )}
         </div>
-      )}
-      {sel && (
-        <div className="viewer">
-          <div className="vhead">
-            <span>{sel}</span>
-            <span className="chip">{content.length} chars</span>
-          </div>
-          <pre>{content}</pre>
-        </div>
-      )}
+        {sel && (
+          <>
+            <div
+              className="splitter fp-splitter"
+              role="separator"
+              aria-orientation="horizontal"
+              aria-label="Resize file preview"
+              title="Drag to resize — double-click to reset"
+              onPointerDown={onSplitPointerDown}
+              onPointerMove={onSplitPointerMove}
+              onPointerUp={endSplitDrag}
+              onPointerCancel={endSplitDrag}
+              onLostPointerCapture={endSplitDrag}
+              onDoubleClick={resetSplit}
+            />
+            <div className="viewer fp-view">
+              <div className="vhead">
+                <span>{sel}</span>
+                <span className="chip">{content.length} chars</span>
+              </div>
+              <pre>{content}</pre>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
