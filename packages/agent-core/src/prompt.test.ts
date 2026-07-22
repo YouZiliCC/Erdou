@@ -210,6 +210,41 @@ describe("Erdou environment orientation (both kernels)", () => {
   }
 });
 
+describe("buildSystemPrompt (skills / progressive disclosure)", () => {
+  const skills = [
+    { name: "pptx", description: "Create/edit PowerPoint (.pptx) decks with python-pptx", path: "/.skills/pptx/SKILL.md" },
+    { name: "xlsx", description: "Create/edit Excel (.xlsx) workbooks with openpyxl", path: "/.skills/xlsx/SKILL.md" },
+  ];
+
+  it("renders a SKILLS pointer list (name — description → path) when skills are supplied", () => {
+    const p = buildSystemPrompt({ skills }, caps);
+    expect(p).toMatch(/SKILLS \(task playbooks/);
+    expect(p).toContain("pptx — Create/edit PowerPoint (.pptx) decks with python-pptx → read /.skills/pptx/SKILL.md");
+    expect(p).toContain("→ read /.skills/xlsx/SKILL.md");
+  });
+
+  it("omits the pointer list when no skills are supplied (back-compat) and never inlines a skill body", () => {
+    expect(buildSystemPrompt({}, caps)).not.toContain("→ read /.skills/");
+    expect(buildSystemPrompt({ skills }, caps)).not.toMatch(/Presentation\(\)/); // body content is not inlined
+  });
+
+  it("also renders the skills pointer list on the real-OS prompt", () => {
+    const realCaps = { ...caps, realOs: true, interpreters: ["python3"], packageManagers: ["pip"], networkEgress: "cors-only" as const };
+    expect(buildSystemPrompt({ skills }, realCaps)).toContain("→ read /.skills/pptx/SKILL.md");
+  });
+});
+
+describe("buildSystemPrompt (browser pip brief is accurate)", () => {
+  it("tells the agent browser pip loads Pyodide prebuilt wheels incl. NumPy — not just pure-Python", () => {
+    const p = buildSystemPrompt({ languages: ["python"] }, caps);
+    expect(p).toMatch(/loadPackage/);
+    expect(p).toMatch(/NumPy/);
+    expect(p).toMatch(/session-only|reset on reload/i);
+    // the old understatement ("pure-Python PyPI wheels, online only") is gone
+    expect(p).not.toMatch(/pure-Python PyPI wheels, online only/);
+  });
+});
+
 describe("ERDOU_MD_TEMPLATE", () => {
   it("is a seedable intro with an empty Project adaptations section", () => {
     expect(ERDOU_MD_TEMPLATE).toContain("# Running in Erdou");

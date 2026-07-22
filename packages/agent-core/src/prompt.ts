@@ -35,13 +35,30 @@ export interface EnvironmentCatalog {
   readonly available: readonly EnvironmentBrief[];
 }
 
-// Extend the app-supplied environment shape with the catalog, without owning
-// types.ts: the catalog is agent-core's type, delivered through the existing
+/**
+ * One skill available to the agent: a task playbook seeded under
+ * `/.skills/<name>/SKILL.md`. The app discovers these (built-in + project-local)
+ * and supplies them; agent-core only renders the pointer list — the body is read
+ * on demand via read_file (progressive disclosure), never inlined into the brief.
+ */
+export interface SkillBrief {
+  /** Skill id / folder name, e.g. "pptx". */
+  readonly name: string;
+  /** One line: what it does + when to use it. */
+  readonly description: string;
+  /** VFS path to the SKILL.md the agent reads to use it. */
+  readonly path: string;
+}
+
+// Extend the app-supplied environment shape with the catalog + skills, without
+// owning types.ts: these are agent-core's types, delivered through the existing
 // AgentOptions.environment channel that agent.ts already forwards.
 declare module "./types.js" {
   interface EnvironmentInfo {
     /** Environments the agent can switch between (+ the current one). */
     catalog?: EnvironmentCatalog;
+    /** Task-playbook skills discovered under /.skills/ (built-in + project-local). */
+    skills?: readonly SkillBrief[];
   }
 }
 
@@ -64,6 +81,7 @@ const ERDOU_ABOUT = [
   "- When the preview observation tools are available, verify your served app yourself after open_preview: preview_read reads the rendered DOM AND each element's key computed styles — confirm your CSS actually took effect (a <style>/<link> present in the DOM does NOT mean it applied; default computed values — transparent background, black text, block display — mean a rule is broken); preview_click clicks an element; preview_logs drains the page's console output and uncaught errors.",
   "- When a package_project tool is available, use it whenever the user asks to export, download, or hand off the project — it zips the project (minus node_modules and Erdou-internal state) and puts a Download button in front of the user.",
   "- When a delegate tool is available, you can fan out 1-3 sub-agents in parallel — each works one self-contained subtask in an isolated copy of the project, and its file changes merge back when it finishes (a file two sub-agents both change gets the later one's changes rejected). Delegate only genuinely independent subtasks that touch DIFFERENT files; do small or entangled work yourself.",
+  "- Erdou ships SKILLS — task playbooks under /.skills/<name>/SKILL.md (e.g. making a PowerPoint/Word/Excel/PDF file). When your task matches one, read that file FIRST and follow it (the SKILLS section below lists what is available); you can also add your own by dropping a folder there.",
   "- Design to fit this environment. When you write code or config that only exists BECAUSE of Erdou — binding 0.0.0.0, relative URLs, avoiding native/compiled deps, staying within the RAM cap — that is an Erdou adaptation; record it (see HOW TO WORK).",
 ];
 
@@ -100,6 +118,13 @@ things work differently here than on a traditional machine:
   and no \`apt\` / system installs at runtime.
 - **No host services.** No Docker, sudo, systemd, or long-lived daemons; the
   Linux VM is a real but slow (~10-100x) emulated 32-bit machine with limited RAM.
+- **Skills.** Erdou ships task playbooks under \`/.skills/<name>/\` (making
+  PowerPoint/Word/Excel/PDF files, etc.). The agent reads a skill's \`SKILL.md\`
+  before doing that kind of task; you can add your own by dropping a folder there.
+- **Python packages.** On the browser kernel \`pip\` loads Pyodide's prebuilt
+  wheels (NumPy/Pandas/SciPy/lxml/Pillow) natively plus pure-Python wheels from
+  PyPI; those installs are session-only (reset on reload). The Linux VM persists
+  installs but is slower.
 
 ## Project adaptations
 
@@ -160,6 +185,25 @@ function environmentsCatalogSection(env: EnvironmentInfo): string {
   return `\n${lines.join("\n")}`;
 }
 
+/**
+ * The SKILLS section: a pointer list of task playbooks the agent should read
+ * BEFORE doing that kind of task. Progressive disclosure — only name +
+ * one-line description + path here; the body is read on demand via read_file,
+ * never inlined. Data-driven from the app (`env.skills`); returns "" when none,
+ * so old callers are unaffected. The leading "\n" separates it from the prior
+ * section with a blank line.
+ */
+function skillsSection(env: EnvironmentInfo): string {
+  const skills = env.skills;
+  if (!skills || skills.length === 0) return "";
+  const lines = [
+    "SKILLS (task playbooks — when your task matches one, read its file FIRST and follow it)",
+    "- Erdou ships focused how-to guides for specific tasks (making a .pptx/.docx/.xlsx/.pdf, etc.). Each names the exact library and shows a working example. Read the matching SKILL.md before you start rather than guessing the API.",
+  ];
+  for (const s of skills) lines.push(`  - ${s.name} — ${s.description} → read ${s.path}`);
+  return `\n${lines.join("\n")}`;
+}
+
 function simulatedPrompt(env: EnvironmentInfo, caps: RuntimeCapabilities): string {
   const languages = languagesOf(env, caps);
   const extraCommands = env.commands ?? [];
@@ -172,7 +216,7 @@ function simulatedPrompt(env: EnvironmentInfo, caps: RuntimeCapabilities): strin
   const notAvailable: string[] = [];
   if (caps.packageManagers.length === 0) {
     notAvailable.push(
-      "System/OS package managers (apt, yum, brew, apk) — but `pip install` works via micropip (pure-Python PyPI wheels, online only; installs are session-only, reset on reload).",
+      "System/OS package managers (apt, yum, brew, apk) — but `pip install` works and is more capable than it looks: Pyodide prebuilt wheels including C-extension packages (NumPy, Pandas, SciPy, lxml, Pillow) load via loadPackage, and pure-Python PyPI packages via micropip. So you do NOT need to switch to a vm:* kernel just for NumPy/Pandas. Online only; installs are session-only and reset on reload.",
     );
   }
   notAvailable.push(
@@ -210,6 +254,7 @@ function simulatedPrompt(env: EnvironmentInfo, caps: RuntimeCapabilities): strin
     "",
     ...HOW_TO_WORK,
     environmentsCatalogSection(env),
+    skillsSection(env),
     env.notes ? `\nNOTES\n${env.notes}` : "",
   ]
     .filter((line) => line !== "")
@@ -257,6 +302,7 @@ function realOsPrompt(env: EnvironmentInfo, caps: RuntimeCapabilities): string {
     ...HOW_TO_WORK,
     "- Remember the slow CPU: verify with the cheapest command that proves the change.",
     environmentsCatalogSection(env),
+    skillsSection(env),
     env.notes ? `\nNOTES\n${env.notes}` : "",
   ]
     .filter((line) => line !== "")
