@@ -4,6 +4,7 @@ import { parseArtifactDetail, truncate, type Studio, type TraceLine } from "../l
 import { parseSubagentDetail, type SubagentDetail } from "../lib/delegate.js";
 import { formatByteSize } from "../lib/project-zip.js";
 import { ApprovalPrompt } from "./ApprovalPrompt.js";
+import { Markdown } from "./Markdown.js";
 import { Chevron } from "./ui/icons.js";
 
 const EXAMPLES = [
@@ -140,8 +141,13 @@ function TraceBlock({ line, studio }: { line: TraceLine; studio: Studio }) {
       // thinking" label, no dimmed monologue framing. No who marker either:
       // the user's turns are already visually distinct bubbles (.who/.you), so
       // the you/agent alternation stays legible without one. The TraceKind
-      // stays "thought" so persisted threads round-trip unchanged.
-      return <div className="msg agent">{line.text}</div>;
+      // stays "thought" so persisted threads round-trip unchanged. Rendered as
+      // Markdown (Claude emits it): bold/code/lists/headings/links.
+      return (
+        <div className="msg agent">
+          <Markdown text={line.text} />
+        </div>
+      );
     case "result":
       // Only reached for a result with no preceding tool call.
       return <ToolBlock result={line} />;
