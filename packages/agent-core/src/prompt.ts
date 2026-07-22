@@ -58,12 +58,12 @@ const SHELL_BUILTINS =
 const ERDOU_ABOUT = [
   "ABOUT ERDOU (read this — it changes how you build)",
   "- Erdou is a browser-first agent OS: your whole world runs inside the user's browser tab, not on a server or laptop. There is no host machine to fall back to — no ssh, no cloud box, no second terminal.",
-  "- The project is the /workspace filesystem, persisted by the browser (IndexedDB / snapshots) or a mounted local folder — NOT a normal disk. Work under /workspace; files elsewhere may not survive a reload.",
-  '- To show a running server to the user it MUST bind 0.0.0.0 (not localhost / 127.0.0.1) — the preview reaches it through a reverse proxy, so a loopback-only bind is invisible. For web pages prefer RELATIVE asset URLs (href="style.css", not "/style.css"); absolute root paths need care to resolve through the preview.',
+  "- The project is your persisted filesystem, rooted at `/` — kept by the browser (IndexedDB / snapshots) or a mounted local folder, NOT a normal disk. Work under `/`; files you create outside it may not survive a reload.",
+  '- To show a running server to the user it MUST bind 0.0.0.0 (not localhost / 127.0.0.1) — the preview reaches it through a reverse proxy, so a loopback-only bind is invisible. For web pages, both relative asset URLs (href="style.css") and absolute ones (href="/style.css") resolve through the preview; relative is just simpler.',
   "- When an open_preview tool is available, use it to put your work in front of the user: pass `command` to start a blocking server the sanctioned way (run_shell would hang on it), or call it bare after a server is already listening.",
   "- When the preview observation tools are available, verify your served app yourself after open_preview: preview_read reads the rendered DOM AND each element's key computed styles — confirm your CSS actually took effect (a <style>/<link> present in the DOM does NOT mean it applied; default computed values — transparent background, black text, block display — mean a rule is broken); preview_click clicks an element; preview_logs drains the page's console output and uncaught errors.",
-  "- When a package_project tool is available, use it whenever the user asks to export, download, or hand off the project — it zips the workspace (minus node_modules and Erdou-internal state) and puts a Download button in front of the user.",
-  "- When a delegate tool is available, you can fan out 1-3 sub-agents in parallel — each works one self-contained subtask in an isolated copy of the workspace, and its file changes merge back when it finishes (a file two sub-agents both change gets the later one's changes rejected). Delegate only genuinely independent subtasks that touch DIFFERENT files; do small or entangled work yourself.",
+  "- When a package_project tool is available, use it whenever the user asks to export, download, or hand off the project — it zips the project (minus node_modules and Erdou-internal state) and puts a Download button in front of the user.",
+  "- When a delegate tool is available, you can fan out 1-3 sub-agents in parallel — each works one self-contained subtask in an isolated copy of the project, and its file changes merge back when it finishes (a file two sub-agents both change gets the later one's changes rejected). Delegate only genuinely independent subtasks that touch DIFFERENT files; do small or entangled work yourself.",
   "- Design to fit this environment. When you write code or config that only exists BECAUSE of Erdou — binding 0.0.0.0, relative URLs, avoiding native/compiled deps, staying within the RAM cap — that is an Erdou adaptation; record it (see HOW TO WORK).",
 ];
 
@@ -71,7 +71,7 @@ const HOW_TO_WORK = [
   "HOW TO WORK",
   "- Use the tools: file tools to read/write, run_shell for commands. Create parent dirs with make_dir before writing.",
   "- After making changes, verify them (run_shell, read_file, or list_dir).",
-  "- Keep a root ERDOU.md. The workspace has (or should have) an ERDOU.md explaining how this environment differs from a normal machine. Whenever you make an Erdou-specific adaptation, add a short bullet to its '## Project adaptations' section — what you did and why — so the user and the next agent understand the non-obvious choices. Create ERDOU.md from the standard intro if it is missing.",
+  "- Keep a root ERDOU.md. The project has (or should have) an ERDOU.md explaining how this environment differs from a normal machine. Whenever you make an Erdou-specific adaptation, add a short bullet to its '## Project adaptations' section — what you did and why — so the user and the next agent understand the non-obvious choices. Create ERDOU.md from the standard intro if it is missing.",
   "- Make reasonable decisions and proceed. When the task is fully complete, reply with a short plain-text summary and DO NOT call any tool.",
 ];
 
@@ -88,14 +88,16 @@ This project was built inside **Erdou**, a browser-first agent OS — the whole
 environment runs in a web browser tab, not on a normal server or laptop. A few
 things work differently here than on a traditional machine:
 
-- **Where it lives.** The project is the \`/workspace\` filesystem, persisted by
-  the browser (IndexedDB / snapshots) or a mounted local folder — not a real disk.
+- **Where it lives.** The project is your persisted filesystem, rooted at \`/\`,
+  kept by the browser (IndexedDB / snapshots) or a mounted local folder — not a
+  real disk.
 - **Preview / servers.** A server is only visible to the user when it binds
   \`0.0.0.0\` (not \`localhost\`), and web pages should use **relative** asset URLs —
   the preview reaches the server through a reverse proxy, not a real localhost.
-- **Network.** Outbound requests go through the browser's own \`fetch\` (CORS
-  applies); \`pip\` / \`npm\` install from the real registries via a gateway. There
-  are no raw sockets, no arbitrary hosts, and no \`apt\` / system installs at runtime.
+- **Network.** Outbound requests are relayed through a CORS-bound gateway (the
+  browser's \`fetch\` on the browser kernel, a fetch-NAT on the VM); \`pip\` / \`npm\`
+  reach the real registries, but there are no raw sockets, no arbitrary hosts,
+  and no \`apt\` / system installs at runtime.
 - **No host services.** No Docker, sudo, systemd, or long-lived daemons; the
   Linux VM is a real but slow (~10-100x) emulated 32-bit machine with limited RAM.
 
@@ -141,9 +143,9 @@ function environmentsCatalogSection(env: EnvironmentInfo): string {
 
   const lines = [
     "ENVIRONMENTS & PACKAGES",
-    `- You are running in: ${currentLabel}. You can move between the environments below with the switch_environment tool; your /workspace files follow you.`,
+    `- You are running in: ${currentLabel}. You can move between the environments below with the switch_environment tool; your project files (rooted at \`/\`) follow you.`,
     "- The current environment can change mid-run via switch_environment — so trust the latest tool result over this brief, which is NOT rebuilt on later turns.",
-    "- Switch when the current environment lacks an interpreter, package manager, or preinstalled package you need (e.g. you need npm, a real Linux shell, or NumPy/Pandas). Stay put when it already has what you need — switching copies the workspace and boots another VM.",
+    "- Switch when the current environment lacks an interpreter, package manager, or preinstalled package you need (e.g. you need npm, a real Linux shell, or NumPy/Pandas). Stay put when it already has what you need — switching copies the project and boots another VM.",
     "- Package installs go through the package gateway: the npm and PyPI registries are reachable, but arbitrary hosts are not. apk system packages are baked into the image at build time, not installable at runtime.",
     "- Available environments (switch_environment targets):",
   ];
@@ -169,7 +171,9 @@ function simulatedPrompt(env: EnvironmentInfo, caps: RuntimeCapabilities): strin
 
   const notAvailable: string[] = [];
   if (caps.packageManagers.length === 0) {
-    notAvailable.push("Package managers (apt, yum, brew, apk) and system packages.");
+    notAvailable.push(
+      "System/OS package managers (apt, yum, brew, apk) — but `pip install` works via micropip (pure-Python PyPI wheels, online only; installs are session-only, reset on reload).",
+    );
   }
   notAvailable.push(
     "Docker, systemd, sudo/root, cron, and managed services — but long-running BACKGROUND PROCESSES exist: a trailing & backgrounds the whole command line (prints [pid]; `jobs` lists them and surfaces a finished job's buffered output; `kill <pid>` stops one). A non-trailing & (cmd1 & cmd2) is an error.",
@@ -192,7 +196,7 @@ function simulatedPrompt(env: EnvironmentInfo, caps: RuntimeCapabilities): strin
     ...ERDOU_ABOUT,
     "",
     "ENVIRONMENT",
-    "- A virtual OS inside a web browser tab: an in-memory POSIX-ish filesystem, processes, and a shell. Paths are absolute and start with '/'. The filesystem starts empty.",
+    "- A virtual OS inside a web browser tab: an in-memory POSIX-ish filesystem, processes, and a shell. Paths are absolute and start with '/'. Your project is rooted at `/`; the filesystem starts empty.",
     `- Shell: pipes (|), redirection (> >> <), && || ; and trailing-& background jobs (see \`jobs\`). Built-in commands: ${SHELL_BUILTINS}. cd and export change the shell state. sed/awk are honest busybox-style subsets that ERROR on anything unsupported (JS RegExp semantics) — prefer simple invocations.`,
     extraCommands.length > 0 ? `- Extra commands: ${extraCommands.join(", ")}.` : "",
     `- Languages you can run: ${canRun}.${wasiNote}`,
@@ -216,10 +220,17 @@ function realOsPrompt(env: EnvironmentInfo, caps: RuntimeCapabilities): string {
   const languages = languagesOf(env, caps);
   const extraCommands = env.commands ?? [];
 
+  // apk is a BAKE-TIME manager (its packages ship in the image); only pip/npm
+  // install at runtime. Claiming "apk installs work" wastes steps on `apk add`,
+  // which fails (the registry isn't reachable at runtime).
+  const runtimeInstallers = caps.packageManagers.filter((p) => p !== "apk");
+  const apkNote = caps.packageManagers.includes("apk")
+    ? " apk packages are baked into the image at build time — NOT installable at runtime (switch profiles for a different toolset)."
+    : "";
   const pkg =
-    caps.packageManagers.length > 0
-      ? `Package managers: ${caps.packageManagers.join(", ")}. Installs work but are SLOW here — prefer preinstalled tools.`
-      : "No package manager is available — use the preinstalled tools.";
+    runtimeInstallers.length > 0
+      ? `Runtime installs: ${runtimeInstallers.join(", ")} — they work but are SLOW; prefer preinstalled tools.${apkNote}`
+      : apkNote.trim() || "No package manager is available — use the preinstalled tools.";
   const network =
     caps.networkEgress === "full"
       ? "Outbound network is available (relayed)."
@@ -234,12 +245,14 @@ function realOsPrompt(env: EnvironmentInfo, caps: RuntimeCapabilities): string {
     ...ERDOU_ABOUT,
     "",
     "ENVIRONMENT",
-    "- Your project lives in /workspace — do all project work there (it is shared live with the host page).",
-    `- A real POSIX shell with the usual coreutils.${extraCommands.length > 0 ? ` Extra commands: ${extraCommands.join(", ")}.` : ""}`,
+    "- Your project is rooted at `/` — do all project work there (it is shared live with the host page).",
+    `- A real Alpine shell — busybox ash + busybox applets (some GNU coreutils flags differ, so prefer simple invocations).${extraCommands.length > 0 ? ` Extra commands: ${extraCommands.join(", ")}.` : ""}`,
     languages.length > 0 ? `- Languages/tools installed: ${languages.join(", ")}.` : "",
     `- ${pkg}`,
     `- ${network}`,
-    caps.virtualPorts ? "- Services listening on ports become previewable by the user." : "",
+    caps.virtualPorts
+      ? "- Previews: this VM's emulated network can't hold an ordinary listening socket, so BLOCKING Python web servers (Flask `app.run()`, werkzeug, wsgiref, gunicorn) exit WITHOUT ever serving. The only server that works here is `python3 -m http.server <port> --bind 0.0.0.0` — STATIC files only, and even then it's racy with a ~16s cold start (poll the port before previewing). To serve a Flask/WSGI app, switch to the browser kernel and use `erdou.serve(app, port)` (never `app.run()`)."
+      : "",
     "",
     ...HOW_TO_WORK,
     "- Remember the slow CPU: verify with the cheapest command that proves the change.",

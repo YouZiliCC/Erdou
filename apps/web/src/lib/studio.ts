@@ -382,6 +382,10 @@ export class Studio {
     // switch re-aims it via `setPreviewRuntime` instead of re-registering.
     void startPreviewProxy(this.runtime);
     this.runs = await loadRuns();
+    // Seed the id counter past the loaded runs BEFORE any new line is stamped
+    // (normalizeInterruptedRuns appends a marker), so nothing collides with a
+    // prior session's persisted ids.
+    this.reseedTraceIds();
     // D2: a stored run still marked "running" was interrupted by a reload/crash
     // mid-run (no run survives its session) — normalize it honestly and persist.
     if (this.normalizeInterruptedRuns()) await saveRuns(this.runs);
@@ -983,6 +987,7 @@ export class Studio {
   private hydrateRuns(folderRuns: Run[], mode: "merge" | "replace"): number {
     if (mode === "replace") {
       this.runs = [...folderRuns];
+      this.reseedTraceIds(); // folder runs came from other sessions — bump past their ids
       if (this.activeRunId !== null && !this.runs.some((r) => r.id === this.activeRunId)) this.activeRunId = null;
       return 0;
     }
@@ -998,6 +1003,7 @@ export class Studio {
     });
     const keptIds = new Set(kept.map((r) => r.id));
     this.runs = [...kept, ...folderRuns.filter((r) => !keptIds.has(r.id))];
+    this.reseedTraceIds(); // merged-in folder runs came from other sessions — bump past their ids
     if (this.activeRunId !== null && !this.runs.some((r) => r.id === this.activeRunId)) this.activeRunId = null;
     return kept.length;
   }
@@ -1362,6 +1368,22 @@ export class Studio {
     return { id: this.nextId++, kind, text, detail, ok, ts: Date.now() };
   }
 
+  /** Advance the trace-line id counter past every id currently in memory (loaded
+   *  runs, hydrated folder runs, the system log). `TraceLine.id` doubles as the
+   *  React reconciliation key AND the update key for id-based rewrites
+   *  (`makeSubagentReporter`), so ids MUST stay unique across every run held at
+   *  once. `nextId` resets to 1 each page load and prior sessions/other machines
+   *  also started at 1 — so without this, runs from different sessions carry
+   *  colliding ids and switching/replying mixes their chat lines. Call it
+   *  whenever runs enter memory (boot load, folder hydration). Idempotent — only
+   *  ever advances. */
+  private reseedTraceIds(): void {
+    let max = 0;
+    for (const r of this.runs) for (const l of r.trace) if (l.id > max) max = l.id;
+    for (const l of this.systemLog) if (l.id > max) max = l.id;
+    if (this.nextId <= max) this.nextId = max + 1;
+  }
+
   /** Append a system/terminal/mount message (not tied to any run). */
   logSystem(kind: TraceKind, text: string, detail?: string): void {
     this.systemLog = [...this.systemLog, this.line(kind, text, detail)].slice(-SYSTEM_LOG_LIMIT);
@@ -1600,7 +1622,9 @@ export class Studio {
     const startSnap = await this.runtime.createSnapshot();
     const changed = new Set<string>();
     const collect = (e: RuntimeEvent): void => {
-      if (e.type === "file.changed") changed.add(e.path);
+      // Skip package-manager / tool / VM-system output (node_modules, /root/.local,
+      // …) so `pip install`/`npm install` never reads as the agent's edits.
+      if (e.type === "file.changed" && !this.isNonProjectPath(e.path)) changed.add(e.path);
     };
     let unsub = this.runtime.subscribe(collect);
     this.repointRunDiff = () => {
@@ -1835,6 +1859,20 @@ export class Studio {
   }
 
   /** Diff the paths touched during a turn against the snapshot taken at its start. */
+  /** True for a changed path that is NOT project "truth" and must stay out of
+   *  the run diff: regenerable / tool-owned dirs (`node_modules`, `.git`,
+   *  `.erdou`) on any kernel — the same names export (project-zip) and
+   *  folder-sync exclude — plus, on the VM kernel, its baked / bind-mounted
+   *  system dirs (`VM_PRESERVE_DIRS`: bin/lib/usr/proc/dev/tmp/etc/root, where
+   *  pip's `/root/.local` and npm's caches live). Without this, a `pip install`
+   *  or `npm install` shows up as the agent's edits in Review/Diff. */
+  private isNonProjectPath(path: string): boolean {
+    const segs = path.split("/").filter(Boolean);
+    if (segs.some((s) => s === "node_modules" || s === ".git" || s === ".erdou")) return true;
+    if (this.kernelKind === "vm" && segs.length > 0 && VM_PRESERVE_DIRS.includes(segs[0]!)) return true;
+    return false;
+  }
+
   private async computeRunChanges(startSnap: Snapshot, changed: Set<string>): Promise<FileChange[]> {
     if (changed.size === 0) return [];
     const before = SnapshotReader.open(startSnap);
@@ -1871,7 +1909,11 @@ export class Studio {
         for (const f of this.liveFilesUnder(path)) paths.add(f);
       }
     }
-    return buildFileChanges(paths, (p) => before.read(p), after);
+    // Directory expansion can pull excluded files back in (a changed dir that
+    // contains node_modules / a VM system dir) — drop them here too, so the
+    // collect-time filter is airtight.
+    const projectPaths = new Set([...paths].filter((p) => !this.isNonProjectPath(p)));
+    return buildFileChanges(projectPaths, (p) => before.read(p), after);
   }
 
   /** Every FILE path under the live directory at `dirPath` (symlinks skipped —

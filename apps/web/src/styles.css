@@ -67,6 +67,10 @@ input, textarea { font-family: var(--mono); }
 .chip.running{color:var(--accent);border-color:color-mix(in srgb, var(--accent) 35%, transparent);}
 .chip.exited{color:var(--green);border-color:color-mix(in srgb, var(--green) 32%, transparent);}
 .chip.killed{color:var(--red);border-color:color-mix(in srgb, var(--red) 32%, transparent);}
+/* Environment chip while a task runs: locked (switch is disabled until idle) —
+   the padlock + not-allowed cursor make the reason legible; the title explains. */
+.chip.locked{cursor:not-allowed;}
+.chip.locked .chip-lock{opacity:.75;flex:0 0 auto;}
 .btn { font-size:12px; border:1px solid var(--border); background:var(--elev); color:var(--ink); border-radius:6px; padding:5px 11px; cursor:pointer; }
 .btn.primary { background:var(--accent); color:var(--on-accent); border-color:transparent; font-weight:600; }
 .btn.ghost { background:transparent; color:var(--muted); }

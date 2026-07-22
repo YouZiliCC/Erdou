@@ -52,7 +52,12 @@ export function Conversation({ studio, onExample }: { studio: Studio; onExample:
 
   return (
     <>
-      <div className="tr" ref={ref}>
+      {/* Key the transcript by run.id so switching threads REMOUNTS it: trace
+          lines are keyed by TraceLine.id, and runs from different sessions can
+          carry colliding ids (see Studio.reseedTraceIds) — without a remount,
+          React would reuse the previous thread's block instances/scroll at the
+          colliding keys and mix the two threads' chat. */}
+      <div className="tr" ref={ref} key={run.id}>
         <div className="msg">
           <div className="who">you</div>
           <div className="you">{run.task}</div>

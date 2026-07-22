@@ -110,7 +110,7 @@ function runServeDetached(runtime: ServeRuntime, commandLine: string): Promise<R
               pid,
               code: 0,
               stdout,
-              stderr: exitedWithoutPortMessage(stdout, stderr),
+              stderr: exitedWithoutPortMessage(stdout, stderr, commandLine),
             });
             return;
           }
@@ -130,9 +130,19 @@ const STDOUT_TAIL_LINES = 10;
  *  opening a port (`ls`, a build script, …) — instead of "exited with code 0"
  *  presented as an error. Carries a tail of the command's own output so the
  *  user sees what it did instead of a bare aphorism. */
-function exitedWithoutPortMessage(stdout: string, stderr: string): string {
+function exitedWithoutPortMessage(stdout: string, stderr: string, commandLine: string): string {
   let msg =
     "Command exited without opening a port — a preview needs a server that binds 0.0.0.0 and keeps running.";
+  // This path is realOs (VM) only. A BLOCKING Python web server can't hold a
+  // listening socket on the VM's emulated network — Flask app.run()/werkzeug/
+  // wsgiref/gunicorn exit without ever serving. Redirect instead of leaving a
+  // self-contradictory "exited with code 0".
+  const isPy = /\bpython[0-9.]*\b/.test(commandLine);
+  const wsgiish = /app\.run|flask|werkzeug|wsgiref|gunicorn|uvicorn|\.py\b/i.test(commandLine);
+  if (isPy && wsgiish && !/http\.server/.test(commandLine)) {
+    msg +=
+      "\n\nBlocking Python web servers (Flask app.run, werkzeug, wsgiref, gunicorn) don't hold a listening socket on the VM kernel — they exit without serving. Serve a WSGI/Flask app on the BROWSER kernel with `erdou.serve(app, port)` (not app.run()), or serve STATIC output here with `python3 -m http.server <port> --bind 0.0.0.0`.";
+  }
   const tail = stdout.trimEnd().split("\n").slice(-STDOUT_TAIL_LINES).join("\n").trim();
   if (tail) msg += `\n\nstdout (tail):\n${tail}`;
   const err = stderr.trim();

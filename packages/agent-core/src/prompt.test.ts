@@ -51,12 +51,16 @@ describe("buildSystemPrompt (real OS)", () => {
     snapshotCost: "cheap" as const,
   };
 
-  it("frames a REAL Linux machine, /workspace, package managers and the speed warning", () => {
+  it("frames a REAL Linux machine, project root, package managers and the speed warning", () => {
     const p = buildSystemPrompt({}, realCaps);
     expect(p).toMatch(/REAL Linux/);
     expect(p).not.toMatch(/simulated/i);
-    expect(p).toContain("/workspace");
-    expect(p).toContain("apk, npm, pip");
+    // The project root is `/` on every kernel (the VM chroots so `/` IS the
+    // project); the prompt frames `/` as the root, and never mentions /workspace.
+    expect(p).toMatch(/rooted at `?\//);
+    expect(p).not.toContain("workspace"); // no lingering /workspace framing
+    expect(p).toContain("npm, pip"); // runtime installers…
+    expect(p).toMatch(/apk.*baked into the image/i); // …apk is bake-time only, not "installs work"
     expect(p).toMatch(/slower than native/i);
     expect(p).toMatch(/2048MB/);
   });
@@ -158,7 +162,7 @@ describe("buildSystemPrompt (environments catalog)", () => {
   it("tells the model when/how to switch and to trust the latest tool result (M3)", () => {
     const p = buildSystemPrompt({ catalog }, realCaps);
     expect(p).toMatch(/switch_environment/);
-    expect(p).toMatch(/workspace/i); // files follow the switch
+    expect(p).toMatch(/project files.*follow you/i); // files follow the switch
     expect(p).toMatch(/change.*mid-run/i);
     expect(p).toMatch(/latest tool result/i);
   });
@@ -200,7 +204,7 @@ describe("Erdou environment orientation (both kernels)", () => {
       const p = buildSystemPrompt({}, c);
       expect(p).toMatch(/When a delegate tool is available/);
     expect(p).toMatch(/When the preview observation tools are available/);
-      expect(p).toMatch(/isolated copy of the workspace/i);
+      expect(p).toMatch(/isolated copy of the project/i);
       expect(p).toMatch(/DIFFERENT files/);
     });
   }

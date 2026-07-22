@@ -38,9 +38,25 @@ export function KernelToggle({ studio }: { studio: Studio }) {
   }
   // Plan-review I2: no switching mid-run. Show a static (non-interactive) chip
   // while a run is active instead of the interactive Select, so the user can't
-  // start a swap that switchEnvironment would reject anyway.
+  // start a swap that switchEnvironment would reject anyway. It carries a lock
+  // glyph + tooltip so the reason is legible — otherwise the environment name
+  // just sits as dead text and the switch (which fully works once idle) reads as
+  // "stuck on the VM".
   if (running) {
-    return <span className="chip" aria-label="Environment (locked during run)">{currentLabel}</span>;
+    return (
+      <span
+        className="chip locked"
+        title="Environment is locked while a task runs — stop the task to switch (you can always return to the Browser kernel then)."
+        aria-label="Environment locked while a task runs — stop the task to switch"
+      >
+        <svg className="chip-lock" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor"
+          strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect x="4" y="11" width="16" height="9" rx="2" />
+          <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+        </svg>
+        {currentLabel}
+      </span>
+    );
   }
   return (
     <Select
