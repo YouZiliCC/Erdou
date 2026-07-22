@@ -3,6 +3,7 @@ import { ModelGateway, type ModelConfig, type ChatMessage } from "@erdou/model-g
 import { CodingAgent, ERDOU_MD_TEMPLATE, type AgentEvent, type ApprovalRequest } from "@erdou/agent-core";
 import { createSwitchEnvironmentTool } from "@erdou/agent-tools";
 import { ENVIRONMENTS, environmentById } from "./environments.js";
+import { BUILTIN_SKILLS, scanSkills } from "./skills.js";
 import { loadApprovalMode, saveApprovalMode, loadModel, saveModel, type ApprovalMode } from "./model-config.js";
 import { getTheme, applyTheme } from "./theme.js";
 import type { RuntimeEvent, ProcessInfo, Snapshot, Runtime, FileSystemApi, Unsubscribe } from "@erdou/runtime-contract";
@@ -1534,6 +1535,7 @@ export class Studio {
     await saveRuns(this.runs).catch((err) => this.logSystem("error", "Could not persist the new run", asMessage(err)));
     this.scheduleFolderStateSave();
     this.seedEnvNotes();
+    this.seedSkills();
     await this.runAgentTurn(run, task, model, approvalMode);
   }
 
@@ -1594,6 +1596,26 @@ export class Studio {
     if (this.fs.exists("/ERDOU.md")) return;
     this.fs.writeFile("/ERDOU.md", ERDOU_MD_TEMPLATE);
     this.fsVersion++;
+  }
+
+  /** Seed the built-in document skills into /.skills/ so the agent can read a
+   *  SKILL.md the same way it reads any project file (progressive disclosure —
+   *  the prompt only lists name+description). Never overwrites (a user's edited
+   *  or added skill wins). Called right after seedEnvNotes at startRun, i.e.
+   *  BEFORE the run snapshot, so the seed is not attributed to the agent as a
+   *  diff. */
+  private seedSkills(): void {
+    let wrote = false;
+    for (const skill of BUILTIN_SKILLS) {
+      for (const [rel, content] of Object.entries(skill.files)) {
+        const path = `/.skills/${skill.name}/${rel}`;
+        if (this.fs.exists(path)) continue;
+        this.fs.mkdir(path.slice(0, path.lastIndexOf("/")), { recursive: true });
+        this.fs.writeFile(path, content);
+        wrote = true;
+      }
+    }
+    if (wrote) this.fsVersion++;
   }
 
   /**
@@ -1674,6 +1696,11 @@ export class Studio {
       for (const p of paths) changed.delete(p);
     };
 
+    // Discover skills fresh each turn (a mid-run reply may run after the user
+    // dropped a new one). Malformed skills are surfaced, not silently dropped.
+    const { skills: skillBriefs, warnings: skillWarnings } = scanSkills(this.fs);
+    for (const w of skillWarnings) this.logSystem("system", w);
+
     const agent = new CodingAgent({
       // The delegating facade (M1), NOT `this.runtime` — a mid-run switch
       // re-points which concrete runtime the agent's tools hit at call time.
@@ -1706,6 +1733,10 @@ export class Studio {
             speed: e.speed,
           })),
         },
+        // Task-playbook skills discovered in /.skills/ (built-in + any the user
+        // dropped in). agent-core renders these as the SKILLS pointer list; the
+        // agent reads a skill's SKILL.md on demand. Duck-typed like the catalog.
+        skills: skillBriefs,
       },
       // The agent can move itself to an environment with the interpreter /
       // package manager the task needs; the callback performs the sanctioned

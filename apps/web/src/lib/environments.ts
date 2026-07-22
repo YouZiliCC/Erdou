@@ -39,7 +39,7 @@ const INSTALL_RECIPES: Record<string, string> = {
 const SWITCH_GUIDANCE: Record<VmProfileId, string> = {
   base: "Smallest Linux VM. Real Alpine shell with Python + pip. Pick when you need a real Linux but not Node.js or the scientific stack.",
   node: "Alpine with Node.js + npm (plus Python + pip). Pick for JavaScript/Node projects or when npm installs are needed.",
-  sci: "Alpine with NumPy + Pandas preinstalled (plus pip). First `import pandas` takes ~50 s per process. Pick for data work beyond pure-Python wheels.",
+  sci: "Alpine with NumPy + Pandas preinstalled (plus pip). Slower than the browser kernel — first `import pandas` takes ~50 s per process — so prefer the browser kernel for NumPy/Pandas; pick this only when you need installs to persist across reloads or a package Pyodide doesn't provide.",
 };
 
 function vmDescriptor(profile: VmProfileId): EnvironmentDescriptor {
@@ -69,12 +69,12 @@ export const ENVIRONMENTS: readonly EnvironmentDescriptor[] = [
     label: "Browser kernel",
     speed: "instant — starts in milliseconds, runs at native browser speed",
     interpreters: ["python (Pyodide)", "wasi"],
-    packageManagers: ["pip (micropip)"],
+    packageManagers: ["pip (Pyodide wheels + micropip)"],
     installRecipes: [
-      "pip install <package> — micropip: pure-Python wheels from PyPI only; installs reset on page reload.",
+      "pip install <package> — Pyodide prebuilt wheels (NumPy/Pandas/SciPy/lxml/Pillow…) load natively via loadPackage, plus pure-Python PyPI wheels via micropip. The document libraries (python-pptx, python-docx, openpyxl, fpdf2) are pre-bundled and install OFFLINE. Installs are session-only (reset on page reload).",
     ],
     switchGuidance:
-      "Default. Fastest start, no real Linux. Switch to a Linux VM profile for a real shell, npm, or packages with native code.",
+      "Default, and the right home for most Python — including NumPy/Pandas, which run natively here. Fastest start, no real Linux. Switch to a Linux VM only for a real shell, npm, a package with native code Pyodide lacks, or installs that must persist across reloads.",
   },
   vmDescriptor("base"),
   vmDescriptor("node"),
