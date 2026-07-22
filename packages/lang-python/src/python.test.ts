@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { Vfs, PipeStream } from "@erdou/runtime-browser";
 import type { ExecContext } from "@erdou/runtime-contract";
-import { createPythonRunners, type PipInstallHooks } from "./python.js";
+import { createPythonRunners, type PipInstallHooks, type LocalWheelResolver } from "./python.js";
 import type { EmscriptenFS } from "./pyodide.js";
 
 // A minimal in-memory Emscripten-like FS for the mock.
@@ -101,13 +101,21 @@ class MockPyodide {
     }
     return [];
   }
+  wheelInstallFails = false;
   pyimport(name: string): unknown {
     this.events.push("pyimport:" + name);
     return {
-      install: async (req: string) => {
-        this.events.push("micropip.install:" + req);
-        const bare = req.split(/[=<>!~[]/)[0] ?? req;
-        if (this.offline || !this.pypi.has(bare)) throw new Error(`Can't fetch metadata for '${req}'.`);
+      install: async (req: string | readonly string[]) => {
+        if (Array.isArray(req)) {
+          // A bundled package's local wheel closure — vetted URLs, one call.
+          this.events.push("micropip.install:[" + req.join(",") + "]");
+          if (this.wheelInstallFails) throw new Error("wheel install failed");
+          return;
+        }
+        const single = req as string;
+        this.events.push("micropip.install:" + single);
+        const bare = single.split(/[=<>!~[]/)[0] ?? single;
+        if (this.offline || !this.pypi.has(bare)) throw new Error(`Can't fetch metadata for '${single}'.`);
         this.loadedPackages[bare] = "pypi";
       },
       destroy: () => {},
@@ -134,6 +142,11 @@ const makeRunners = (py: MockPyodide) => createPythonRunners({ load: async () =>
 // channel, not a test-only shortcut.
 const makeHookedRunners = (py: MockPyodide, pipInstalls: PipInstallHooks) =>
   createPythonRunners({ load: Object.assign(async () => py, { pipInstalls }) });
+
+// The local-wheel resolver ALSO rides on the loader (`load.localWheels`) — the
+// same end-to-end channel the app uses.
+const makeWheelRunners = (py: MockPyodide, localWheels: LocalWheelResolver) =>
+  createPythonRunners({ load: Object.assign(async () => py, { localWheels }) });
 
 describe("python runner (plumbing, mock Pyodide)", () => {
   it("reads a script from the fs, captures stdout, sets argv, returns exit code", async () => {
@@ -450,5 +463,58 @@ describe("pip runner (mock Pyodide)", () => {
     pipCtx.stdout.end();
     expect(await pyCtx.stdout.text()).toBe("py-out\n");
     expect(await pipCtx.stdout.text()).not.toContain("py-out");
+  });
+});
+
+describe("pip local wheel index (bundled document libs, offline)", () => {
+  const PPTX = ["/wheels/python_pptx-1.0.2-py3-none-any.whl", "/wheels/xlsxwriter-3.2.9-py2.py3-none-any.whl", "/wheels/typing_extensions-4.16.0-py3-none-any.whl"];
+  const OPENPYXL = ["/wheels/openpyxl-3.1.5-py2.py3-none-any.whl", "/wheels/et_xmlfile-2.0.0-py3-none-any.whl"];
+  const WHEELS: Record<string, readonly string[]> = { "python-pptx": PPTX, openpyxl: OPENPYXL };
+  const resolver: LocalWheelResolver = (req) => {
+    const bare = req.split(/[=<>!~[ ]/)[0] ?? req;
+    return WHEELS[bare] ?? null;
+  };
+
+  it("installs a bundled package from its local wheel closure in ONE micropip call, never as a plain loadPackage name", async () => {
+    const py = new MockPyodide();
+    const pip = makeWheelRunners(py, resolver).pip;
+    const { ctx, stdout } = makeCtx(["pip", "install", "python-pptx"], new Vfs({ clock: () => 0 }));
+    expect(await pip(ctx)).toBe(0);
+    stdout.end();
+    expect(await stdout.text()).toContain("Successfully installed python-pptx");
+    expect(py.events).toContain("micropip.install:[" + PPTX.join(",") + "]");
+    // never treated as a prebuilt distro name
+    expect(py.events.some((e) => e.startsWith("loadPackage:python-pptx"))).toBe(false);
+    // only micropip's own load + the wheel install — no per-name PyPI installs
+    expect(py.events.filter((e) => e.startsWith("micropip.install:")).length).toBe(1);
+  });
+
+  it("mixes a bundled package with an external one: local wheels for the bundled, the normal path for the rest", async () => {
+    const py = new MockPyodide();
+    py.pypi.add("requests");
+    const pip = makeWheelRunners(py, resolver).pip;
+    const { ctx } = makeCtx(["pip", "install", "openpyxl", "requests"], new Vfs({ clock: () => 0 }));
+    expect(await pip(ctx)).toBe(0);
+    expect(py.events).toContain("micropip.install:[" + OPENPYXL.join(",") + "]");
+    expect(py.events).toContain("micropip.install:requests"); // external via the pypi fallback
+  });
+
+  it("with no resolver, behavior is unchanged (a bundled name would route to loadPackage/micropip)", async () => {
+    const py = new MockPyodide();
+    py.prebuilt.add("openpyxl");
+    const pip = makeRunners(py).pip; // no localWheels attached
+    const { ctx } = makeCtx(["pip", "install", "openpyxl"], new Vfs({ clock: () => 0 }));
+    expect(await pip(ctx)).toBe(0);
+    expect(py.events).toContain("loadPackage:openpyxl"); // old behavior, no local-wheel path
+  });
+
+  it("fails (exit 1) with a detailed message when the bundled wheel install rejects", async () => {
+    const py = new MockPyodide();
+    py.wheelInstallFails = true;
+    const pip = makeWheelRunners(py, resolver).pip;
+    const { ctx, stderr } = makeCtx(["pip", "install", "openpyxl"], new Vfs({ clock: () => 0 }));
+    expect(await pip(ctx)).toBe(1);
+    stderr.end();
+    expect(await stderr.text()).toMatch(/pip: failed to install 'openpyxl'/);
   });
 });

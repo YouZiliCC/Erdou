@@ -72,14 +72,30 @@ export interface PipInstallHooks {
 }
 
 /**
- * Loader for the shared Pyodide instance. The install hooks ride ON the loader
- * (`load.pipInstalls`) rather than as sibling options: the app's registration
- * seam (apps/web `registerLanguages`) forwards ONLY the loader into this
- * factory, so the function value is the one channel that reaches it end-to-end
- * — hooks passed any other way would be dropped at that seam. A plain
- * `() => Promise<PipPyodide>` (no hooks attached) is a valid loader.
+ * Resolves a `pip install` requirement to a local wheel closure: given the raw
+ * argv requirement (e.g. `python-pptx` or `python-pptx==1.0.2`), returns the
+ * ordered list of wheel URLs — the package plus its pure-Python dependency
+ * closure — to hand micropip, or `null` when the package is not bundled. The
+ * app owns the manifest and normalization; this package only calls the function
+ * (layering invariant). When it returns URLs, pip installs from them (offline,
+ * version-locked) and lets micropip pull native deps (lxml/Pillow) from the
+ * Pyodide lockfile; when it returns null, pip uses the loadPackage/micropip path.
  */
-export type PipPyodideLoader = (() => Promise<PipPyodide>) & { pipInstalls?: PipInstallHooks };
+export type LocalWheelResolver = (requirement: string) => readonly string[] | null;
+
+/**
+ * Loader for the shared Pyodide instance. The install hooks and the local-wheel
+ * resolver ride ON the loader (`load.pipInstalls`, `load.localWheels`) rather
+ * than as sibling options: the app's registration seam (apps/web
+ * `registerLanguages`) forwards ONLY the loader into this factory, so the
+ * function value is the one channel that reaches them end-to-end — anything
+ * passed another way would be dropped at that seam. A plain
+ * `() => Promise<PipPyodide>` (no extras attached) is a valid loader.
+ */
+export type PipPyodideLoader = (() => Promise<PipPyodide>) & {
+  pipInstalls?: PipInstallHooks;
+  localWheels?: LocalWheelResolver;
+};
 
 export interface PythonRuntimeOptions {
   load: PipPyodideLoader;
@@ -133,8 +149,15 @@ export function createPythonRunners(opts: PythonRuntimeOptions): PythonRunners {
 
   return {
     python: serialize(pythonExecutor(getPyodide, notices)),
-    pip: serialize(pipExecutor(getPyodide, notices)),
+    pip: serialize(pipExecutor(getPyodide, notices, opts.load.localWheels)),
   };
+}
+
+/** The micropip surface pip uses. `install` takes a single requirement or a
+ *  list (a bundled package's local wheel closure installs in one call). */
+interface Micropip {
+  install(requirement: string | readonly string[]): Promise<unknown>;
+  destroy(): void;
 }
 
 /**
@@ -238,7 +261,11 @@ const PLAIN_NAME = /^[A-Za-z0-9._-]+$/;
  * names via the lock file, so it never fakes success). `list` reads
  * `loadedPackages`. Anything else errors — no fake success.
  */
-function pipExecutor(getPyodide: () => Promise<PipPyodide>, notices: InstallNotices): Executor {
+function pipExecutor(
+  getPyodide: () => Promise<PipPyodide>,
+  notices: InstallNotices,
+  resolveWheels?: LocalWheelResolver,
+): Executor {
   return async (ctx) => {
     notices.restoreHint(ctx);
     const args = ctx.argv.slice(1);
@@ -291,24 +318,55 @@ function pipExecutor(getPyodide: () => Promise<PipPyodide>, notices: InstallNoti
     };
     const detail = (): string => (loadErrors.length > 0 ? `\n${loadErrors.join("\n")}` : "");
 
-    // `loadedPackages` is a plain object — Object.hasOwn, never `in`, or
-    // Object.prototype keys (`constructor`, `toString`…) read as installed.
-    const preloaded = pkgs.filter((p) => Object.hasOwn(py.loadedPackages, p));
-    const plain = pkgs.filter((p) => PLAIN_NAME.test(p));
-    if (plain.length > 0) await py.loadPackage(plain, loadOpts);
-    const missing = pkgs.filter((p) => !Object.hasOwn(py.loadedPackages, p));
-
-    if (missing.length > 0) {
+    // micropip loads at most once (bundled wheels AND the pypi fallback need it).
+    let micropip: Micropip | undefined;
+    const getMicropip = async (): Promise<Micropip | null> => {
+      if (micropip) return micropip;
       await py.loadPackage("micropip", loadOpts);
-      if (!Object.hasOwn(py.loadedPackages, "micropip")) {
-        ctx.stderr.write(`pip: cannot load micropip from the Pyodide CDN — is the network available?${detail()}\n`);
-        return 1;
+      if (!Object.hasOwn(py.loadedPackages, "micropip")) return null;
+      micropip = py.pyimport("micropip") as Micropip;
+      return micropip;
+    };
+
+    // Local wheel index: a bundled requirement installs from its same-origin
+    // wheel closure (offline, version-locked) via one micropip call; micropip
+    // still pulls native deps (lxml/Pillow) from the Pyodide lockfile. Anything
+    // not bundled flows through the loadPackage → micropip path below.
+    const bundled = resolveWheels ? pkgs.filter((p) => resolveWheels(p) !== null) : [];
+    const external = pkgs.filter((p) => !bundled.includes(p));
+
+    try {
+      if (bundled.length > 0) {
+        const urls = [...new Set(bundled.flatMap((p) => resolveWheels!(p)!))];
+        const mp = await getMicropip();
+        if (!mp) {
+          ctx.stderr.write(`pip: cannot load micropip from the Pyodide CDN — is the network available?${detail()}\n`);
+          return 1;
+        }
+        try {
+          await mp.install(urls);
+        } catch (err) {
+          ctx.stderr.write(`pip: failed to install '${bundled.join(" ")}': ${message(err)}${detail()}\n`);
+          return 1;
+        }
       }
-      const micropip = py.pyimport("micropip") as { install(requirement: string): Promise<unknown>; destroy(): void };
-      try {
+
+      // `loadedPackages` is a plain object — Object.hasOwn, never `in`, or
+      // Object.prototype keys (`constructor`, `toString`…) read as installed.
+      const preloaded = external.filter((p) => Object.hasOwn(py.loadedPackages, p));
+      const plain = external.filter((p) => PLAIN_NAME.test(p));
+      if (plain.length > 0) await py.loadPackage(plain, loadOpts);
+      const missing = external.filter((p) => !Object.hasOwn(py.loadedPackages, p));
+
+      if (missing.length > 0) {
+        const mp = await getMicropip();
+        if (!mp) {
+          ctx.stderr.write(`pip: cannot load micropip from the Pyodide CDN — is the network available?${detail()}\n`);
+          return 1;
+        }
         for (const pkg of missing) {
           try {
-            await micropip.install(pkg);
+            await mp.install(pkg);
           } catch (err) {
             const msg = message(err);
             const hint = msg.includes("Can't fetch metadata")
@@ -318,19 +376,19 @@ function pipExecutor(getPyodide: () => Promise<PipPyodide>, notices: InstallNoti
             return 1;
           }
         }
-      } finally {
-        micropip.destroy();
       }
-    }
 
-    const fresh = pkgs.filter((p) => !preloaded.includes(p));
-    if (preloaded.length > 0) ctx.stdout.write(`Requirement already satisfied: ${preloaded.join(" ")}\n`);
-    if (fresh.length > 0) ctx.stdout.write(`Successfully installed ${fresh.join(" ")}\n`);
-    // Exit 0 means every requested requirement is present in this session —
-    // report them ALL (not just `fresh`: a name preloaded as another install's
-    // dependency still belongs in the next session's restore hint).
-    notices.installed(ctx, pkgs);
-    return 0;
+      const fresh = pkgs.filter((p) => !preloaded.includes(p));
+      if (preloaded.length > 0) ctx.stdout.write(`Requirement already satisfied: ${preloaded.join(" ")}\n`);
+      if (fresh.length > 0) ctx.stdout.write(`Successfully installed ${fresh.join(" ")}\n`);
+      // Exit 0 means every requested requirement is present in this session —
+      // report them ALL (not just `fresh`: a name preloaded as another install's
+      // dependency, or a bundled wheel, still belongs in the restore hint).
+      notices.installed(ctx, pkgs);
+      return 0;
+    } finally {
+      micropip?.destroy();
+    }
   };
 }
 
