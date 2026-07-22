@@ -6,7 +6,7 @@ const dec = new TextDecoder();
 const bytes = (s: string): Uint8Array => new TextEncoder().encode(s);
 
 describe("serializeHttpRequest", () => {
-  it("emits a request line, a synthesized Host, forced Connection: close, headers, and body", () => {
+  it("emits a request line, a synthesized Host, an authoritative Content-Length, forced Connection: close, headers, and body", () => {
     const req: HttpRequest = {
       method: "post",
       url: "/api?q=1",
@@ -18,6 +18,7 @@ describe("serializeHttpRequest", () => {
       "POST /api?q=1 HTTP/1.1\r\n" +
         "Host: erdou.local\r\n" +
         "content-type: application/json\r\n" +
+        "Content-Length: 2\r\n" +
         "Connection: close\r\n" +
         "\r\n" +
         "{}",
@@ -29,6 +30,42 @@ describe("serializeHttpRequest", () => {
     const out = dec.decode(serializeHttpRequest(req));
     expect(out).toContain("Host: example.com\r\n");
     expect(out).not.toContain("Host: erdou.local");
+  });
+
+  // Regression: the preview SW forwards the request body but never a
+  // Content-Length (a forbidden header the browser hides from a Service
+  // Worker). A JSON POST must still reach the guest with a correct
+  // Content-Length derived from the body, or the server can't frame it (the
+  // reported "JSON-body POST hangs, no-body POST works" preview bug).
+  it("sets Content-Length from the body even when the caller supplied none (the SW-drops-it case)", () => {
+    const req: HttpRequest = {
+      method: "POST",
+      url: "/api/guess",
+      headers: { "content-type": "application/json" }, // no content-length — as the SW delivers it
+      body: bytes('{"number":"50"}'),
+    };
+    const out = dec.decode(serializeHttpRequest(req));
+    expect(out).toContain("Content-Length: 15\r\n"); // '{"number":"50"}' is 15 bytes
+    expect(out.endsWith('{"number":"50"}')).toBe(true);
+  });
+
+  it("overrides a stale caller-supplied Content-Length (and drops Transfer-Encoding) with the real body length", () => {
+    const req: HttpRequest = {
+      method: "PUT",
+      url: "/x",
+      headers: { "content-length": "999", "transfer-encoding": "chunked" },
+      body: bytes("hello"),
+    };
+    const out = dec.decode(serializeHttpRequest(req));
+    expect(out).toContain("Content-Length: 5\r\n");
+    expect(out).not.toContain("999");
+    expect(out.toLowerCase()).not.toContain("transfer-encoding");
+  });
+
+  it("adds no Content-Length for an empty body (a no-body POST is unchanged — it already worked)", () => {
+    const req: HttpRequest = { method: "POST", url: "/api/new-game", headers: {}, body: new Uint8Array() };
+    const out = dec.decode(serializeHttpRequest(req));
+    expect(out.toLowerCase()).not.toContain("content-length");
   });
 });
 

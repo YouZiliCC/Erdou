@@ -74,21 +74,36 @@ function dechunk(b: Uint8Array): Uint8Array {
 }
 
 /** Serialize a contract HttpRequest to HTTP/1.1 wire bytes. Forces
- *  `Connection: close` (per-request connections) and synthesizes a Host header
- *  if the caller supplied none. */
+ *  `Connection: close` (per-request connections), synthesizes a Host header if
+ *  the caller supplied none, and sets `Content-Length` AUTHORITATIVELY from the
+ *  body it actually appends.
+ *
+ *  The Content-Length is derived from `req.body`, NOT trusted from the caller's
+ *  headers, because `Content-Length` is a forbidden header name the browser
+ *  hides from a Service Worker — the preview SW forwards the request body but
+ *  can never see (and so never carries) its Content-Length. Without this, a
+ *  POST/PUT with a JSON body reached the guest server with no way to frame the
+ *  body, so it read an empty body or blocked waiting for bytes it thought were
+ *  coming (a hung request; a no-body POST was unaffected). Any incoming
+ *  `content-length`/`transfer-encoding` is dropped so a stale value from the
+ *  caller can never contradict the body we send. */
 export function serializeHttpRequest(req: HttpRequest): Uint8Array {
   const method = req.method.toUpperCase();
+  const body = req.body ?? new Uint8Array();
   const entries = Object.entries(req.headers);
   const hasHost = entries.some(([k]) => k.toLowerCase() === "host");
   const lines = [`${method} ${req.url} HTTP/1.1`];
   if (!hasHost) lines.push("Host: erdou.local");
   for (const [k, v] of entries) {
-    if (k.toLowerCase() === "connection") continue; // forced below
+    const lk = k.toLowerCase();
+    // `connection` and the body-framing headers are set by us below, from the
+    // actual body — never forwarded from the caller.
+    if (lk === "connection" || lk === "content-length" || lk === "transfer-encoding") continue;
     lines.push(`${k}: ${v}`);
   }
+  if (body.length > 0) lines.push(`Content-Length: ${body.length}`);
   lines.push("Connection: close");
   const head = new TextEncoder().encode(lines.join("\r\n") + "\r\n\r\n");
-  const body = req.body ?? new Uint8Array();
   const out = new Uint8Array(head.length + body.length);
   out.set(head, 0);
   out.set(body, head.length);
