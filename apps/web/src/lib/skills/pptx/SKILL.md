@@ -9,8 +9,9 @@ Use this when the task is to generate or edit a PowerPoint presentation.
 
 ## Setup
 
-`python-pptx` is pre-bundled in Erdou, so this installs offline and fast on the
-browser kernel:
+`python-pptx` is pre-bundled in Erdou — the library installs from a local wheel
+(no PyPI round-trip); its `lxml` and `Pillow` dependencies load from the Pyodide
+CDN on first use:
 
     pip install python-pptx
 

@@ -6,7 +6,8 @@ description: Create or edit Excel (.xlsx) workbooks with openpyxl
 # Making Excel files (.xlsx)
 
 Use this when the task is to generate or edit a spreadsheet. `openpyxl` is pure
-Python (no native dependency), so it installs FULLY offline on the browser kernel.
+Python (no native dependency) and pre-bundled, so it installs from a local wheel
+with no PyPI round-trip.
 
 ## Setup
 

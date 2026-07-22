@@ -9,7 +9,8 @@ Use this when the task is to generate or edit a Word document.
 
 ## Setup
 
-`python-docx` is pre-bundled in Erdou (installs offline on the browser kernel):
+`python-docx` is pre-bundled in Erdou — the library installs from a local wheel
+(no PyPI round-trip); its `lxml` dependency loads from the Pyodide CDN on first use:
 
     pip install python-docx
 

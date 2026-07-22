@@ -71,7 +71,7 @@ export const ENVIRONMENTS: readonly EnvironmentDescriptor[] = [
     interpreters: ["python (Pyodide)", "wasi"],
     packageManagers: ["pip (Pyodide wheels + micropip)"],
     installRecipes: [
-      "pip install <package> — Pyodide prebuilt wheels (NumPy/Pandas/SciPy/lxml/Pillow…) load natively via loadPackage, plus pure-Python PyPI wheels via micropip. The document libraries (python-pptx, python-docx, openpyxl, fpdf2) are pre-bundled and install OFFLINE. Installs are session-only (reset on page reload).",
+      "pip install <package> — Pyodide prebuilt wheels (NumPy/Pandas/SciPy/lxml/Pillow…) load natively via loadPackage, plus pure-Python PyPI wheels via micropip. The document libraries (python-pptx, python-docx, openpyxl, fpdf2) are pre-bundled: their own wheels install from Erdou's origin, version-locked, with no PyPI round-trip (openpyxl is pure-Python; the others still pull lxml/Pillow from the Pyodide CDN). Installs are session-only (reset on page reload).",
     ],
     switchGuidance:
       "Default, and the right home for most Python — including NumPy/Pandas, which run natively here. Fastest start, no real Linux. Switch to a Linux VM only for a real shell, npm, a package with native code Pyodide lacks, or installs that must persist across reloads.",
