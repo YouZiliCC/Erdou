@@ -57,6 +57,10 @@ export function buildLocalWheelResolver(
   };
 
   return (requirement) => {
+    // Only the BARE name uses the offline bundle. Any version pin / range /
+    // extras falls through (null) so micropip resolves it from PyPI and honors
+    // the exact request — never a silent substitution of the bundled version.
+    if (/[=<>!~;[\] ]/.test(requirement.trim())) return null;
     const key = normalizeReq(requirement);
     const members = closures.get(key);
     if (members) return members.map(urlFor);

@@ -36,8 +36,9 @@ describe("buildLocalWheelResolver", () => {
     ]);
   });
 
-  it("resolves a version-pinned request the same way", () => {
-    expect(resolve("openpyxl==3.1.5")?.[0]).toBe("https://app.example/wheels/openpyxl-3.1.5-py2.py3-none-any.whl");
+  it("falls through (null) for a version-pinned request, so PyPI honors the exact pin (no silent substitution)", () => {
+    expect(resolve("openpyxl==3.1.5")).toBeNull();
+    expect(resolve("openpyxl>=3")).toBeNull();
   });
 
   it("resolves a bundled leaf (not a closure key) to just its own wheel", () => {
