@@ -238,15 +238,24 @@ export interface PreviewDocumentLike {
   querySelectorAll(selectors: string): ArrayLike<PreviewElementLike>;
 }
 
-/** Structural subset of the guest `Window`: only the hook buffer.
- *  `location` is declared (optional, opaque) ONLY so this interface is not
- *  "weak" (all-optional with zero overlap) — TypeScript's weak-type detection
- *  would otherwise reject the DOM `Window` → `PreviewWindowLike` assignment,
- *  breaking the studio wiring `createPreviewTools(() => this.previewFrame)`
- *  at typecheck. Every real Window has `location`; the fakes may omit it. */
+/** Structural subset of `CSSStyleDeclaration` — a real `getComputedStyle`
+ *  result satisfies it. */
+export interface PreviewComputedStyle {
+  getPropertyValue(property: string): string;
+}
+
+/** Structural subset of the guest `Window`: the hook buffer plus
+ *  `getComputedStyle` (used to report whether CSS actually applied — see
+ *  `preview_read`). `location` is declared (optional, opaque) ONLY so this
+ *  interface is not "weak" (all-optional with zero overlap) — TypeScript's
+ *  weak-type detection would otherwise reject the DOM `Window` →
+ *  `PreviewWindowLike` assignment, breaking the studio wiring
+ *  `createPreviewTools(() => this.previewFrame)` at typecheck. Every real Window
+ *  has `location`; the fakes may omit it. */
 export interface PreviewWindowLike {
   __erdouLogs?: PreviewLogBuffer;
   readonly location?: unknown;
+  getComputedStyle?(elt: PreviewElementLike): PreviewComputedStyle;
 }
 
 /** Structural subset of `HTMLIFrameElement`. */
@@ -275,6 +284,26 @@ const MATCH_CAP = 5; //            selector mode: max elements shown
 const MATCH_HTML_CAP = 2000; //    selector mode: outerHTML chars per element
 const LOG_ENTRY_CAP = 100; //      preview_logs: max entries per drain
 const LOG_TEXT_CAP = 4000; //      preview_logs: total text cap
+
+// Computed-style readout (selector mode): the few properties that most clearly
+// reveal whether the page's CSS actually took effect. DEFAULTS — transparent
+// background, black text, `block` display, a UA font — mean a <style> exists in
+// the DOM but is NOT applying (e.g. a malformed rule broke the sheet). This is
+// exactly the signal outerHTML/DOM structure hides, which lets "the <style> tag
+// is there" be mistaken for "the page is styled".
+const KEY_STYLE_PROPS = ["display", "color", "background-color", "font-family", "font-size"] as const;
+
+/** A compact `prop: value; …` line of an element's key computed styles, or null
+ *  when the window can't compute them (no getComputedStyle, or it throws). */
+function computedSummary(win: PreviewWindowLike | null, el: PreviewElementLike): string | null {
+  if (!win || typeof win.getComputedStyle !== "function") return null;
+  try {
+    const cs = win.getComputedStyle(el);
+    return KEY_STYLE_PROPS.map((p) => `${p}: ${cs.getPropertyValue(p)}`).join("; ");
+  } catch {
+    return null;
+  }
+}
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -384,8 +413,12 @@ export function createPreviewTools(
     name: "preview_read",
     description:
       "Read the previewed app's rendered DOM (the live preview iframe). Without `selector`: the document title, URL " +
-      "and collapsed visible text. With a CSS `selector`: the outerHTML of up to 5 matching elements. Output is " +
-      "hard-capped — narrow with a selector for detail. Use it after open_preview to verify what the user actually sees.",
+      "and collapsed visible text. With a CSS `selector`: the outerHTML of up to 5 matching elements, EACH followed by " +
+      "its key computed styles (display, color, background-color, font-family, font-size). Use those to confirm your " +
+      "CSS actually took effect — not just that a <style> tag exists: default values (background-color rgba(0,0,0,0), " +
+      "color rgb(0,0,0), display block, a UA font) mean the stylesheet is present but NOT applying (often a malformed " +
+      "rule breaking the sheet). Output is hard-capped — narrow with a selector for detail. Use it after open_preview " +
+      "to verify what the user actually sees.",
     parameters: {
       type: "object",
       properties: {
@@ -419,6 +452,11 @@ export function createPreviewTools(
         ];
         for (let i = 0; i < shown; i++) {
           lines.push(`${i + 1}. ${capText(matches[i]!.outerHTML, MATCH_HTML_CAP, "")}`);
+          // Computed styles reveal whether the CSS actually applied — the check
+          // outerHTML alone can't make (a present-but-unapplied <style> looks
+          // fine in the DOM). Skipped silently when the window can't compute.
+          const computed = computedSummary(frame.contentWindow, matches[i]!);
+          if (computed) lines.push(`   computed: ${computed}`);
         }
         return { ok: true, output: lines.join("\n") };
       } catch (err) {

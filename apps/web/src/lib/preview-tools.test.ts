@@ -295,6 +295,29 @@ function fakeFrame(
   };
 }
 
+/** A match carrying fake computed styles, read back by `styledFrame`'s
+ *  getComputedStyle — lets a test drive the computed-style readout. */
+type StyledEl = PreviewElementLike & { _computed: Record<string, string> };
+function styledEl(outerHTML: string, computed: Record<string, string>): StyledEl {
+  return { outerHTML, _computed: computed };
+}
+
+/** A frame whose contentWindow.getComputedStyle resolves each element's own
+ *  `_computed` map (what a real Window does over real Elements). */
+function styledFrame(doc: PreviewDocumentLike): PreviewFrameLike {
+  return {
+    src: "/__preview__/8080/",
+    get contentDocument() {
+      return doc;
+    },
+    contentWindow: {
+      getComputedStyle: (elt: PreviewElementLike) => ({
+        getPropertyValue: (prop: string) => (elt as StyledEl)._computed?.[prop] ?? "",
+      }),
+    },
+  };
+}
+
 // COMPILE-TIME regression guard (bites via `pnpm --filter web typecheck`,
 // which covers src tests): the studio wiring hands the REAL DOM iframe
 // straight in — `...createPreviewTools(() => this.previewFrame)` with
@@ -410,6 +433,47 @@ describe("createPreviewTools", () => {
       expect(r.ok).toBe(false);
       expect(r.output).toContain('invalid CSS selector "@bad"');
       expect(r.output).toContain("not a valid selector");
+    });
+
+    it("selector: reports key computed styles per match so the agent can see CSS actually applied", async () => {
+      const header = styledEl("<header>H</header>", {
+        display: "flex",
+        color: "rgb(38, 59, 55)",
+        "background-color": "rgb(244, 240, 233)",
+        "font-family": "'DM Sans'",
+        "font-size": "14px",
+      });
+      const r = await tools(() => styledFrame(fakeDoc({ matches: { header: [header] } }))).read({ selector: "header" });
+      expect(r.ok).toBe(true);
+      expect(r.output).toContain("<header>H</header>");
+      expect(r.output).toContain("computed:");
+      expect(r.output).toContain("display: flex");
+      expect(r.output).toContain("background-color: rgb(244, 240, 233)");
+      expect(r.output).toContain("font-family: 'DM Sans'");
+    });
+
+    it("selector: surfaces DEFAULT computed styles when CSS did NOT apply (the render failure the agent kept missing)", async () => {
+      // A broken stylesheet leaves defaults: transparent bg, black text, block
+      // display — the exact signal that a <style> exists but isn't taking effect.
+      const header = styledEl("<header>H</header>", {
+        display: "block",
+        color: "rgb(0, 0, 0)",
+        "background-color": "rgba(0, 0, 0, 0)",
+        "font-family": "serif",
+        "font-size": "16px",
+      });
+      const r = await tools(() => styledFrame(fakeDoc({ matches: { header: [header] } }))).read({ selector: "header" });
+      expect(r.ok).toBe(true);
+      expect(r.output).toContain("display: block");
+      expect(r.output).toContain("background-color: rgba(0, 0, 0, 0)");
+    });
+
+    it("selector: omits the computed line when the window cannot compute styles (no getComputedStyle)", async () => {
+      // fakeFrame's contentWindow has no getComputedStyle — must degrade, not throw.
+      const r = await tools(() => fakeFrame(fakeDoc({ matches: { li: [el("<li>x</li>")] } }))).read({ selector: "li" });
+      expect(r.ok).toBe(true);
+      expect(r.output).toContain("<li>x</li>");
+      expect(r.output).not.toContain("computed:");
     });
   });
 
