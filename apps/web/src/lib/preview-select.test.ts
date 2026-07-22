@@ -5,22 +5,23 @@ const state = (over: Partial<PreviewSelectionState> = {}): PreviewSelectionState
   selected: null,
   pendingPort: null,
   handledNonce: 0,
+  reloadNonce: 0,
   ...over,
 });
 
 describe("reducePreviewSelection — agent requests (open_preview)", () => {
   it("selects the requested port when it is already open — even over a user's live selection", () => {
     const next = reducePreviewSelection(state({ selected: 8080 }), { port: 3000, nonce: 1 }, [8080, 3000], [8080, 3000]);
-    expect(next).toEqual({ selected: 3000, pendingPort: null, handledNonce: 1 });
+    expect(next).toEqual({ selected: 3000, pendingPort: null, handledNonce: 1, reloadNonce: 0 });
   });
 
   it("a request that beats port.opened goes pending and keeps the current view; the port opening fulfills it", () => {
     // open_preview(3000) lands before port.opened(3000)'s async delivery.
     const afterRequest = reducePreviewSelection(state({ selected: 8080 }), { port: 3000, nonce: 1 }, [8080], [8080]);
-    expect(afterRequest).toEqual({ selected: 8080, pendingPort: 3000, handledNonce: 1 });
+    expect(afterRequest).toEqual({ selected: 8080, pendingPort: 3000, handledNonce: 1, reloadNonce: 0 });
     // The port arrives -> selected, pending cleared. Nonce unchanged: not re-applied.
     const afterOpen = reducePreviewSelection(afterRequest, { port: 3000, nonce: 1 }, [8080, 3000], [8080]);
-    expect(afterOpen).toEqual({ selected: 3000, pendingPort: null, handledNonce: 1 });
+    expect(afterOpen).toEqual({ selected: 3000, pendingPort: null, handledNonce: 1, reloadNonce: 0 });
   });
 
   it("an already-handled nonce is never re-applied (re-renders can't re-yank)", () => {
@@ -38,7 +39,48 @@ describe("reducePreviewSelection — agent requests (open_preview)", () => {
 
   it("port:null with nothing open changes nothing (but marks the nonce handled)", () => {
     const next = reducePreviewSelection(state(), { port: null, nonce: 3 }, [], []);
-    expect(next).toEqual({ selected: null, pendingPort: null, handledNonce: 3 });
+    expect(next).toEqual({ selected: null, pendingPort: null, handledNonce: 3, reloadNonce: 0 });
+  });
+});
+
+describe("reducePreviewSelection — re-opening the viewed port forces a reload (reloadNonce)", () => {
+  // A static serve has no live-reload: when the agent edits files and calls
+  // open_preview again on the SAME port, the selection doesn't change, so the
+  // iframe key would be unchanged and the edit would stay invisible. reloadNonce
+  // bumps in exactly that case so the panel can remount the frame.
+  it("bumps reloadNonce when the agent re-opens the ALREADY-viewed port", () => {
+    const next = reducePreviewSelection(state({ selected: 8080 }), { port: 8080, nonce: 1 }, [8080], [8080]);
+    expect(next.selected).toBe(8080);
+    expect(next.reloadNonce).toBe(1);
+  });
+
+  it("does NOT bump reloadNonce on a genuine port SWITCH (changing the viewed port reloads the iframe already)", () => {
+    const next = reducePreviewSelection(state({ selected: 8080 }), { port: 3000, nonce: 1 }, [8080, 3000], [8080, 3000]);
+    expect(next.selected).toBe(3000);
+    expect(next.reloadNonce).toBe(0);
+  });
+
+  it("port:null re-affirming the latest (already-viewed) port bumps reloadNonce", () => {
+    const next = reducePreviewSelection(state({ selected: 5173 }), { port: null, nonce: 2 }, [8080, 5173], [8080, 5173]);
+    expect(next.selected).toBe(5173);
+    expect(next.reloadNonce).toBe(1);
+  });
+
+  it("does NOT bump reloadNonce for a not-yet-open requested port (pending — reload waits for the switch)", () => {
+    const next = reducePreviewSelection(state({ selected: 8080 }), { port: 3000, nonce: 1 }, [8080], [8080]);
+    expect(next.pendingPort).toBe(3000);
+    expect(next.reloadNonce).toBe(0);
+  });
+
+  it("does NOT bump reloadNonce without a fresh request (an openPorts change alone never reloads)", () => {
+    // Same nonce as already handled: the re-render must not re-fire a reload.
+    const next = reducePreviewSelection(state({ selected: 8080, handledNonce: 1 }), { port: 8080, nonce: 1 }, [8080, 3000], [8080]);
+    expect(next.reloadNonce).toBe(0);
+  });
+
+  it("carries reloadNonce forward monotonically across reductions", () => {
+    const next = reducePreviewSelection(state({ selected: 8080, reloadNonce: 4 }), { port: 8080, nonce: 1 }, [8080], [8080]);
+    expect(next.reloadNonce).toBe(5);
   });
 });
 

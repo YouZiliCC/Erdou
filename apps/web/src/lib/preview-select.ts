@@ -26,6 +26,14 @@ export interface PreviewSelectionState {
   /** The last `previewRequest.nonce` already applied, so re-renders between
    *  requests can't re-apply (and re-yank) an old request. */
   handledNonce: number;
+  /** Monotonic reload counter, bumped ONLY when an agent request re-affirms the
+   *  ALREADY-shown port (a same-port `open_preview`). A static serve has no
+   *  live-reload, so re-opening the preview after an edit must remount the
+   *  iframe to show it — but a same-port request leaves `selected` unchanged, so
+   *  the iframe key (which folds this in) would otherwise be identical and the
+   *  edit invisible. A genuine port SWITCH needs no bump: `selected` changes, so
+   *  the key changes on its own. */
+  reloadNonce: number;
 }
 
 /**
@@ -49,7 +57,8 @@ export function reducePreviewSelection(
   openPorts: readonly number[],
   prevOpenPorts: readonly number[],
 ): PreviewSelectionState {
-  let { selected, pendingPort, handledNonce } = state;
+  let { selected, pendingPort, handledNonce, reloadNonce } = state;
+  const prevSelected = selected;
 
   // 1. A new agent request — the ONE case allowed to move the selection off a
   //    still-open port the user picked.
@@ -57,6 +66,10 @@ export function reducePreviewSelection(
     handledNonce = request.nonce;
     if (request.port !== null) {
       if (openPorts.includes(request.port)) {
+        // Re-affirming the already-shown port: `selected` won't change, so bump
+        // reloadNonce to force a remount (the agent's latest edits are only in
+        // a fresh load — a static serve has no HMR).
+        if (request.port === prevSelected) reloadNonce++;
         selected = request.port;
         pendingPort = null;
       } else {
@@ -67,6 +80,7 @@ export function reducePreviewSelection(
     } else {
       const latest = openPorts.length > 0 ? openPorts[openPorts.length - 1]! : null;
       if (latest !== null) {
+        if (latest === prevSelected) reloadNonce++; // same-port re-open — see above
         selected = latest;
         pendingPort = null;
       }
@@ -87,7 +101,7 @@ export function reducePreviewSelection(
     if (fresh.length > 0) selected = fresh[fresh.length - 1]!;
   }
 
-  return { selected, pendingPort, handledNonce };
+  return { selected, pendingPort, handledNonce, reloadNonce };
 }
 
 /**

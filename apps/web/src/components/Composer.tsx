@@ -13,6 +13,28 @@ export interface ComposerPrefill {
   nonce: number;
 }
 
+/** The keydown shape the submit decision needs — satisfied by a React
+ *  `KeyboardEvent<HTMLTextAreaElement>` (structural, so it is unit-testable
+ *  with a plain object, matching the panel-logic-extraction pattern). */
+export interface ComposerKey {
+  key: string;
+  shiftKey: boolean;
+  nativeEvent: { isComposing: boolean; keyCode: number };
+}
+
+/**
+ * Whether a composer keydown should SEND the message. Enter sends; Shift+Enter
+ * inserts a newline (returns false — the textarea's default runs). A keystroke
+ * mid-IME-composition — confirming a Chinese/Japanese candidate with Enter —
+ * must NEVER send: `isComposing` marks it, and browsers predating that flag
+ * report `keyCode` 229 for a composing key. Non-Enter keys always return false.
+ */
+export function isSubmitKey(e: ComposerKey): boolean {
+  if (e.key !== "Enter" || e.shiftKey) return false;
+  if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return false;
+  return true;
+}
+
 export function Composer({
   running, canStop, stopping, replying, mode, prefill, onModeChange, onRun, onStop,
 }: {
@@ -42,16 +64,24 @@ export function Composer({
   function submit() { const t = text.trim(); if (!t || running) return; setText(""); onRun(t); }
   return (
     <div className="composer">
-      <textarea ref={taRef} value={text} placeholder={replying ? "Reply…" : "Describe a task…  @ files"} disabled={running}
+      <textarea ref={taRef} value={text} placeholder={replying ? "Reply…  (Shift+Enter for a new line)" : "Describe a task…  @ files  (Shift+Enter for a new line)"} disabled={running}
         onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit(); }} />
+        onKeyDown={(e) => {
+          // Enter sends, Shift+Enter is a newline, a composing Enter completes
+          // the IME candidate (see isSubmitKey). preventDefault so sending never
+          // leaves a stray newline behind in the (about-to-be-cleared) textarea.
+          if (isSubmitKey(e)) {
+            e.preventDefault();
+            submit();
+          }
+        }} />
       <div className="composer-bar">
         <Select value={mode} options={MODE_OPTIONS} onChange={onModeChange} ariaLabel="Run mode" />
         {running && canStop ? (
           <button className="btn run" disabled={stopping} onClick={onStop}>{stopping ? "Stopping…" : "Stop"}</button>
         ) : (
           <button className="btn primary run" disabled={running || text.trim().length===0} onClick={submit}>
-            {running ? "Working…" : "Run ⌘⏎"}
+            {running ? "Working…" : "Run ⏎"}
           </button>
         )}
       </div>

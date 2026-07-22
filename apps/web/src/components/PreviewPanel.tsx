@@ -51,8 +51,13 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
    *  first (see the module doc above) instead of leaking them until reload. */
   const openedPorts = useRef<number[]>([]);
   /** Reducer state that isn't render state: the not-yet-open agent-requested
-   *  port and the last applied request nonce (see reducePreviewSelection). */
-  const selState = useRef<{ pendingPort: number | null; handledNonce: number }>({ pendingPort: null, handledNonce: 0 });
+   *  port, the last applied request nonce, and the same-port reload counter
+   *  (see reducePreviewSelection). */
+  const selState = useRef<{ pendingPort: number | null; handledNonce: number; reloadNonce: number }>({
+    pendingPort: null,
+    handledNonce: 0,
+    reloadNonce: 0,
+  });
   /** Open ports as of the previous reduction, so the reducer can tell NEWLY
    *  opened ports (agent-primary auto-select) from merely-still-open ones. */
   const prevPorts = useRef<readonly number[]>([]);
@@ -89,6 +94,7 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
   // (an old request could re-yank).
   useEffect(() => {
     const ports = openPorts.map((p) => p.port);
+    const prevReload = selState.current.reloadNonce;
     const next = reducePreviewSelection(
       { selected: selectedPort, ...selState.current },
       studio.previewRequest,
@@ -96,8 +102,13 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
       prevPorts.current,
     );
     prevPorts.current = ports;
-    selState.current = { pendingPort: next.pendingPort, handledNonce: next.handledNonce };
+    selState.current = { pendingPort: next.pendingPort, handledNonce: next.handledNonce, reloadNonce: next.reloadNonce };
     if (next.selected !== selectedPort) setSelectedPort(next.selected);
+    // A same-port open_preview (the agent re-showing its work after an edit)
+    // leaves `selected` unchanged, so bump `nonce` — folded into the iframe key
+    // — to remount + reload the frame. A port SWITCH reloads via the key's port
+    // segment already, so reloadNonce only moves on the same-port case.
+    if (next.reloadNonce !== prevReload) setNonce((n) => n + 1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [studio.previewRequest?.nonce, openPorts]);
 

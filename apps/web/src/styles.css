@@ -148,6 +148,9 @@ input, textarea { font-family: var(--mono); }
 /* after .rowbtn:hover on purpose — equal specificity, source order decides; disabled buttons still match :hover */
 .rowbtn:disabled { color: var(--faint); background: transparent; cursor: default; }
 .rowbtn.danger { color: var(--red); font-size: 10.5px; white-space: nowrap; }
+/* Block-level so the inline SVG has no baseline descender gap — keeps the pencil
+   optically centered next to the × delete glyph in the row-actions flex row. */
+.rowbtn-ico { display: block; }
 /* inline rename input (swaps in for .ttl; sans, since the global `input` rule is mono) */
 .thread .ttl-edit { flex: 1; min-width: 0; font-family: var(--sans); font-size: 12.5px; color: var(--ink); background: var(--elev); border: 1px solid var(--accent); border-radius: 4px; padding: 1px 5px; }
 .thread .ttl-edit:focus { outline: none; }

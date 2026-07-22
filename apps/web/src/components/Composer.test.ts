@@ -7,7 +7,7 @@
 import { describe, it, expect } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { Composer } from "./Composer";
+import { Composer, isSubmitKey, type ComposerKey } from "./Composer";
 
 type ComposerProps = Parameters<typeof Composer>[0];
 
@@ -46,9 +46,44 @@ describe("Composer stop button (D1 stopping state)", () => {
     expect(html).not.toMatch(/>Stop(ping…)?</);
   });
 
-  it("idle shows the Run button", () => {
+  it("idle shows the Run button (Enter to send)", () => {
     const html = render({});
-    expect(html).toContain("Run ⌘⏎");
+    expect(html).toContain("Run ⏎");
     expect(html).not.toMatch(/>Stop/);
+  });
+});
+
+describe("Composer isSubmitKey (Enter sends, Shift+Enter newlines, IME-safe)", () => {
+  const key = (over: Partial<ComposerKey> & { isComposing?: boolean; keyCode?: number } = {}): ComposerKey => ({
+    key: over.key ?? "Enter",
+    shiftKey: over.shiftKey ?? false,
+    nativeEvent: { isComposing: over.isComposing ?? false, keyCode: over.keyCode ?? 13 },
+  });
+
+  it("plain Enter sends", () => {
+    expect(isSubmitKey(key())).toBe(true);
+  });
+
+  it("Shift+Enter does NOT send (newline)", () => {
+    expect(isSubmitKey(key({ shiftKey: true }))).toBe(false);
+  });
+
+  it("Cmd/Ctrl+Enter still sends (no Shift held)", () => {
+    // metaKey/ctrlKey are irrelevant to the decision — only Shift branches to a
+    // newline — so a user with ⌘⏎ muscle memory still submits.
+    expect(isSubmitKey(key())).toBe(true);
+  });
+
+  it("a composing Enter (IME candidate confirmation) does NOT send", () => {
+    expect(isSubmitKey(key({ isComposing: true }))).toBe(false);
+  });
+
+  it("a legacy composing Enter (keyCode 229, isComposing unset) does NOT send", () => {
+    expect(isSubmitKey(key({ keyCode: 229 }))).toBe(false);
+  });
+
+  it("non-Enter keys never send", () => {
+    expect(isSubmitKey(key({ key: "a" }))).toBe(false);
+    expect(isSubmitKey(key({ key: "Tab" }))).toBe(false);
   });
 });
