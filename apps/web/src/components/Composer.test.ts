@@ -51,6 +51,12 @@ describe("Composer stop button (D1 stopping state)", () => {
     expect(html).toContain("Run ⏎");
     expect(html).not.toMatch(/>Stop/);
   });
+
+  it("keeps the textarea editable WHILE running (compose your next message ahead)", () => {
+    const html = render({ running: true, canStop: true });
+    expect(html).toMatch(/<textarea/);
+    expect(html).not.toMatch(/<textarea[^>]*disabled/); // no longer hard-disabled during a run
+  });
 });
 
 describe("Composer isSubmitKey (Enter sends, Shift+Enter newlines, IME-safe)", () => {

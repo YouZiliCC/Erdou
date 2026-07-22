@@ -64,7 +64,10 @@ export function Composer({
   function submit() { const t = text.trim(); if (!t || running) return; setText(""); onRun(t); }
   return (
     <div className="composer">
-      <textarea ref={taRef} value={text} placeholder={replying ? "Reply…  (Shift+Enter for a new line)" : "Describe a task…  @ files  (Shift+Enter for a new line)"} disabled={running}
+      {/* NOT disabled while running: you can compose your next message while the
+          agent works. submit() still refuses to send mid-run (Studio.startRun
+          rejects a concurrent run), so the text just waits until the run ends. */}
+      <textarea ref={taRef} value={text} placeholder={replying ? "Reply…  (Shift+Enter for a new line)" : "Describe a task…  @ files  (Shift+Enter for a new line)"}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
           // Enter sends, Shift+Enter is a newline, a composing Enter completes
