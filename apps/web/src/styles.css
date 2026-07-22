@@ -352,18 +352,28 @@ input, textarea { font-family: var(--mono); }
 .dialog .note { color: var(--faint); font-size: 11.5px; margin-top: 14px; line-height: 1.5; }
 
 /* ---- diff review pane (Task 9) ---- */
-.diff-panel { min-height: 0; overflow: auto; padding: 12px 14px; }
-.diff-files { display: flex; flex-direction: column; gap: 2px; margin-bottom: 12px; }
+/* Diff tab: two-pane resizable layout — changed-file list over the selected
+   file's diff — mirroring the Files tab (shared .fp-body/.fp-tree/.splitter.
+   fp-splitter/.viewer/.fp-view/.vhead classes). */
+.diff-panel { display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+.diff-files { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; }
 .diff-file { display: flex; align-items: center; gap: 9px; font-family: var(--mono); font-size: 12px; padding: 5px 8px; color: var(--ink); border-radius: 6px; border: 1px solid transparent; cursor: pointer; }
 .diff-file:hover { background: var(--elev); }
 .diff-file.sel { background: var(--elev); border-color: var(--border); }
 .diff-file .fp { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.diff-file .mark.create, .diff-file .add { color: var(--green); }
-.diff-file .mark.delete, .diff-file .del { color: var(--red); }
-.diff-file .mark.modify { color: var(--amber); }
+/* Mark + stat colors apply in BOTH the list and the viewer header. */
+.diff-panel .mark.create, .diff-panel .add { color: var(--green); }
+.diff-panel .mark.delete, .diff-panel .del { color: var(--red); }
+.diff-panel .mark.modify { color: var(--amber); }
 .diff-file .revert { padding: 2px 9px; font-size: 11px; }
+/* Diff viewer (bottom pane): header names the file + ± stats, then the hunks
+   fill the pane's own scroll (no inner border — the pane frames them). */
+.diff-view .vhead { gap: 10px; align-items: baseline; }
+.diff-view .vhead-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); color: var(--ink); }
+.diff-view .vhead-stats { flex: 0 0 auto; font-family: var(--mono); }
 
-.hunk { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; font-family: var(--mono); font-size: 11.5px; line-height: 1.7; }
+.hunk { font-family: var(--mono); font-size: 11.5px; line-height: 1.7; }
+.diff-view .hunk { padding-bottom: 10px; }
 .hunk .ln { display: flex; }
 .hunk .g { width: 40px; flex: 0 0 40px; text-align: right; padding-right: 9px; color: var(--faint); user-select: none; border-right: 1px solid var(--border2); }
 .hunk .c { padding-left: 10px; white-space: pre-wrap; word-break: break-word; }

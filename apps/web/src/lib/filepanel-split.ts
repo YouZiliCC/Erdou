@@ -20,7 +20,11 @@ export const DEFAULT_SPLIT = 0.5;
 export const TREE_MIN = 80;
 export const VIEWER_MIN = 110;
 
-const KEY = "erdou:filepanel-split";
+/** localStorage key for the Files tab's split. Other split panels (e.g. the
+ *  Diff tab) pass their own key so their geometry persists independently. */
+export const FILEPANEL_SPLIT_KEY = "erdou:filepanel-split";
+export const DIFFPANEL_SPLIT_KEY = "erdou:diffpanel-split";
+const KEY = FILEPANEL_SPLIT_KEY;
 
 /** Clamp a raw ratio to the static [SPLIT_MIN, SPLIT_MAX] bounds; anything
  *  non-numeric or non-finite falls back to DEFAULT_SPLIT. */
@@ -42,10 +46,11 @@ export function splitForDrag(treePx: number, bodyHeight: number): number {
 }
 
 /** Read the persisted split ratio, clamped to valid bounds. Corrupt JSON, a
- *  non-numeric value, or an absent key yields DEFAULT_SPLIT (never throws). */
-export function loadSplit(): number {
+ *  non-numeric value, or an absent key yields DEFAULT_SPLIT (never throws).
+ *  `key` selects which panel's geometry to read (defaults to the Files tab). */
+export function loadSplit(key: string = KEY): number {
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = localStorage.getItem(key);
     if (raw === null) return DEFAULT_SPLIT;
     return clampSplit(JSON.parse(raw));
   } catch {
@@ -54,7 +59,7 @@ export function loadSplit(): number {
 }
 
 /** Persist the split ratio, clamped so a bad in-memory value can never be
- *  written out of range. */
-export function saveSplit(ratio: number): void {
-  localStorage.setItem(KEY, JSON.stringify(clampSplit(ratio)));
+ *  written out of range. `key` selects which panel's geometry (defaults Files). */
+export function saveSplit(ratio: number, key: string = KEY): void {
+  localStorage.setItem(key, JSON.stringify(clampSplit(ratio)));
 }
