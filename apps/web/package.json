@@ -5,11 +5,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "predev": "node scripts/link-vm-assets.mjs && node scripts/render-help.mjs",
+    "predev": "node scripts/link-vm-assets.mjs && node scripts/render-help.mjs && node scripts/download-wheels.mjs",
     "dev": "vite",
-    "prebuild": "node scripts/link-vm-assets.mjs && node scripts/render-help.mjs",
+    "prebuild": "node scripts/link-vm-assets.mjs && node scripts/render-help.mjs && node scripts/download-wheels.mjs",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
+    "wheels": "node scripts/download-wheels.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

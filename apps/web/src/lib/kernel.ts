@@ -7,6 +7,8 @@ import type { PtySession } from "@erdou/runtime-vm";
 // SKELETON_DIRS below). `VM_PROFILES` is a tiny data array; the type is erased.
 import { VM_PROFILES, type VmProfile } from "@erdou/runtime-vm/profiles";
 import { registerLanguages } from "./languages.js";
+import { buildLocalWheelResolver, type WheelManifest } from "./wheel-index.js";
+import wheelsManifest from "../../wheels.json";
 
 export type { VmProfile };
 
@@ -113,6 +115,11 @@ function appPyodideLoader(): PipPyodideLoader {
     return mod.loadPyodide({ indexURL: PYODIDE_URL });
   };
   if (typeof localStorage !== "undefined") load.pipInstalls = pipInstallPersistence(localStorage);
+  // The local wheel index: bundled document libs (python-pptx/docx/openpyxl/
+  // fpdf2 + pure-Python deps) install from same-origin /wheels/ URLs — offline,
+  // version-locked. Needs `location` for the absolute base (node-side test
+  // kernels omit it; those installs just take the CDN path).
+  if (typeof location !== "undefined") load.localWheels = buildLocalWheelResolver(wheelsManifest as WheelManifest, location.origin);
   return load;
 }
 

@@ -6,3 +6,5 @@ coverage/
 .superpowers/
 # Rendered from apps/web/docs/help.md at predev/prebuild (render-help.mjs).
 apps/web/public/help.html
+# Downloaded from wheels.json pins at predev/prebuild (download-wheels.mjs).
+apps/web/public/wheels/

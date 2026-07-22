@@ -1,0 +1,20 @@
+{
+  "pyodideProvided": ["lxml", "Pillow"],
+  "closures": {
+    "python-pptx": ["python-pptx", "XlsxWriter", "typing_extensions"],
+    "python-docx": ["python-docx", "typing_extensions"],
+    "openpyxl": ["openpyxl", "et_xmlfile"],
+    "fpdf2": ["fpdf2", "defusedxml", "fonttools"]
+  },
+  "wheels": {
+    "python-pptx": {"version": "1.0.2", "file": "python_pptx-1.0.2-py3-none-any.whl", "url": "https://files.pythonhosted.org/packages/d9/4f/00be2196329ebbff56ce564aa94efb0fbc828d00de250b1980de1a34ab49/python_pptx-1.0.2-py3-none-any.whl", "sha256": "160838e0b8565a8b1f67947675886e9fea18aa5e795db7ae531606d68e785cba"},
+    "python-docx": {"version": "1.2.0", "file": "python_docx-1.2.0-py3-none-any.whl", "url": "https://files.pythonhosted.org/packages/d0/00/1e03a4989fa5795da308cd774f05b704ace555a70f9bf9d3be057b680bcf/python_docx-1.2.0-py3-none-any.whl", "sha256": "3fd478f3250fbbbfd3b94fe1e985955737c145627498896a8a6bf81f4baf66c7"},
+    "openpyxl": {"version": "3.1.5", "file": "openpyxl-3.1.5-py2.py3-none-any.whl", "url": "https://files.pythonhosted.org/packages/c0/da/977ded879c29cbd04de313843e76868e6e13408a94ed6b987245dc7c8506/openpyxl-3.1.5-py2.py3-none-any.whl", "sha256": "5282c12b107bffeef825f4617dc029afaf41d0ea60823bbb665ef3079dc79de2"},
+    "fpdf2": {"version": "2.8.4", "file": "fpdf2-2.8.4-py2.py3-none-any.whl", "url": "https://files.pythonhosted.org/packages/bf/e3/b1f6a8e864394d26ee25e90405670ba4d2cc89a7ca27b4f1d8bfe4001e45/fpdf2-2.8.4-py2.py3-none-any.whl", "sha256": "bce1afc437107906dcdb0b95c300c7501002fe412c2ed36fa33c8f0a2f87ef3e"},
+    "XlsxWriter": {"version": "3.2.9", "file": "xlsxwriter-3.2.9-py3-none-any.whl", "url": "https://files.pythonhosted.org/packages/3a/0c/3662f4a66880196a590b202f0db82d919dd2f89e99a27fadef91c4a33d41/xlsxwriter-3.2.9-py3-none-any.whl", "sha256": "9a5db42bc5dff014806c58a20b9eae7322a134abb6fce3c92c181bfb275ec5b3"},
+    "typing_extensions": {"version": "4.16.0", "file": "typing_extensions-4.16.0-py3-none-any.whl", "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl", "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"},
+    "et_xmlfile": {"version": "2.0.0", "file": "et_xmlfile-2.0.0-py3-none-any.whl", "url": "https://files.pythonhosted.org/packages/c1/8b/5fe2cc11fee489817272089c4203e679c63b570a5aaeb18d852ae3cbba6a/et_xmlfile-2.0.0-py3-none-any.whl", "sha256": "7a91720bc756843502c3b7504c77b8fe44217c85c537d85037f0f536151b2caa"},
+    "defusedxml": {"version": "0.7.1", "file": "defusedxml-0.7.1-py2.py3-none-any.whl", "url": "https://files.pythonhosted.org/packages/07/6c/aa3f2f849e01cb6a001cd8554a88d4c77c5c1a31c95bdf1cf9301e6d9ef4/defusedxml-0.7.1-py2.py3-none-any.whl", "sha256": "a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61"},
+    "fonttools": {"version": "4.60.2", "file": "fonttools-4.60.2-py3-none-any.whl", "url": "https://files.pythonhosted.org/packages/79/6c/10280af05b44fafd1dff69422805061fa1af29270bc52dce031ac69540bf/fonttools-4.60.2-py3-none-any.whl", "sha256": "73cf92eeda67cf6ff10c8af56fc8f4f07c1647d989a979be9e388a49be26552a"}
+  }
+}
