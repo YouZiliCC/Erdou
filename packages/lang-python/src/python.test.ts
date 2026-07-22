@@ -188,6 +188,23 @@ describe("python runner (plumbing, mock Pyodide)", () => {
     expect(code).toBe(2);
     expect(await stderr.text()).toMatch(/can't open file/);
   });
+
+  it("rejects 'python -m' with an actionable message instead of the cryptic can't-open-file '-m'", async () => {
+    // The browser kernel has no sockets, so `python -m http.server` can never
+    // serve here — the old launcher treated `-m` as a script path and printed
+    // "can't open file '-m'", which sent agents chasing the VM. Steer to the
+    // paths that actually work.
+    const fs = new Vfs({ clock: () => 0 });
+    const run = makeRunners(new MockPyodide()).python;
+    const { ctx, stderr } = makeCtx(["python", "-m", "http.server", "8000", "--bind", "0.0.0.0"], fs);
+    const code = await run(ctx);
+    stderr.end();
+    expect(code).toBe(2);
+    const err = await stderr.text();
+    expect(err).not.toMatch(/can't open file/); // not the cryptic error
+    expect(err).toContain("erdou serve"); // the working static-serve path here
+    expect(err).toContain("vm:"); // and the VM alternative for a real server
+  });
 });
 
 describe("pip runner (mock Pyodide)", () => {

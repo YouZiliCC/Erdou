@@ -165,6 +165,20 @@ function pythonExecutor(getPyodide: () => Promise<PipPyodide>, notices: InstallN
     if (args[0] === "-c") {
       code = args[1] ?? "";
       scriptArgv = ["-c", ...args.slice(2)];
+    } else if (args[0] === "-m") {
+      // The browser kernel's Python is Pyodide — no module launcher and, more to
+      // the point, no real network sockets, so `python -m http.server` (the
+      // usual reason `-m` is reached for) can never listen here. The old path
+      // fell through to the file-read below and printed "can't open file '-m'",
+      // which read as a typo and sent agents chasing the VM. Fail fast with the
+      // paths that actually work instead.
+      ctx.stderr.write(
+        "python: 'python -m' is not supported on the browser kernel (no module launcher, and no sockets " +
+          "for a server like http.server). To preview static files use 'erdou serve <dir>' (add --spa for a " +
+          "client-side router); to run a Python web app, serve it with 'erdou.serve(app, port)' or switch to " +
+          "a vm:* kernel. To run other code use 'python <file.py>' or 'python -c <code>'.\n",
+      );
+      return 2;
     } else if (args[0] !== undefined) {
       const path = absPath(ctx.cwd, args[0]);
       try {

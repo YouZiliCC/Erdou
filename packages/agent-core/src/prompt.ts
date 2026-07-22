@@ -196,7 +196,9 @@ function simulatedPrompt(env: EnvironmentInfo, caps: RuntimeCapabilities): strin
     `- Shell: pipes (|), redirection (> >> <), && || ; and trailing-& background jobs (see \`jobs\`). Built-in commands: ${SHELL_BUILTINS}. cd and export change the shell state. sed/awk are honest busybox-style subsets that ERROR on anything unsupported (JS RegExp semantics) — prefer simple invocations.`,
     extraCommands.length > 0 ? `- Extra commands: ${extraCommands.join(", ")}.` : "",
     `- Languages you can run: ${canRun}.${wasiNote}`,
-    caps.virtualPorts ? "- You can open virtual ports for previews." : "",
+    caps.virtualPorts
+      ? "- To preview a web app, serve it on a virtual port then call open_preview. This (browser) kernel has NO real network sockets, so `python -m http.server` and other socket servers do NOT work here — serve static files with `erdou serve <dir>` (add --spa for a client-side router), or a Python WSGI app with `erdou.serve(app, port)`. Don't switch to a vm:* kernel just to serve a static site; this kernel serves it natively."
+      : "",
     "",
     "NOT AVAILABLE (do not attempt these — they will fail and waste steps):",
     ...notAvailable.map((n) => `- ${n}`),
