@@ -70,6 +70,20 @@ describe("serializeHttpRequest", () => {
 });
 
 describe("parseHttpResponse", () => {
+  it("collects repeated Set-Cookie into setCookies, keeping them out of the collapsing headers map", () => {
+    const res = parseHttpResponse(
+      bytes(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nSet-Cookie: a=1; Path=/\r\nSet-Cookie: b=2; Path=/\r\nContent-Length: 2\r\n\r\nhi",
+      ),
+    );
+    expect(res.setCookies).toEqual(["a=1; Path=/", "b=2; Path=/"]);
+    expect(res.headers["set-cookie"]).toBeUndefined();
+  });
+
+  it("omits setCookies when the response set none", () => {
+    expect(parseHttpResponse(bytes("HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nhi")).setCookies).toBeUndefined();
+  });
+
   it("parses a Content-Length response", () => {
     const res = parseHttpResponse(bytes("HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello"));
     expect(res.status).toBe(200);

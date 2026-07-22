@@ -74,7 +74,15 @@ export function collectResponse(
   const code = Number.parseInt(status, 10);
 
   const outHeaders: Record<string, string> = {};
+  // Set-Cookie is legally repeated — keep every value out of band (a
+  // single-valued map would drop all but the last) so the preview cookie jar
+  // sees them all. See HttpResponse.setCookies.
+  const setCookies: string[] = [];
   for (const [name, value] of headers) {
+    if (name.toLowerCase() === "set-cookie") {
+      setCookies.push(value);
+      continue;
+    }
     outHeaders[name.toLowerCase()] = value;
   }
 
@@ -87,5 +95,8 @@ export function collectResponse(
     offset += chunk.length;
   }
 
-  return { status: Number.isNaN(code) ? 500 : code, headers: outHeaders, body };
+  const status_ = Number.isNaN(code) ? 500 : code;
+  return setCookies.length > 0
+    ? { status: status_, headers: outHeaders, body, setCookies }
+    : { status: status_, headers: outHeaders, body };
 }

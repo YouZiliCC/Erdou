@@ -33,6 +33,17 @@ export interface HttpResponse {
    * delivered buffered, exactly as before this field existed.
    */
   stream?: AsyncIterable<Uint8Array>;
+  /**
+   * Raw `Set-Cookie` header VALUES, one per cookie (e.g.
+   * `"sid=abc; Path=/; HttpOnly"`). Carried out of band because `headers` is a
+   * single-valued map that would collapse the repeated `Set-Cookie` header a
+   * server can legally send. The preview proxy is the cookie jar (a browser
+   * never stores a Service-Worker-synthesized response's cookies), so it reads
+   * these to store cookies and re-injects them as a `Cookie` request header on
+   * later requests to the same guest — see apps/web/src/lib/preview-cookies.ts.
+   * Absent when the response set no cookie.
+   */
+  setCookies?: string[];
 }
 
 /** A program's handler for requests dispatched to the port it serves. */

@@ -352,7 +352,13 @@ export class VmRuntime implements Runtime {
             };
             const rest = acc().subarray(head.bodyOffset);
             chunks.length = 0;
-            resolve({ status: head.status, headers: head.headers, body: new Uint8Array(), stream: sse.queue.iterable });
+            resolve({
+              status: head.status,
+              headers: head.headers,
+              body: new Uint8Array(),
+              stream: sse.queue.iterable,
+              ...(head.setCookies.length > 0 ? { setCookies: head.setCookies } : {}),
+            });
             if (rest.length > 0) feedStream(rest);
             return;
           }

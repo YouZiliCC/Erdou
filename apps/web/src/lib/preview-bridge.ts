@@ -1,6 +1,7 @@
 import type { HttpRequest, HttpResponse, WsConnection } from "@erdou/runtime-contract";
 import { injectPreviewScripts } from "./preview-inject.js";
 import { isWsOpenMessage, openWsTunnel } from "./preview-tools.js";
+import { PreviewCookieJar } from "./preview-cookies.js";
 
 /**
  * The preview reverse-proxy bridge (page side).
@@ -209,11 +210,17 @@ let currentRuntime: DispatchRuntime | null = null;
  *  runtime (kernel switch / re-boot) tears the old kernel's pumps down instead
  *  of leaking them against a dead emulator. */
 const activeTunnels = new Set<() => void>();
+/** The preview cookie jar (see preview-cookies.ts): the page bridge IS the
+ *  cookie store for previewed apps — a browser never stores a
+ *  Service-Worker-synthesized response's cookies. Cleared on a kernel switch
+ *  (the old kernel's servers, and their sessions, are gone). */
+const cookieJar = new PreviewCookieJar();
 
 function retargetRuntime(runtime: DispatchRuntime): void {
   if (currentRuntime !== null && currentRuntime !== runtime) {
     for (const cleanup of [...activeTunnels]) cleanup();
     activeTunnels.clear();
+    cookieJar.clear();
   }
   currentRuntime = runtime;
 }
@@ -360,7 +367,16 @@ export async function answer(
   replyPort: ProxyReplyPort,
 ): Promise<void> {
   try {
-    const res = injectPreviewScripts(await runtime.dispatch(msg.port, msg.req), msg.dest);
+    // Inject the previewed guest's stored cookies for this port + path (the
+    // browser can't for an SW-proxied app — see preview-cookies.ts). `Cookie`
+    // is a forbidden header the SW never sees, so we own it here entirely.
+    const cookie = cookieJar.header(msg.port, msg.req.url);
+    if (cookie !== null) msg.req.headers = { ...msg.req.headers, cookie };
+    const raw = await runtime.dispatch(msg.port, msg.req);
+    // Absorb Set-Cookie into the jar BEFORE injection — rewriteHtml returns a
+    // fresh object without setCookies, and the jar is the sole cookie store.
+    if (raw.setCookies && raw.setCookies.length > 0) cookieJar.store(msg.port, msg.req.url, raw.setCookies);
+    const res = injectPreviewScripts(raw, msg.dest);
     if (res.stream !== undefined && !NULL_BODY_STATUS.has(res.status)) {
       const it = res.stream[Symbol.asyncIterator]();
       const stream = new ReadableStream<Uint8Array>({

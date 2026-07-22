@@ -19,20 +19,34 @@ function headerEnd(b: Uint8Array): number {
   return -1;
 }
 
-function parseHeaderLines(headText: string): { status: number; headers: Record<string, string> } {
+function parseHeaderLines(headText: string): {
+  status: number;
+  headers: Record<string, string>;
+  setCookies: string[];
+} {
   const lines = headText.split("\r\n");
   const statusLine = lines[0] ?? "";
   const m = /^HTTP\/\d\.\d\s+(\d{3})/.exec(statusLine);
   if (!m) throw new Error(`parseHttpResponse: bad status line ${JSON.stringify(statusLine)}`);
   const headers: Record<string, string> = {};
+  // Set-Cookie is the one legally-repeated response header — a single-valued
+  // map would drop all but the last. Keep each raw value out of band so the
+  // preview cookie jar sees every cookie the server set.
+  const setCookies: string[] = [];
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i];
     if (!line) continue;
     const idx = line.indexOf(":");
     if (idx === -1) continue;
-    headers[line.slice(0, idx).trim().toLowerCase()] = line.slice(idx + 1).trim();
+    const key = line.slice(0, idx).trim().toLowerCase();
+    const value = line.slice(idx + 1).trim();
+    if (key === "set-cookie") {
+      setCookies.push(value);
+      continue;
+    }
+    headers[key] = value;
   }
-  return { status: Number(m[1]), headers };
+  return { status: Number(m[1]), headers, setCookies };
 }
 
 function concat(chunks: Uint8Array[]): Uint8Array {
@@ -114,7 +128,7 @@ export function serializeHttpRequest(req: HttpRequest): Uint8Array {
 export function parseHttpResponse(bytes: Uint8Array): HttpResponse {
   const sep = headerEnd(bytes);
   if (sep === -1) throw new Error("parseHttpResponse: no header/body separator (CRLFCRLF)");
-  const { status, headers } = parseHeaderLines(latin1(bytes.subarray(0, sep)));
+  const { status, headers, setCookies } = parseHeaderLines(latin1(bytes.subarray(0, sep)));
   const rest = bytes.subarray(sep + 4);
   const cl = headers["content-length"];
   const te = (headers["transfer-encoding"] ?? "").toLowerCase();
@@ -137,7 +151,7 @@ export function parseHttpResponse(bytes: Uint8Array): HttpResponse {
   // complete.
   delete headers["content-length"];
   delete headers["transfer-encoding"];
-  return { status, headers, body };
+  return setCookies.length > 0 ? { status, headers, body, setCookies } : { status, headers, body };
 }
 
 /** A parsed response HEAD — status line + headers — available before (any of)
@@ -151,6 +165,8 @@ export interface ParsedHead {
   headers: Record<string, string>;
   bodyOffset: number;
   framing: "content-length" | "chunked" | "close";
+  /** Raw `Set-Cookie` values (see HttpResponse.setCookies). */
+  setCookies: string[];
 }
 
 /** Incrementally parse a response head out of accumulated bytes. Returns null
@@ -159,13 +175,13 @@ export interface ParsedHead {
 export function parseHead(bytes: Uint8Array): ParsedHead | null {
   const sep = headerEnd(bytes);
   if (sep === -1) return null;
-  const { status, headers } = parseHeaderLines(latin1(bytes.subarray(0, sep)));
+  const { status, headers, setCookies } = parseHeaderLines(latin1(bytes.subarray(0, sep)));
   const te = (headers["transfer-encoding"] ?? "").toLowerCase();
   const framing =
     headers["content-length"] !== undefined ? "content-length" : te.includes("chunked") ? "chunked" : "close";
   delete headers["content-length"];
   delete headers["transfer-encoding"];
-  return { status, headers, bodyOffset: sep + 4, framing };
+  return { status, headers, bodyOffset: sep + 4, framing, setCookies };
 }
 
 /**
