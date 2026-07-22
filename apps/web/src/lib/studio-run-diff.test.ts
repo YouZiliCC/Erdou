@@ -3,6 +3,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { Studio } from "./studio.js";
 import { BrowserRuntime } from "@erdou/runtime-browser";
 import { ModelGateway } from "@erdou/model-gateway";
+import { withTitleReplies } from "./test-support/title-gateway.js";
 import { DEFAULT_MODEL } from "./model-config.js";
 import type { Kernel } from "./kernel.js";
 import type { DirHandleLike, FileHandleLike } from "./local-mount.js";
@@ -76,7 +77,7 @@ class MockDir implements DirHandleLike {
 
 // Chat-mock gateway (the run-lifecycle idiom): each mock supplies one model turn.
 type ChatMock = ReturnType<typeof vi.fn>;
-const gatewayWith = (chat: ChatMock): ModelGateway => ({ chat }) as unknown as ModelGateway;
+const gatewayWith = (chat: ChatMock): ModelGateway => ({ chat: withTitleReplies(chat) }) as unknown as ModelGateway;
 const setGateway = (studio: Studio, chat: ChatMock): void => {
   (studio as unknown as { gateway: ModelGateway }).gateway = gatewayWith(chat);
 };

@@ -2,6 +2,7 @@ import "fake-indexeddb/auto";
 import { describe, it, expect, vi } from "vitest";
 import { Studio, type Run, type TraceKind } from "./studio.js";
 import { ModelGateway } from "@erdou/model-gateway";
+import { withTitleReplies } from "./test-support/title-gateway.js";
 import { DEFAULT_MODEL } from "./model-config.js";
 import { saveRuns, loadRuns } from "./runs-store.js";
 
@@ -9,7 +10,7 @@ import { saveRuns, loadRuns } from "./runs-store.js";
 // can be counted): each mockImplementation supplies one model turn.
 type ChatMock = ReturnType<typeof vi.fn>;
 function gatewayWith(chat: ChatMock): ModelGateway {
-  return { chat } as unknown as ModelGateway;
+  return { chat: withTitleReplies(chat) } as unknown as ModelGateway;
 }
 const toolCallTurn = (id: string, name: string, args: unknown) => ({
   content: "",

@@ -3,6 +3,7 @@ import { describe, it, expect, vi } from "vitest";
 import { Studio } from "./studio.js";
 import { BrowserRuntime } from "@erdou/runtime-browser";
 import { ModelGateway } from "@erdou/model-gateway";
+import { withTitleReplies } from "./test-support/title-gateway.js";
 import { DEFAULT_MODEL } from "./model-config.js";
 import type { Kernel } from "./kernel.js";
 
@@ -27,7 +28,12 @@ const final = (content: string): unknown => ({ choices: [{ message: { content } 
 function scriptedGateway(responses: unknown[]): ModelGateway {
   let i = 0;
   const fetch = (async () => new Response(JSON.stringify(responses[i++] ?? final("done")), { status: 200 })) as typeof globalThis.fetch;
-  return new ModelGateway({ fetch });
+  const gw = new ModelGateway({ fetch });
+  // Answer Studio's background title call from a fixed reply so it doesn't
+  // consume a scripted agent response.
+  const realChat = gw.chat.bind(gw);
+  (gw as unknown as { chat: unknown }).chat = withTitleReplies(realChat);
+  return gw;
 }
 
 /** A fake VM kernel backed by a real BrowserRuntime — a working writeFile +

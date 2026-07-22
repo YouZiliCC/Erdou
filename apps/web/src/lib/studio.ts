@@ -22,6 +22,7 @@ import { SnapshotReader, buildFileChanges } from "./snapshot-read.js";
 import { startPreviewProxy, setPreviewRuntime } from "./preview-bridge.js";
 import { runServeCommand, type RunServeResult } from "./run-serve.js";
 import { copyWorkspace } from "./workspace-copy.js";
+import { runTitle, cleanTitle, TITLE_SYSTEM } from "./run-title.js";
 import { writeFolderState, readFolderState, type FolderState } from "./folder-state.js";
 import {
   loadFolderIntoVfs,
@@ -150,13 +151,6 @@ export interface FileNode {
 function newRunId(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-/** First non-empty line of the task, trimmed to ~48 chars. Pure. */
-export function runTitle(task: string): string {
-  const firstLine = (task.split("\n")[0] ?? "").trim();
-  const base = firstLine.length > 0 ? firstLine : task.trim();
-  return base.length > 48 ? base.slice(0, 47).trimEnd() + "…" : base;
 }
 
 /** One macrotask — the contract guarantees events caused by a runtime call
@@ -1531,6 +1525,9 @@ export class Studio {
     this.runs = [run, ...this.runs];
     this.activeRunId = run.id;
     this.notify();
+    // Summarize a real title from the task via the user's model, replacing the
+    // first-line placeholder (fire-and-forget — runs concurrently, never blocks).
+    this.generateRunTitle(run.id, task, model);
     // D2: persist the run at creation — before this, the first save happened in
     // runAgentTurn's finally, so a reload mid-run silently lost the whole thread.
     // A failed save is surfaced but doesn't block the run itself.
@@ -1538,6 +1535,36 @@ export class Studio {
     this.scheduleFolderStateSave();
     this.seedEnvNotes();
     await this.runAgentTurn(run, task, model, approvalMode);
+  }
+
+  /**
+   * Best-effort: ask the USER's model for a concise title for a NEW run and swap
+   * it in for the first-line placeholder (`runTitle`). Fire-and-forget — offline,
+   * a bad key, or a refusal just leaves the placeholder, and it never blocks or
+   * fails the run (a one-shot, tool-free chat that returns fast). Only replaces
+   * the EXACT placeholder, so a rename the user made while the title was in
+   * flight is respected, and only if the run still exists.
+   */
+  private generateRunTitle(runId: string, task: string, model: ModelConfig): void {
+    const placeholder = runTitle(task);
+    void (async () => {
+      let title: string;
+      try {
+        const res = await this.gateway.chat(model, [
+          { role: "system", content: TITLE_SYSTEM },
+          { role: "user", content: task.slice(0, 4000) },
+        ]);
+        title = cleanTitle(res.content);
+      } catch {
+        return; // any failure: keep the instant placeholder
+      }
+      if (title === "" || title === placeholder) return;
+      const run = this.runs.find((r) => r.id === runId);
+      if (!run || run.title !== placeholder) return; // deleted, or user renamed meanwhile
+      run.title = title;
+      this.notify();
+      this.scheduleRunsSave();
+    })();
   }
 
   /**

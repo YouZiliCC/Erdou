@@ -6,6 +6,7 @@ import "fake-indexeddb/auto";
 import { describe, it, expect, vi } from "vitest";
 import { Studio } from "./studio.js";
 import { ModelGateway, type ChatMessage } from "@erdou/model-gateway";
+import { withTitleReplies } from "./test-support/title-gateway.js";
 import { DEFAULT_MODEL } from "./model-config.js";
 import { loadRuns } from "./runs-store.js";
 import { parseSubagentDetail } from "./delegate.js";
@@ -32,7 +33,7 @@ function routedGateway(scripts: Record<string, Turn[]>): ModelGateway {
     if (!turns) throw new Error(`no script for task "${task}" — a child ran that should not have`);
     return turns[i] ?? turnFinal("done");
   };
-  return { chat } as unknown as ModelGateway;
+  return { chat: withTitleReplies(chat) } as unknown as ModelGateway;
 }
 
 const setGateway = (studio: Studio, gateway: ModelGateway): void => {
