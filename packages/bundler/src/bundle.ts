@@ -136,11 +136,17 @@ export async function bundle(input: BundleInput): Promise<BundleOutput> {
         if (args.importer.startsWith("http")) {
           return { path: new URL(spec, args.importer).href, namespace: HTTP };
         }
-        // Imports from the VFS (entry + local files).
-        if (spec.startsWith("/")) return { path: normalizePath(spec), namespace: NS };
-        if (spec.startsWith(".")) {
+        // Imports from the VFS (entry + local files). Extension/index resolution has to happen
+        // HERE, not in onLoad: for the VFS namespace args.importer is the path this plugin
+        // returned last time, so returning a bare `./components` would make the barrel's own
+        // dirnameOf(importer) "/src" and its `./Button` resolve to /src/Button. onLoad's
+        // resolveDir can't rescue that either — esbuild only consults it for its default
+        // resolver, and this plugin's /.*/ filter intercepts every specifier first.
+        if (spec.startsWith("/") || spec.startsWith(".")) {
           const dir = args.importer ? dirnameOf(args.importer) : "/";
-          return { path: normalizePath(`${dir}/${spec}`), namespace: NS };
+          const path = spec.startsWith("/") ? normalizePath(spec) : normalizePath(`${dir}/${spec}`);
+          // Unresolvable specifiers pass through as-is so onLoad fails loudly, naming the module.
+          return { path: resolveFile(fs, path) ?? path, namespace: NS };
         }
         // Bare (npm) import → fetch from the CDN and bundle it in (self-contained preview).
         return { path: cdn + spec, namespace: HTTP };

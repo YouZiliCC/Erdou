@@ -47,10 +47,35 @@ describe("bundle", () => {
     expect(html).toContain("const x=1;");
   });
 
+  it("resolves a directory import through its index barrel, including the barrel's own relative imports", async () => {
+    const fs = new Vfs({ clock: () => 0 });
+    fs.mkdir("/src/components", { recursive: true });
+    fs.writeFile("/src/components/Button.ts", "export const Button = 'btn';");
+    fs.writeFile("/src/components/index.ts", 'export { Button } from "./Button";');
+    fs.writeFile("/src/main.ts", 'import { Button } from "./components";\nconsole.log(Button);');
+    const out = await bundle({ esbuild: es, fs, entry: "/src/main.ts" });
+    expect(out.errors).toEqual([]);
+    expect(out.js).toContain("btn");
+  });
+
+  it("resolves a barrel that re-exports another directory's barrel", async () => {
+    const fs = new Vfs({ clock: () => 0 });
+    fs.mkdir("/src/components/ui", { recursive: true });
+    fs.writeFile("/src/components/ui/Button.ts", "export const Button = 'nested-btn';");
+    fs.writeFile("/src/components/ui/index.ts", 'export { Button } from "./Button";');
+    fs.writeFile("/src/components/index.ts", 'export { Button } from "./ui";');
+    fs.writeFile("/src/main.ts", 'import { Button } from "./components";\nconsole.log(Button);');
+    const out = await bundle({ esbuild: es, fs, entry: "/src/main.ts" });
+    expect(out.errors).toEqual([]);
+    expect(out.js).toContain("nested-btn");
+  });
+
   it("reports an error for a missing local import", async () => {
     const fs = new Vfs({ clock: () => 0 });
     fs.writeFile("/main.ts", 'import "./nope";');
     const out = await bundle({ esbuild: es, fs, entry: "/main.ts" });
     expect(out.errors.length).toBeGreaterThan(0);
+    // The unresolved specifier must still reach onLoad by name, not be silently dropped.
+    expect(out.errors.join("\n")).toContain("cannot resolve module '/nope'");
   });
 });
