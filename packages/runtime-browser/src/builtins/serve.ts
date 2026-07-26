@@ -43,20 +43,36 @@ function looksLikeFile(path: string): boolean {
 
 const PORT_PREFIX = /^\/__port__\/\d+/;
 
-/** Strip the query string and an optional preview-SW `/__port__/<n>` prefix
- *  from a dispatched request URL, leaving a path rooted at `/`. */
-function requestPath(url: string): string {
-  const withoutQuery = url.split("?")[0] ?? "";
-  const withoutPrefix = withoutQuery.replace(PORT_PREFIX, "");
-  return withoutPrefix === "" ? "/" : withoutPrefix;
+/**
+ * Strip an optional preview-SW `/__port__/<n>` prefix from a dispatched
+ * request path and percent-decode it, giving the VFS path the page actually
+ * linked to. The production caller is the preview Service Worker, which
+ * derives the path from `new URL(...).pathname` — ALWAYS percent-encoded — so
+ * without decoding, `<img src="图片.png">` and `href="my file.txt"` miss every
+ * lookup and 404. Returns null for a malformed escape (e.g. a bare "%"), which
+ * the caller answers with 400 rather than guessing at the raw bytes.
+ */
+function requestPath(rawPath: string): string | null {
+  const withoutPrefix = rawPath.replace(PORT_PREFIX, "");
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(withoutPrefix);
+  } catch {
+    return null;
+  }
+  return decoded === "" ? "/" : decoded;
+}
+
+function textResponse(status: number, body: string, extraHeaders?: Record<string, string>): HttpResponse {
+  return {
+    status,
+    headers: { "content-type": "text/plain", ...extraHeaders },
+    body: new TextEncoder().encode(body),
+  };
 }
 
 function notFound(): HttpResponse {
-  return {
-    status: 404,
-    headers: { "content-type": "text/plain" },
-    body: new TextEncoder().encode("Not Found"),
-  };
+  return textResponse(404, "Not Found");
 }
 
 /** Build a static-file `HttpHandler` rooted at `dir` (an absolute VFS path).
@@ -71,16 +87,57 @@ function makeHandler(fs: FileSystemApi, dir: string, spa: boolean): HttpHandler 
   };
 
   return (req: HttpRequest): HttpResponse => {
-    const reqPath = requestPath(req.url);
-    let relPath = reqPath.slice(1);
-    if (relPath === "" || relPath.endsWith("/")) relPath += "index.html";
-    const filePath = join(dir, relPath);
+    const q = req.url.indexOf("?");
+    const rawPath = q === -1 ? req.url : req.url.slice(0, q);
+    const query = q === -1 ? "" : req.url.slice(q);
+    const reqPath = requestPath(rawPath);
+    if (reqPath === null) return textResponse(400, `Bad Request: malformed percent-encoding in path '${rawPath}'`);
+
+    const relPath = reqPath.slice(1);
+    // A path ending in `/` (or the bare root) asks for the directory index. Track
+    // that we synthesized `index.html`: the directory branch below must not
+    // redirect a path that already carries its trailing slash.
+    const wantsIndex = relPath === "" || relPath.endsWith("/");
+    const filePath = join(dir, wantsIndex ? relPath + "index.html" : relPath);
     // Guard against a request path (e.g. containing "../..") escaping the
     // served root via VFS normalization.
     if (filePath !== dir && !filePath.startsWith(root)) return notFound();
 
     const file = readFile(filePath);
     if (file) return file;
+    // `/docs` names a real directory: redirect to `docs/` so the index lookup
+    // above can fire and so relative links inside that page resolve against
+    // the directory. This must precede the SPA branch — looksLikeFile("/docs")
+    // is false, so otherwise --spa would answer with the ROOT index.html and
+    // silently serve the wrong page.
+    //
+    // The location is RELATIVE (RFC 7231 §7.1.2 allows it), never origin-
+    // absolute: the production caller (apps/web/public/preview-sw.js) strips
+    // BOTH `/__preview__/<primary>` and `/__port__/<n>` before dispatch, so this
+    // handler never sees the scope it has to stay inside — an absolute `/docs/`
+    // would resolve against the Studio origin and leave the preview entirely.
+    // A relative reference resolves against the URL the browser actually
+    // requested, so it lands correctly under any scope (including a direct
+    // `/__port__/<n>/…` dispatch, which bypasses the SW). The leading `./`
+    // stops a segment holding a colon (`data:x`) from parsing as a scheme.
+    //
+    // 302, never 301: this is a live dev preview over a filesystem the agent
+    // rewrites constantly. Browsers cache a 301 persistently, so once `/docs`
+    // had redirected, replacing that directory with `docs.html` would pin the
+    // user to a dead URL with no fix short of purging the cache.
+    if (fs.exists(filePath) && fs.stat(filePath).type === "directory") {
+      // The one shape that would loop: a DIRECTORY named `index.html`. `/docs/`
+      // resolves to `docs/index.html`, itself a directory, whose trailing-slash
+      // form is `/docs//` — and around again. Having already appended
+      // `index.html` there is no slash left to add, so fail fast naming the path.
+      if (wantsIndex) {
+        return textResponse(500, `Internal Server Error: '${filePath}' is a directory, not an index file`);
+      }
+      // Keep the raw (still percent-encoded) final segment: reqPath is decoded,
+      // and a decoded `my file` is not a valid URI reference in a location.
+      const segment = rawPath.slice(rawPath.lastIndexOf("/") + 1);
+      return textResponse(302, "Found", { location: `./${segment}/${query}` });
+    }
     if (spa && !looksLikeFile(reqPath)) {
       const index = readFile(join(dir, "index.html"));
       if (index) return index;

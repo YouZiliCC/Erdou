@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { ProcessTable } from "./process-table.js";
+import { pipeProcesses } from "./pipe.js";
 import type { Program, ProgramRegistry } from "./program.js";
 import { Vfs } from "../vfs/vfs.js";
 import { EventBus } from "../core/event-bus.js";
@@ -42,15 +43,16 @@ function make(programs: Record<string, Program>) {
 }
 
 describe("pipelines", () => {
+  // The stage wiring itself lives in the shell interpreter now (it has to know
+  // about redirects); this covers the primitive it wires with, pipeProcesses.
   it("streams stdout of one stage into the next", async () => {
     const table = make({ echo, grep });
-    const stages = table.spawnPiped([
-      { cmd: "echo", args: ["hi\nbye"] },
-      { cmd: "grep", args: ["hi"] },
-    ]);
-    const last = stages[stages.length - 1]!;
-    await last.wait();
-    expect(await last.stdout.text()).toBe("hi\n");
+    const first = table.spawn({ cmd: "echo", args: ["hi\nbye"] });
+    // pipeStdin keeps the second stage's stdin open for the pipe to fill and end.
+    const second = table.spawn({ cmd: "grep", args: ["hi"], pipeStdin: true });
+    pipeProcesses(first, second);
+    await second.wait();
+    expect(await second.stdout.text()).toBe("hi\n");
   });
 
   it("registers a new program under a command name", async () => {

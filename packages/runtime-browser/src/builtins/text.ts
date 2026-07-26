@@ -22,18 +22,48 @@ export const env: Program = async (ctx) => {
   return 0;
 };
 
+/**
+ * `grep` — an honest busybox-style SUBSET for the browser kernel:
+ *
+ *   grep [-i] [-n] [-v] PATTERN [FILE...]
+ *
+ * PATTERN is a JavaScript RegExp, NOT a literal substring — close enough to
+ * ERE for the agent's use (`^ $ . | () [] + ? {}` all work unescaped, so a
+ * `-E`-style pattern needs no flag). It is deliberately never degraded to a
+ * substring search: the agent reads exit 1 as "the string is absent from the
+ * codebase", so a silently-mangled `^foo` would be read as a fact about the
+ * files. An uncompilable PATTERN, and any flag outside -i/-n/-v, therefore
+ * fail loudly instead. Exit: 0 = matched, 1 = no match, 2 = usage/system error
+ * (unsupported option, bad pattern, unreadable FILE). A usage error must NOT
+ * exit 1: `grep -r foo .` in an `if`/`||` chain would then be indistinguishable
+ * from a clean no-match, which is exactly the misreading this rejection exists
+ * to prevent. (sed and awk exit 1 on a usage error; they have no "no match"
+ * status for it to collide with, so grep diverges from them here on purpose.)
+ */
 export const grep: Program = async (ctx) => {
   const args = ctx.argv.slice(1);
   let ignoreCase = false;
   let lineNumbers = false;
   let invert = false;
   const rest: string[] = [];
-  for (const a of args) {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    // POSIX end-of-options, as in sed/awk. It is the only way to grep a pattern
+    // that starts with a dash; without this case the flag loop below walks the
+    // characters of "--" and rejects it as unsupported option '--'.
+    if (a === "--") {
+      rest.push(...args.slice(i + 1));
+      break;
+    }
     if (a.length > 1 && a.startsWith("-")) {
       for (const ch of a.slice(1)) {
         if (ch === "i") ignoreCase = true;
         else if (ch === "n") lineNumbers = true;
         else if (ch === "v") invert = true;
+        else {
+          ctx.stderr.write(`grep: unsupported option '-${ch}' (supported: -i, -n, -v)\n`);
+          return 2;
+        }
       }
     } else {
       rest.push(a);
@@ -44,7 +74,13 @@ export const grep: Program = async (ctx) => {
     ctx.stderr.write("grep: missing pattern\n");
     return 2;
   }
-  const needle = ignoreCase ? pattern.toLowerCase() : pattern;
+  let re: RegExp;
+  try {
+    re = new RegExp(pattern, ignoreCase ? "i" : "");
+  } catch (err) {
+    ctx.stderr.write(`grep: invalid pattern '${pattern}': ${describeError(err)}\n`);
+    return 2;
+  }
   const files = rest.slice(1);
   let anyMatch = false;
   let errored = false;
@@ -55,8 +91,7 @@ export const grep: Program = async (ctx) => {
     const count = text === "" ? 0 : trailing ? lines.length - 1 : lines.length;
     for (let idx = 0; idx < count; idx++) {
       const line = lines[idx]!;
-      const hay = ignoreCase ? line.toLowerCase() : line;
-      if (hay.includes(needle) !== invert) {
+      if (re.test(line) !== invert) {
         anyMatch = true;
         const label = (prefix ? `${prefix}:` : "") + (lineNumbers ? `${idx + 1}:` : "");
         ctx.stdout.write(label + line + "\n");

@@ -20,7 +20,12 @@ function fromBase64(text: string): Uint8Array {
 function serializeNode(node: Inode): SnapshotFsNode {
   if (node.type === "file") return { type: "file", mode: node.mode, data: toBase64(node.data) };
   if (node.type === "symlink") return { type: "symlink", mode: node.mode, target: node.target };
-  const children: Record<string, SnapshotFsNode> = {};
+  // Null-prototype map: on a plain `{}`, `children["__proto__"] = node` hits
+  // Object.prototype's __proto__ SETTER — it creates no own key, so a file or
+  // directory literally named `__proto__` vanished from the snapshot and was
+  // gone after an IndexedDB round-trip. Null-proto objects are still
+  // structured-clone- and JSON-safe (both copy own enumerable keys directly).
+  const children: Record<string, SnapshotFsNode> = Object.create(null);
   for (const [name, child] of node.children) children[name] = serializeNode(child);
   return { type: "directory", mode: node.mode, children };
 }

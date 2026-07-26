@@ -24,6 +24,23 @@ describe("snapshot serialize/restore", () => {
     expect(vfs.readlink("/link")).toBe("/a/f.txt");
   });
 
+  it("round-trips a file named __proto__ (Object.prototype's setter used to eat it)", () => {
+    const vfs = new Vfs({ clock: () => 1 });
+    vfs.mkdir("/d");
+    vfs.writeFile("/d/__proto__", "payload");
+    vfs.writeFile("/d/normal", "ok");
+
+    const snap = snapshotVfs(vfs, 1);
+    const dir = snap.fs.type === "directory" ? snap.fs.children["d"] : undefined;
+    expect(dir?.type).toBe("directory");
+    expect(Object.keys(dir?.type === "directory" ? dir.children : {}).sort()).toEqual(["__proto__", "normal"]);
+
+    const restored = new Vfs({ clock: () => 2 });
+    restoreVfs(restored, JSON.parse(JSON.stringify(snap)), 2);
+    expect(restored.readdir("/d").map((e) => e.name).sort()).toEqual(["__proto__", "normal"]);
+    expect(restored.readFileText("/d/__proto__")).toBe("payload");
+  });
+
   it("MemorySnapshotStore saves, loads, lists and deletes", async () => {
     const vfs = new Vfs({ clock: () => 1 });
     vfs.writeFile("/x", "data");

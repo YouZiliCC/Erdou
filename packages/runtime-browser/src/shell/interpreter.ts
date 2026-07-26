@@ -7,6 +7,7 @@ import { PipeStream } from "../core/byte-stream.js";
 import { join, normalize } from "../vfs/path.js";
 import type { Vfs } from "../vfs/vfs.js";
 import type { ProcessTable, InternalSpawnOptions, ProcessRecord } from "../process/process-table.js";
+import { pipeProcesses } from "../process/pipe.js";
 
 const resolveAbs = (cwd: string, p: string): string =>
   p.startsWith("/") ? normalize(p) : join(cwd, p);
@@ -45,6 +46,14 @@ interface BackgroundJob {
   record: ProcessRecord;
 }
 
+/** The `$?` of one execution context. Foreground lines share the shell's cell,
+ *  so `$?` survives across `execute` calls the way a session expects; a `&` job
+ *  runs against its own, because bash leaves the launching shell's `$?` at the
+ *  status of the `&` (0) no matter what the detached job later exits with. */
+interface StatusCell {
+  last: number;
+}
+
 /**
  * The shell interpreter: parses a command line and runs it against the process
  * table, wiring pipelines, redirections and `&&`/`||`/`;` control flow. `cd`,
@@ -61,6 +70,8 @@ export class Shell {
   /** This shell's background jobs, oldest first. Finished jobs stay here until
    *  `jobs` has reported them done once, then they are dropped. */
   private readonly jobs: BackgroundJob[] = [];
+  /** Exit status of the last foreground command — what `$?` expands to. */
+  private readonly status: StatusCell = { last: 0 };
 
   constructor(deps: ShellDeps) {
     this.table = deps.table;
@@ -80,6 +91,9 @@ export class Shell {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (!stderr.isClosed) stderr.write(msg + "\n");
+        // A parse/redirect failure is still a completed foreground command, so
+        // `$?` must report it rather than keep the previous line's status.
+        this.status.last = 2;
         return 2;
       } finally {
         if (!stdout.isClosed) stdout.end();
@@ -114,19 +128,22 @@ export class Shell {
     // adopted pid (it is NOT in `records`, so killing this foreground result
     // does not touch it — `&` means detach).
     if (list.background) return this.launchBackground(src, list, stdout);
-    return this.runList(list.items, stdout, stderr, records, canceled);
+    return this.runList(list.items, stdout, stderr, records, canceled, this.status);
   }
 
   /** Run list items sequentially with &&/||/; semantics. `canceled` is checked
-   *  before each item so a kill also stops the items not yet started. */
+   *  before each item so a kill also stops the items not yet started. `status`
+   *  is both the source of `$?` for the next item and where each item's exit
+   *  status lands; a skipped item leaves it alone, as in bash. */
   private async runList(
     items: ListItem[],
     stdout: PipeStream,
     stderr: PipeStream,
     records: ProcessRecord[],
     canceled: () => boolean,
+    status: StatusCell,
   ): Promise<number> {
-    let code = 0;
+    let code = 0; // a list whose items all get skipped/canceled reports success
     for (const item of items) {
       if (canceled()) break;
       const shouldRun =
@@ -136,7 +153,8 @@ export class Shell {
             ? code === 0
             : code !== 0; // "||"
       if (!shouldRun) continue;
-      code = await this.execPipeline(item.pipeline, stdout, stderr, records);
+      code = await this.execPipeline(item.pipeline, stdout, stderr, records, status.last);
+      status.last = code;
     }
     return code;
   }
@@ -176,7 +194,10 @@ export class Shell {
     void (async (): Promise<void> => {
       let code: number;
       try {
-        code = await this.runList(list.items, jobStdout, jobStderr, records, () => canceled);
+        // Its own status cell: the job's exit status is not this shell's `$?`.
+        code = await this.runList(list.items, jobStdout, jobStderr, records, () => canceled, {
+          last: 0,
+        });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (!jobStderr.isClosed) jobStderr.write(msg + "\n");
@@ -235,8 +256,9 @@ export class Shell {
     shellStdout: PipeStream,
     shellStderr: PipeStream,
     records: ProcessRecord[],
+    lastStatus: number,
   ): Promise<number> {
-    const specs = pipeline.commands.map((c) => this.expandCommand(c));
+    const specs = pipeline.commands.map((c) => this.expandCommand(c, lastStatus));
 
     if (specs.length === 1) {
       const argv = specs[0]!.argv;
@@ -245,27 +267,67 @@ export class Shell {
       if (argv[0] === "jobs") return this.builtinJobs(argv, shellStdout, shellStderr);
     }
 
+    // Only the first stage's stdin is ours to set — every later stage's stdin is
+    // the pipe. Honouring `<` there means dropping that pipe (POSIX: the
+    // redirect wins), which the wiring below cannot express; reading only
+    // specs[0] instead made `a | b < f` quietly feed b with a's output.
+    const lateInput = specs.findIndex((s, idx) => idx > 0 && s.redirects.some((r) => r.op === "<"));
+    if (lateInput !== -1) {
+      const cmd = specs[lateInput]!.argv[0] ?? "";
+      throw new ErrnoError("EINVAL", {
+        syscall: "redirect",
+        path: `stdin redirect on pipeline stage ${lateInput + 1} (${cmd}) is not supported`,
+      });
+    }
+
     const firstInput = specs[0]!.redirects.find((r) => r.op === "<");
     const firstStdin = firstInput ? this.vfs.readFile(firstInput.file) : undefined;
-
-    const stages = this.table.spawnPiped(
-      specs.map((s, idx): InternalSpawnOptions => ({
-        cmd: s.argv[0] ?? "",
-        args: s.argv.slice(1),
-        cwd: this.cwd,
-        env: this.env,
-        ...(idx === 0 && firstStdin !== undefined ? { stdin: firstStdin } : {}),
-      })),
+    const outRedirects = specs.map((s) =>
+      s.redirects.find((r) => r.fd === 1 && (r.op === ">" || r.op === ">>")),
     );
-    records.push(...stages);
+
+    // Spawned here rather than via table.spawnPiped so that a stage whose
+    // stdout is redirected is NOT also piped onward. A PipeStream is
+    // single-consumer (read() shifts chunks off one shared array), so leaving
+    // both pipeProcesses and drainToFile reading it round-robins the output
+    // between the file and the next stage. POSIX gives the redirect the
+    // stdout and the next stage an empty stdin — which is exactly what
+    // spawning that stage without `pipeStdin` produces.
+    const stages: ProcessRecord[] = [];
+    try {
+      for (let idx = 0; idx < specs.length; idx++) {
+        const spec = specs[idx]!;
+        const upstream =
+          idx > 0 && outRedirects[idx - 1] === undefined ? stages[idx - 1] : undefined;
+        const opts: InternalSpawnOptions = {
+          cmd: spec.argv[0] ?? "",
+          args: spec.argv.slice(1),
+          cwd: this.cwd,
+          env: this.env,
+          ...(idx === 0 && firstStdin !== undefined ? { stdin: firstStdin } : {}),
+          ...(upstream ? { pipeStdin: true } : {}),
+        };
+        const record = this.table.spawn(opts);
+        // Record before wiring: a later stage failing to spawn (ENOENT) must
+        // still leave the ones already running killable through the caller's
+        // ShellResult, not orphaned in the process table forever.
+        stages.push(record);
+        records.push(record);
+        if (upstream) pipeProcesses(upstream, record);
+      }
+    } catch (err) {
+      // The pipeline will never run, so tear down the stages that did start
+      // instead of leaking them.
+      for (const r of stages) if (r.state === "running") r.kill();
+      throw err;
+    }
 
     const drains: Promise<void>[] = [];
     for (let idx = 0; idx < stages.length; idx++) {
       const stage = stages[idx]!;
-      const redirects = specs[idx]!.redirects;
       const isLast = idx === stages.length - 1;
-      const out = redirects.find((r) => r.fd === 1 && (r.op === ">" || r.op === ">>"));
-      const err = redirects.find((r) => r.fd === 2 && (r.op === ">" || r.op === ">>"));
+      const out = outRedirects[idx];
+      const err = specs[idx]!.redirects.find((r) => r.fd === 2 && (r.op === ">" || r.op === ">>"));
       if (out) drains.push(this.drainToFile(stage.stdout, out.file, out.op === ">>"));
       else if (isLast) drains.push(this.drainToStream(stage.stdout, shellStdout));
       if (err) drains.push(this.drainToFile(stage.stderr, err.file, err.op === ">>"));
@@ -277,10 +339,16 @@ export class Shell {
     return status.code;
   }
 
-  private expandCommand(command: Command): ExpandedCommand {
-    const argv = command.words.flatMap((w) => expandWord(w, this.env, this.vfs, this.cwd));
+  /** `$?` is a shell parameter, not an environment variable: it is injected into
+   *  the expansion environment only, so it can never reach a spawned process's
+   *  env (where `env` would print a bogus `?=0`). An env entry actually named
+   *  `?` — only reachable via `export '?=x'` — loses to the parameter, as in
+   *  bash, where `$?` never reads the environment at all. */
+  private expandCommand(command: Command, lastStatus: number): ExpandedCommand {
+    const env = { ...this.env, "?": String(lastStatus) };
+    const argv = command.words.flatMap((w) => expandWord(w, env, this.vfs, this.cwd));
     const redirects: ExpandedRedirect[] = command.redirects.map((r) => {
-      const targets = expandWord(r.target, this.env, this.vfs, this.cwd);
+      const targets = expandWord(r.target, env, this.vfs, this.cwd);
       if (targets.length !== 1) {
         throw new ErrnoError("EINVAL", { syscall: "redirect", path: "ambiguous redirect" });
       }
