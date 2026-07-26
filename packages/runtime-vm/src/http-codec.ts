@@ -244,23 +244,3 @@ export class ChunkedDecoder {
     }
   }
 }
-
-/** True once the accumulated bytes are a complete response by a self-describing
- *  rule (Content-Length satisfied OR chunked terminator seen). False when there
- *  is no length info — the caller then completes on idle/close. */
-export function responseComplete(bytes: Uint8Array): boolean {
-  const sep = headerEnd(bytes);
-  if (sep === -1) return false;
-  const { headers } = parseHeaderLines(latin1(bytes.subarray(0, sep)));
-  const bodyLen = bytes.length - (sep + 4);
-  const cl = headers["content-length"];
-  if (cl !== undefined) return bodyLen >= Number(cl);
-  if ((headers["transfer-encoding"] ?? "").toLowerCase().includes("chunked")) {
-    // terminator: CRLF "0" CRLF CRLF anywhere after the headers. Known
-    // simplification: a raw substring match, not a real chunk-boundary walk —
-    // acceptable because python http.server (the only server this round
-    // targets) uses Content-Length, never chunked encoding.
-    return latin1(bytes.subarray(sep + 4)).includes("0\r\n\r\n");
-  }
-  return false;
-}

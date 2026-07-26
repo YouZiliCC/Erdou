@@ -251,12 +251,18 @@ export class GuestdClient {
   ps(): Promise<ProcessInfo[]> {
     if (this.disposed) return Promise.resolve([]);
     const id = this.nextId++;
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       this.psResolvers.set(id, resolve);
-      this.control.set(id, ({ body }) => {
+      this.control.set(id, ({ type, body }) => {
         this.control.delete(id);
         const resolver = this.psResolvers.get(id);
         this.psResolvers.delete(id);
+        // guestd wraps every handle() in `except Exception: send_json("!", ident, ...)`
+        // with the SAME request id, so a list_procs() blow-up arrives here as an ERROR
+        // frame. Decoding it as a PROCS reply yields `.procs === undefined`, which
+        // resolves and then TypeErrors inside VmRuntime.getProcesses' live.map() far
+        // from the cause — reject with guestd's own message instead.
+        if (type === FrameType.ERROR) { reject(new Error((decodeJson(body) as { message: string }).message)); return; }
         resolver?.((decodeJson(body) as { procs: ProcessInfo[] }).procs);
       });
       this.channel.send(encodeJsonFrame(FrameType.PS, id, {}));

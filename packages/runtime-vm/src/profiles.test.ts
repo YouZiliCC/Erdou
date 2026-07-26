@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -45,39 +45,24 @@ describe("PROFILE_META", () => {
 });
 
 describe("defaultAssets profile naming", () => {
-  afterEach(() => vi.restoreAllMocks());
-
   it("resolves state-<profile>.zst for non-base profiles (no legacy fallback)", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     for (const p of ["node", "sci"] as VmProfile[]) {
       expect(defaultAssets(p).statePath).toBe(join(assetsDir, `state-${p}.zst`));
     }
-    expect(warn).not.toHaveBeenCalled();
   });
 
-  it("defaults to the base profile", () => {
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect(defaultAssets().statePath).toMatch(/state(-base)?\.zst$/);
+  // The pre-R13 legacy state.zst fallback was removed in T10 (assets.ts): base
+  // resolves state-base.zst UNCONDITIONALLY, so a stale assets/state.zst on a dev
+  // machine must not change the answer.
+  it("defaults to the base profile and never resolves the removed legacy state.zst", () => {
+    expect(defaultAssets().statePath).toBe(join(assetsDir, "state-base.zst"));
     expect(defaultAssets().profile).toBe("base");
+    expect(defaultAssets("base").statePath).toBe(join(assetsDir, "state-base.zst"));
   });
-
-  // LEGACY pre-R13 single-image transition — delete this test together with the
-  // fallback in T10 (it self-skips once state-base.zst is baked).
-  it.skipIf(existsSync(join(assetsDir, "state-base.zst")) || !existsSync(join(assetsDir, "state.zst")))(
-    "falls back to legacy state.zst for base when state-base.zst is absent, loudly",
-    () => {
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-      const a = defaultAssets("base");
-      expect(a.statePath).toBe(join(assetsDir, "state.zst"));
-      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/state-base\.zst absent.*legacy state\.zst/));
-      expect(assetsPresent("base")).toBe(true); // conformance gate stays green pre-T10
-    },
-  );
 
   it("assetsPresent(profile) requires that profile's state image", () => {
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-    for (const p of ["node", "sci"] as VmProfile[]) {
-      expect(assetsPresent(p)).toBe(existsSync(join(assetsDir, `state-${p}.zst`)));
+    for (const p of VM_PROFILES) {
+      expect(assetsPresent(p), p).toBe(existsSync(join(assetsDir, `state-${p}.zst`)));
     }
   });
 });

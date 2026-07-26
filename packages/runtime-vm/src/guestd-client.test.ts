@@ -68,6 +68,17 @@ describe("GuestdClient", () => {
     expect(procs[0]!.pid).toBe(1);
   });
 
+  it("ps() rejects on an ERROR frame instead of resolving an undefined proc list", async () => {
+    // guestd wraps handle() in `except Exception: send_json("!", ident, ...)` with the
+    // SAME request id, so a list_procs() blow-up arrives on the ps control id.
+    const channel = fakeGuest((type, id, _body, reply) => {
+      if (type === FrameType.PS) reply(encodeJsonFrame(FrameType.ERROR, id, { code: "EIO", message: "list_procs: /proc unreadable" }));
+    });
+    const client = new GuestdClient(channel);
+    await client.ready();
+    await expect(client.ps()).rejects.toThrow(/list_procs: \/proc unreadable/);
+  });
+
   it("ready() rejects after the deadline if the guest never answers", async () => {
     // a channel that swallows PINGs and never emits READY
     const channel: GuestChannel = { send() {}, subscribe() {} };

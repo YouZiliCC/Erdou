@@ -14,11 +14,16 @@ export function makeFakeFs9p(): Fs9p & { root: number } {
     return inodes.length - 1;
   };
   const root = mkInode(0o040755); // idx 0 = export root
+  // Real "."/".." direntries, exactly as v86's link_under_dir installs them
+  // (libv86-debug.js:5192; the root self-links to 0). SearchPath resolves every
+  // segment through Search, so ".." genuinely walks UP — without these the fake
+  // silently swallows path-escape bugs that the real FS would honour.
+  inodes[root].direntries.set(".", root); inodes[root].direntries.set("..", root);
   const fs: any = {
     inodes,
     inodedata,
     GetInode: (i: number) => inodes[i],
-    CreateDirectory(name: string, parent: number) { const i = mkInode(0o040755); inodes[parent].direntries.set(name, i); return i; },
+    CreateDirectory(name: string, parent: number) { const i = mkInode(0o040755); inodes[parent].direntries.set(name, i); inodes[i].direntries.set(".", i); inodes[i].direntries.set("..", parent); return i; },
     CreateFile(name: string, parent: number) { const i = mkInode(0o100644); inodes[parent].direntries.set(name, i); return i; },
     CreateSymlink(name: string, parent: number, target: string) { const i = mkInode(0o120777); inodes[i].symlink = target; inodes[parent].direntries.set(name, i); return i; },
     async CreateBinaryFile(name: string, parent: number, buf: Uint8Array) { const i = this.CreateFile(name, parent); inodedata[i] = new Uint8Array(buf); inodes[i].size = buf.length; return i; },

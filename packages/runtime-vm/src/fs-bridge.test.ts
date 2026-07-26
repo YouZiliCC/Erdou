@@ -81,6 +81,65 @@ describe("Fs9pBridge", () => {
     await expect(bridge.mkdir("/tmp/y", { recursive: true })).rejects.toThrow(/EACCES/);
   });
 
+  it("collapses '.' and '..' so a contract path cannot escape the workspace", async () => {
+    const fs = makeFakeFs9p(); bootWorkspace(fs);
+    // an image-owned /etc OUTSIDE workspace/ — the guest's real root, not in the
+    // workspace snapshot, folder-sync or .zip export.
+    const etc = fs.CreateDirectory("etc", 0);
+    await fs.CreateBinaryFile("passwd", etc, new TextEncoder().encode("root:x:0:0"));
+    const bridge = new Fs9pBridge(fs, () => {}); bridge.attach();
+    // The escape route is real: v86 puts a ".." direntry on every directory, so an
+    // un-normalized "workspace/../etc/passwd" resolves straight out of the workspace.
+    expect(fs.SearchPath("workspace/../etc/passwd").id).not.toBe(-1);
+
+    await expect(bridge.readFile("/../etc/passwd")).rejects.toThrow(/ENOENT/);
+    await expect(bridge.writeFile("/../etc/passwd", "pwned")).rejects.toThrow(/ENOENT/);
+    await expect(bridge.rm("/../etc", { recursive: true })).rejects.toThrow(/ENOENT/);
+    await expect(bridge.rename("/../etc/passwd", "/stolen")).rejects.toThrow(/ENOENT/);
+    // guest /etc untouched
+    expect(fs.Search(0, "etc")).toBe(etc);
+    expect(new TextDecoder().decode((await fs.read_file("etc/passwd"))!)).toBe("root:x:0:0");
+
+    // "." must not hide the first segment from the skeleton guard either
+    await expect(bridge.writeFile("/./bin/sh", "x")).rejects.toThrow(/EACCES/);
+    await expect(bridge.rm("/tmp/../usr/lib", { recursive: true })).rejects.toThrow(/EACCES/);
+  });
+
+  it("normalizes '.'/'..' inside the workspace instead of rejecting them", async () => {
+    const fs = makeFakeFs9p(); bootWorkspace(fs);
+    const events: RuntimeEvent[] = [];
+    const bridge = new Fs9pBridge(fs, (e) => events.push(e)); bridge.attach();
+    await bridge.mkdir("/a/b", { recursive: true });
+    await bridge.writeFile("/a/b/../c.txt", "in-workspace");
+    expect(new TextDecoder().decode(await bridge.readFile("/a/c.txt"))).toBe("in-workspace");
+    // the emitted event carries the normalized contract path, not the literal one
+    expect(events.filter((e) => e.type === "file.changed").at(-1)).toMatchObject({ path: "/a/c.txt", kind: "create" });
+  });
+
+  it("rm frees the inode bytes (v86's Unlink only drops the direntry)", async () => {
+    const fs = makeFakeFs9p(); bootWorkspace(fs);
+    const bridge = new Fs9pBridge(fs, () => {}); bridge.attach();
+    await bridge.writeFile("/big.bin", "x".repeat(4096));
+    const id = fs.SearchPath("workspace/big.bin").id;
+    expect(fs.inodedata[id]).toBeDefined();
+    await bridge.rm("/big.bin");
+    // Without this, every write→delete cycle (and every restoreSnapshot, which
+    // rm's each top-level entry) retains its bytes for the whole session and
+    // still serialises them into FS.get_state.
+    expect(fs.inodedata[id]).toBeUndefined();
+  });
+
+  it("recursive rm frees the bytes of every file it removes", async () => {
+    const fs = makeFakeFs9p(); bootWorkspace(fs);
+    const bridge = new Fs9pBridge(fs, () => {}); bridge.attach();
+    await bridge.mkdir("/d/sub", { recursive: true });
+    await bridge.writeFile("/d/a.txt", "aaa");
+    await bridge.writeFile("/d/sub/b.txt", "bbb");
+    const ids = [fs.SearchPath("workspace/d/a.txt").id, fs.SearchPath("workspace/d/sub/b.txt").id];
+    await bridge.rm("/d", { recursive: true });
+    for (const id of ids) expect(fs.inodedata[id]).toBeUndefined();
+  });
+
   it("readFile of an empty (never-written) file returns 0 bytes, not ENOENT", async () => {
     const fs = makeFakeFs9p(); bootWorkspace(fs);
     const bridge = new Fs9pBridge(fs, () => {}); bridge.attach();

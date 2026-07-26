@@ -1,6 +1,6 @@
 import { ErrnoError } from "@erdou/runtime-contract";
 import type { FileEntry, RuntimeEvent, Stat, WriteFileOptions, MkdirOptions, RmOptions, FileSystemApi } from "@erdou/runtime-contract";
-import { WORKSPACE, SKELETON_DIRS, type Fs9p } from "./fs-bridge.js";
+import { WORKSPACE, SKELETON_DIRS, normalizeContractPath, type Fs9p } from "./fs-bridge.js";
 
 const S_IFMT = 0o170000, S_IFDIR = 0o040000, S_IFLNK = 0o120000, S_IFREG = 0o100000;
 type ChangeKind = "create" | "modify" | "delete";
@@ -21,18 +21,21 @@ export class SyncFs9pFs implements FileSystemApi {
   constructor(private readonly fs9p: Fs9p, private readonly emit: (e: RuntimeEvent) => void) {}
 
   private ws(path: string): string {
-    const norm = "/" + path.split("/").filter(Boolean).join("/");
+    const norm = normalizeContractPath(path); // collapse "."/".." FIRST — v86's real ".." direntries would otherwise walk out of workspace/
     return norm === "/" ? WORKSPACE : WORKSPACE + norm;
   }
-  private cpath(path: string): string { return "/" + path.split("/").filter(Boolean).join("/"); }
+  private cpath(path: string): string { return normalizeContractPath(path); }
   /** Basename — v86's SearchPath leaves `name` undefined for EXISTING paths, so
    *  rm/rename of an existing entry must derive it (same as fs-bridge.ts). */
-  private base(path: string): string { const p = path.split("/").filter(Boolean); return p[p.length - 1] ?? ""; }
-  /** Reject mutations under an image-owned mount point (bin/lib/usr/proc/dev/tmp). */
+  private base(path: string): string { const p = normalizeContractPath(path).split("/").filter(Boolean); return p[p.length - 1] ?? ""; }
+  /** Reject mutations under an image-owned mount point (bin/lib/usr/proc/dev/tmp).
+   *  Checks the NORMALIZED first segment — "/./bin/sh" and "/tmp/../usr/lib" both
+   *  land on a mount point while their literal first segment does not. */
   private guardSkeleton(path: string, syscall: string): void {
-    const first = path.split("/").filter(Boolean)[0];
+    const norm = normalizeContractPath(path);
+    const first = norm.split("/").filter(Boolean)[0];
     if (first !== undefined && SKELETON_DIRS.includes(first)) {
-      throw new ErrnoError("EACCES", { path, syscall });
+      throw new ErrnoError("EACCES", { path: norm, syscall });
     }
   }
   private now(): number { return Math.round(Date.now() / 1000); }
@@ -81,7 +84,7 @@ export class SyncFs9pFs implements FileSystemApi {
 
   mkdir(path: string, opts?: MkdirOptions): void {
     this.guardSkeleton(path, "mkdir");
-    const parts = path.split("/").filter(Boolean);
+    const parts = normalizeContractPath(path).split("/").filter(Boolean);
     let parentid = this.fs9p.SearchPath(WORKSPACE).id;
     for (let i = 0; i < parts.length; i++) {
       const existing = this.fs9p.Search(parentid, parts[i]!);

@@ -13,7 +13,7 @@ import { vmCapabilities } from "./capabilities.js";
 import { PROFILE_META, type VmProfile } from "./profiles.js";
 import { openPtySession, type PtySession } from "./pty.js";
 import { SyncFs9pFs } from "./sync-fs.js";
-import { serializeHttpRequest, parseHttpResponse, responseComplete, parseHead, ChunkedDecoder, type ParsedHead } from "./http-codec.js";
+import { serializeHttpRequest, parseHttpResponse, parseHead, ChunkedDecoder, type ParsedHead } from "./http-codec.js";
 import {
   makeWsKey, buildUpgradeRequest, validateHandshake, encodeText, encodeBinary, encodePong,
   encodeClose, WsFrameParser,
@@ -58,6 +58,12 @@ export class VmRuntime implements Runtime {
   /** Live WebSocket teardowns (see upgrade()) — run on shutdown so no
    *  connection outlives its emulator. */
   private readonly wsTeardowns = new Set<(cause: string) => void>();
+  /** Live streamed-SSE body queues (see dispatch()) — the streaming twin of
+   *  wsTeardowns. Failed on shutdown: an SSE stream carries NO idle timer and
+   *  NO hard cap, and after host.destroy() no conn event can ever arrive, so a
+   *  consumer parked on `await it.next()` would hang forever with no error.
+   *  Entries are removed as each stream ends, so this never grows per-request. */
+  private readonly sseStreams = new Set<ByteQueue>();
 
   constructor(
     private readonly loadInputs: () => Promise<import("./v86-host.js").V86BootInputs>,
@@ -98,6 +104,11 @@ export class VmRuntime implements Runtime {
     // while the emulator can still deliver the conn.close().
     for (const t of [...this.wsTeardowns]) t("runtime shutdown");
     this.wsTeardowns.clear();
+    // Same for in-flight SSE bodies: fail (never silently end) so the preview
+    // SW's read rejects with the reason instead of hanging on a stream the dead
+    // emulator can no longer feed.
+    for (const q of [...this.sseStreams]) q.fail(new Error("VmRuntime shutdown while this SSE response was still streaming"));
+    this.sseStreams.clear();
     this.guestd?.dispose();   // ends open ChunkStreams + rejects pending (via its own `pending` map)
     this.bridge?.dispose();
     await this.host.destroy().catch(() => {});
@@ -271,11 +282,21 @@ export class VmRuntime implements Runtime {
     return await new Promise<HttpResponse>((resolve) => {
       const conn = net.connect(port);
       const chunks: Uint8Array[] = [];
+      /** Running byte total of `chunks` — the completion test is arithmetic on
+       *  this counter, never a re-materialised buffer (see the data handler). */
+      let received = 0;
       let idle: ReturnType<typeof setTimeout> | undefined;
       let done = false;
-      // Head sniffing happens at most until it parses; the SSE decision is
-      // made exactly once.
+      // Head sniffing happens at most until it parses; the SSE decision is made
+      // exactly once. The parsed head is RETAINED (bodyOffset + framing) so
+      // every later segment is O(1) work.
       let headKnown = false;
+      let head: ParsedHead | null = null;
+      /** Content-Length as the guest sent it — NaN when absent or non-numeric,
+       *  and every comparison against NaN is false, i.e. "never self-completes"
+       *  (idle/close/hard cap finish it) — the same rule the old whole-buffer
+       *  re-parse applied, now evaluated once per response instead of per event. */
+      let contentLength = NaN;
       let sse: { queue: ByteQueue; decoder: ChunkedDecoder | null } | null = null;
       const acc = (): Uint8Array => {
         const total = chunks.reduce((n, c) => n + c.length, 0);
@@ -312,7 +333,11 @@ export class VmRuntime implements Runtime {
       };
       // Hard cap: never hang forever if the guest wedges mid-response.
       const hard = setTimeout(finish, 15_000);
-      const endStream = (): void => { if (!sse) return; sse.queue.end(); closeConn(); };
+      // Deregister from the shutdown set the moment this stream is over by ANY
+      // path (normal end, framing error, consumer return) — otherwise every SSE
+      // request leaks its queue for the life of the runtime.
+      const dropStream = (): void => { if (sse) this.sseStreams.delete(sse.queue); };
+      const endStream = (): void => { if (!sse) return; dropStream(); sse.queue.end(); closeConn(); };
       const feedStream = (c: Uint8Array): void => {
         if (!sse) return;
         if (!sse.decoder) { sse.queue.push(c); return; }
@@ -321,6 +346,7 @@ export class VmRuntime implements Runtime {
         catch (err) {
           // Malformed chunked framing: error the stream (fail-fast, visible to
           // the consumer) instead of silently truncating, and drop the conn.
+          dropStream();
           sse.queue.fail(err instanceof Error ? err : new Error(String(err)));
           closeConn();
           return;
@@ -328,47 +354,82 @@ export class VmRuntime implements Runtime {
         for (const d of decoded) sse.queue.push(d);
         if (sse.decoder.finished) endStream();
       };
+      /** Buffered-chunked completion: scan each NEW body slice for the
+       *  `0\r\n\r\n` terminator, carrying 4 bytes across so a terminator split
+       *  by TCP framing still matches — same answer as the whole-body substring
+       *  search it replaces, without re-decoding the whole body per segment. */
+      let carry = new Uint8Array(0);
+      const seenChunkedEnd = (part: Uint8Array): boolean => {
+        let b: Uint8Array;
+        if (carry.length === 0) b = part;
+        else { b = new Uint8Array(carry.length + part.length); b.set(carry, 0); b.set(part, carry.length); }
+        let found = false;
+        for (let i = 0; i + 4 < b.length; i++) {
+          if (b[i] === 0x30 && b[i + 1] === 13 && b[i + 2] === 10 && b[i + 3] === 13 && b[i + 4] === 10) { found = true; break; }
+        }
+        carry = b.slice(Math.max(0, b.length - 4)); // copy, never a view: a view would pin the whole segment
+        return found;
+      };
       conn.on("connect", () => conn.write(raw));
       conn.on("data", (d) => {
         const chunk = d instanceof Uint8Array ? d : new Uint8Array(d as ArrayBufferLike);
         if (sse) { feedStream(chunk); return; }
         chunks.push(chunk);
+        received += chunk.length;
+        // The body bytes THIS event contributed — null while the head is still
+        // incomplete, and after a malformed status line (neither can complete).
+        let body: Uint8Array | null = head ? chunk : null;
         if (!headKnown) {
-          let head: ParsedHead | null = null;
+          // The only re-scanned region is the head: while it is unparsed,
+          // `chunks` holds the head plus at most whatever body rode in with it.
+          const sofar = acc();
           // A malformed status line throws: stop sniffing — the buffered
           // path's guarded parse turns it into the usual 502.
-          try { head = parseHead(acc()); headKnown = head !== null; }
+          try { head = parseHead(sofar); headKnown = head !== null; }
           catch { headKnown = true; }
-          if (head && isEventStream(head.headers["content-type"])) {
-            // SSE: resolve at head-time and stream the body. No idle timer
-            // (silence is legal between events) and no hard cap (a live
-            // stream may outlast 15s); the consumer's return() is the exit.
-            done = true; // any stray finish() is now a no-op
-            if (idle) clearTimeout(idle);
-            clearTimeout(hard);
-            sse = {
-              queue: byteQueue(closeConn),
-              decoder: head.framing === "chunked" ? new ChunkedDecoder() : null,
-            };
-            const rest = acc().subarray(head.bodyOffset);
-            chunks.length = 0;
-            resolve({
-              status: head.status,
-              headers: head.headers,
-              body: new Uint8Array(),
-              stream: sse.queue.iterable,
-              ...(head.setCookies.length > 0 ? { setCookies: head.setCookies } : {}),
-            });
-            if (rest.length > 0) feedStream(rest);
-            return;
+          if (head) {
+            if (isEventStream(head.headers["content-type"])) {
+              // SSE: resolve at head-time and stream the body. No idle timer
+              // (silence is legal between events) and no hard cap (a live
+              // stream may outlast 15s); the consumer's return() — or a runtime
+              // shutdown, via sseStreams — is the exit.
+              done = true; // any stray finish() is now a no-op
+              if (idle) clearTimeout(idle);
+              clearTimeout(hard);
+              sse = {
+                queue: byteQueue(() => { dropStream(); closeConn(); }),
+                decoder: head.framing === "chunked" ? new ChunkedDecoder() : null,
+              };
+              this.sseStreams.add(sse.queue);
+              const rest = sofar.subarray(head.bodyOffset);
+              chunks.length = 0;
+              received = 0;
+              resolve({
+                status: head.status,
+                headers: head.headers,
+                body: new Uint8Array(),
+                stream: sse.queue.iterable,
+                ...(head.setCookies.length > 0 ? { setCookies: head.setCookies } : {}),
+              });
+              if (rest.length > 0) feedStream(rest);
+              return;
+            }
+            // parseHead strips the framing headers, so read the length off the
+            // raw head bytes while we still have them.
+            if (head.framing === "content-length") contentLength = headContentLength(sofar.subarray(0, head.bodyOffset));
+            body = sofar.subarray(head.bodyOffset);
           }
         }
-        // Buffered path — byte-identical to Round 12.
-        // responseComplete → parseHeaderLines can throw on a malformed status line
-        // inside this emulator callback (no reject path). Treat a throw as "not
-        // complete yet" — the idle timer / hard cap + guarded parse finish it.
+        // Buffered path — same completion rule as Round 12, decided from
+        // counters. Re-testing a re-materialised buffer was O(n²): v86 delivers
+        // ~1460-byte segments, so a 20MB response is ~14k events each copying
+        // (and re-decoding) the whole growing response — the tab GC-thrashes and
+        // the 15s hard cap fires first, TRUNCATING the body.
         let complete = false;
-        try { complete = responseComplete(acc()); } catch { complete = false; }
+        if (head && body) {
+          if (head.framing === "content-length") complete = received - head.bodyOffset >= contentLength;
+          else if (head.framing === "chunked") complete = seenChunkedEnd(body);
+        }
         if (complete) { finish(); return; }
         if (idle) clearTimeout(idle);
         idle = setTimeout(finish, 600); // idle fallback for keep-alive servers with no length info
@@ -582,6 +643,23 @@ class GuestWs implements WsConnection {
     if (this.closeCb) this.closeCb(code, reason);
     else this.pendingClose = { code, reason };
   }
+}
+
+/** Content-Length read straight off the raw head bytes, because `parseHead`
+ *  deletes the header once it has classified the framing (its callers must not
+ *  be able to re-frame a body). dispatch's buffered path needs the NUMBER so
+ *  completeness is `received - bodyOffset >= contentLength` instead of a
+ *  re-parse of the whole accumulated response. Last value wins (parseHeaderLines'
+ *  rule for a repeated header) and a non-numeric value yields NaN — the same
+ *  `bodyLen >= Number(cl)` semantics, byte for byte. latin1: header text
+ *  is ASCII and must never be mangled by a UTF-8 decode. */
+function headContentLength(headBytes: Uint8Array): number {
+  let raw: string | null = null;
+  for (const line of new TextDecoder("latin1").decode(headBytes).split("\r\n").slice(1)) {
+    const c = line.indexOf(":");
+    if (c !== -1 && line.slice(0, c).trim().toLowerCase() === "content-length") raw = line.slice(c + 1).trim();
+  }
+  return raw === null ? NaN : Number(raw);
 }
 
 /** Media-type check for the streaming engage rule: `text/event-stream` ONLY

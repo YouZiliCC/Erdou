@@ -31,6 +31,24 @@ export interface Fs9p {
 
 type ChangeKind = "create" | "modify" | "delete";
 
+/** Collapse "." / ".." and clamp at the root — same semantics as runtime-browser's
+ *  vfs normalize(), so both kernels honour the identical contract-path grammar.
+ *  MANDATORY before mapping to a 9p path: agent tools hand model-authored paths
+ *  through untouched, and v86 puts REAL "."/".." direntries on every directory
+ *  (link_under_dir), so an uncollapsed "/../etc/passwd" maps to 9p
+ *  "workspace/../etc/passwd" and SearchPath walks straight out of the workspace
+ *  into the guest image root — past guardSkeleton, which only sees the FIRST
+ *  segment (".." / "." are never in SKELETON_DIRS). */
+export function normalizeContractPath(path: string): string {
+  const stack: string[] = [];
+  for (const seg of path.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") { stack.pop(); continue; }
+    stack.push(seg);
+  }
+  return "/" + stack.join("/");
+}
+
 /** Wraps fs9p to observe guest writes and exposes an async workspace FS.
  *  Contract path `/x` maps to fs9p path `workspace/x`. */
 export class Fs9pBridge {
@@ -174,7 +192,7 @@ export class Fs9pBridge {
 
   /** Normalize a contract path to "/x" form (for events). */
   private cpath(path: string): string {
-    return "/" + path.split("/").filter(Boolean).join("/");
+    return normalizeContractPath(path);
   }
 
   /** Basename (last path segment). v86's SearchPath only fills `name` when the
@@ -182,21 +200,24 @@ export class Fs9pBridge {
    *  `name` undefined (its loop index runs off the end). So for Unlink/Rename of
    *  an existing entry we must derive the name from the path, not trust w.name. */
   private base(path: string): string {
-    const parts = path.split("/").filter(Boolean);
+    const parts = normalizeContractPath(path).split("/").filter(Boolean);
     return parts[parts.length - 1] ?? "";
   }
 
-  /** Reject mutations under an image-owned mount point (bin/lib/usr/proc/dev/tmp). */
+  /** Reject mutations under an image-owned mount point (bin/lib/usr/proc/dev/tmp).
+   *  Checks the NORMALIZED first segment — "/./bin/sh" and "/tmp/../usr/lib" both
+   *  land on a mount point while their literal first segment does not. */
   private guardSkeleton(path: string, syscall: string): void {
-    const first = path.split("/").filter(Boolean)[0];
+    const norm = normalizeContractPath(path);
+    const first = norm.split("/").filter(Boolean)[0];
     if (first !== undefined && SKELETON_DIRS.includes(first)) {
-      throw new ErrnoError("EACCES", { path, syscall });
+      throw new ErrnoError("EACCES", { path: norm, syscall });
     }
   }
 
   // ---- async workspace FS (contract "/x" <-> fs9p "workspace/x") ----
   private ws(path: string): string {
-    const norm = "/" + path.split("/").filter(Boolean).join("/");
+    const norm = normalizeContractPath(path);
     return norm === "/" ? WORKSPACE : WORKSPACE + norm;
   }
 
@@ -249,7 +270,7 @@ export class Fs9pBridge {
     this.guardSkeleton(path, "mkdir");
     this.suppress++;
     try {
-      const parts = ("/" + path.split("/").filter(Boolean).join("/")).split("/").filter(Boolean);
+      const parts = normalizeContractPath(path).split("/").filter(Boolean);
       let parentid = this.fs.SearchPath(WORKSPACE).id;
       for (let i = 0; i < parts.length; i++) {
         const existing = this.fs.Search(parentid, parts[i]!);
@@ -281,6 +302,14 @@ export class Fs9pBridge {
       }
       const ret = this.fs.Unlink(w.parentid, this.base(path));
       if (ret < 0 && !opts?.force) throw new ErrnoError("ENOENT", { path, syscall: "unlink" });
+      // Free the bytes only after a SUCCESSFUL unlink (mirrors SyncFs9pFs.rm).
+      // v86's Unlink just drops the direntry and flags the inode; the data is
+      // released by CloseInode→DeleteData, which only the guest's 9p Tclunk
+      // drives and never runs for a host-side unlink — so without this every
+      // write→delete cycle (and every restoreSnapshot, which rm's each
+      // top-level entry) retains its megabytes for the session AND keeps
+      // serialising them into FS.get_state.
+      if (ret === 0) delete this.fs.inodedata[w.id];
       this.paths.delete(w.id);
       this.emitChange(this.cpath(path), "delete");
     } finally { this.suppress--; }

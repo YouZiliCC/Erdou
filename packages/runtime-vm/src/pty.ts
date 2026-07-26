@@ -84,7 +84,12 @@ export function openPtySession(
     // 2) THEN launch the guest bridge (sends the PTY_OPEN frame).
     launch().then(
       (c) => { pid = c.pid; maybeResolve(); },
-      (err) => { if (!settled) { settled = true; clearTimeout(deadline); reject(err); } },
+      (err) => {
+        if (settled) return; settled = true;
+        clearTimeout(deadline);
+        unsubscribe(); // detach — the caller frees the port on this rejection, so a leaked listener would eat the NEXT session's bytes
+        reject(err);
+      },
     );
   });
 }

@@ -92,4 +92,15 @@ describe("openPtySession", () => {
       .rejects.toThrow(/PTYBRIDGE_READY/);
     expect(ch.unsub).toHaveBeenCalledTimes(1);
   });
+
+  it("launch-reject also unsubscribes from the channel", async () => {
+    const ch = fakeChannel();
+    const launch = vi.fn(async () => { throw new Error("PTY_OPEN refused: port busy"); });
+    await expect(openPtySession(ch, launch, async () => {}, { deadlineMs: 10_000 }))
+      .rejects.toThrow(/PTY_OPEN refused/);
+    // VmRuntime.openPty catches this rejection and frees the port for reuse; a
+    // leaked listener would still be on the bus with ready===false, swallowing the
+    // NEXT session's banner and bytes into a buffer nobody drains.
+    expect(ch.unsub).toHaveBeenCalledTimes(1);
+  });
 });

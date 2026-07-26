@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { HttpRequest } from "@erdou/runtime-contract";
-import { serializeHttpRequest, parseHttpResponse, responseComplete, parseHead, ChunkedDecoder } from "./http-codec.js";
+import { serializeHttpRequest, parseHttpResponse, parseHead, ChunkedDecoder } from "./http-codec.js";
 
 const dec = new TextDecoder();
 const bytes = (s: string): Uint8Array => new TextEncoder().encode(s);
@@ -211,16 +211,3 @@ describe("ChunkedDecoder (incremental)", () => {
   });
 });
 
-describe("responseComplete", () => {
-  it("is false before the header terminator", () => {
-    expect(responseComplete(bytes("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n"))).toBe(false);
-  });
-  it("is false until Content-Length bytes have all arrived, then true", () => {
-    expect(responseComplete(bytes("HTTP/1.0 200 OK\r\nContent-Length: 5\r\n\r\nhel"))).toBe(false);
-    expect(responseComplete(bytes("HTTP/1.0 200 OK\r\nContent-Length: 5\r\n\r\nhello"))).toBe(true);
-  });
-  it("is true once the chunked terminator is present", () => {
-    expect(responseComplete(bytes("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n"))).toBe(false);
-    expect(responseComplete(bytes("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"))).toBe(true);
-  });
-});

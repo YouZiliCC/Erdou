@@ -49,6 +49,38 @@ describe("SyncFs9pFs", () => {
     expect(sf.readFile("/empty.txt").length).toBe(0);
   });
 
+  it("collapses '.' and '..' so a contract path cannot escape the workspace", () => {
+    const fs9p = makeFakeFs9p(); bootWorkspace(fs9p);
+    const etc = fs9p.CreateDirectory("etc", 0);            // image-owned, outside workspace/
+    const passwd = fs9p.CreateFile("passwd", etc);
+    fs9p.inodedata[passwd] = new TextEncoder().encode("root:x:0:0");
+    fs9p.GetInode(passwd).size = 10;
+    const sf = new SyncFs9pFs(fs9p, () => {});
+    // v86 puts a real ".." direntry on every directory, so the un-normalized
+    // mapping "workspace/../etc/passwd" genuinely resolves outside the workspace.
+    expect(fs9p.SearchPath("workspace/../etc/passwd").id).toBe(passwd);
+
+    expect(() => sf.readFile("/../etc/passwd")).toThrow(/ENOENT/);
+    expect(() => sf.writeFile("/../etc/passwd", "pwned")).toThrow(/ENOENT/);
+    expect(() => sf.rm("/../etc")).toThrow(/ENOENT/);
+    expect(sf.exists("/../etc/passwd")).toBe(false);
+    expect(new TextDecoder().decode(fs9p.inodedata[passwd]!)).toBe("root:x:0:0");
+
+    // "." must not hide the first segment from the skeleton guard
+    expect(() => sf.writeFile("/./bin/sh", "x")).toThrow(/EACCES/);
+    expect(() => sf.mkdir("/tmp/../usr/lib", { recursive: true })).toThrow(/EACCES/);
+  });
+
+  it("normalizes '.'/'..' inside the workspace instead of rejecting them", () => {
+    const fs9p = makeFakeFs9p(); bootWorkspace(fs9p);
+    const events: RuntimeEvent[] = [];
+    const sf = new SyncFs9pFs(fs9p, (e) => events.push(e));
+    sf.mkdir("/a/b", { recursive: true });
+    sf.writeFile("/a/b/../c.txt", "in-workspace");
+    expect(new TextDecoder().decode(sf.readFile("/a/c.txt"))).toBe("in-workspace");
+    expect(events.filter((e) => e.type === "file.changed").at(-1)).toMatchObject({ path: "/a/c.txt", kind: "create" });
+  });
+
   it("rejects a page write under a skeleton dir with EACCES", () => {
     const fs9p = makeFakeFs9p(); bootWorkspace(fs9p);
     const sf = new SyncFs9pFs(fs9p, () => {});
