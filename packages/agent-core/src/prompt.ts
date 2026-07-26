@@ -289,6 +289,22 @@ function realOsPrompt(env: EnvironmentInfo, caps: RuntimeCapabilities): string {
         : "The machine is offline — no outbound network.";
   const mem = caps.memoryLimitMB !== null ? ` RAM is capped around ${caps.memoryLimitMB}MB.` : "";
 
+  // Preview EXAMPLES come from `languages`, not from caps.virtualPorts: node
+  // ships only in the node profile, so naming it on base/sci sends the agent
+  // after a binary that isn't installed. The slowness is stated qualitatively
+  // on purpose — no in-tree measurement pins a number (net.e2e only console
+  // .logs its own timing), so any figure here would rot unnoticed.
+  const previewExamples = [
+    languages.includes("python3")
+      ? 'Flask (`app.run(host="0.0.0.0", port=<port>)`), other WSGI servers, `python3 -m http.server <port> --bind 0.0.0.0`'
+      : "",
+    languages.includes("node") ? "a node `http` server listening on 0.0.0.0" : "",
+  ].filter((e) => e !== "");
+  const previewServers =
+    previewExamples.length > 0
+      ? `ordinary blocking servers DO serve here — ${previewExamples.join(", ")} — and streaming responses (SSE) reach the browser too. `
+      : "ordinary blocking servers DO serve here, and streaming responses (SSE) reach the browser too. ";
+
   return [
     `You are Erdou — an autonomous coding agent operating a REAL Linux machine running inside a browser tab (an emulated 32-bit x86 PC). The kernel, shell, filesystem and tools are real — but the CPU is roughly 10-100x slower than native, so prefer small targeted commands over heavy builds.${mem}`,
     "",
@@ -300,9 +316,7 @@ function realOsPrompt(env: EnvironmentInfo, caps: RuntimeCapabilities): string {
     languages.length > 0 ? `- Languages/tools installed: ${languages.join(", ")}.` : "",
     `- ${pkg}`,
     `- ${network}`,
-    caps.virtualPorts
-      ? "- Previews: ordinary blocking servers DO serve here — Flask (`app.run(host=\"0.0.0.0\", port=<port>)`), other WSGI servers, `python3 -m http.server <port> --bind 0.0.0.0`, node — and streaming responses (SSE) reach the browser too. Two real constraints: the bind MUST be 0.0.0.0 (a default/127.0.0.1 bind is reachable only inside the guest, so the preview never sees it), and start-up is SLOW under emulation (tens of seconds; a `pip install flask` + first served request measured ~175 s end to end). So poll the port until it answers (`wget -qO- http://0.0.0.0:<port>/`) instead of assuming it is up, and expect the port chip to appear a beat after the bind — the port watcher polls."
-      : "",
+    caps.virtualPorts ? `- Previews: ${previewServers}Two real constraints: the bind MUST be 0.0.0.0 (a default/127.0.0.1 bind is reachable only inside the guest, so the preview never sees it), and start-up is SLOW under emulation — a bare bind takes tens of seconds, and having to \`pip install\` the framework first pushes the first served request out much further. So poll the port until it answers (\`wget -qO- http://0.0.0.0:<port>/\`) instead of assuming it is up, and expect the port chip to appear a beat after the bind — the port watcher polls.` : "",
     "",
     ...HOW_TO_WORK,
     "- Remember the slow CPU: verify with the cheapest command that proves the change.",

@@ -81,6 +81,35 @@ describe("buildSystemPrompt (real OS)", () => {
     expect(p).not.toMatch(/switch to the browser kernel and use `erdou\.serve/);
   });
 
+  // The preview bullet is emitted on caps.virtualPorts, but its EXAMPLES have to
+  // come from the language list — `node` ships only in the node profile
+  // (profiles.data.json), so naming it on base/sci sends the agent after a
+  // binary that is not installed. Assert on the bullet alone: "node" also
+  // appears in the "Languages/tools installed" line, so a whole-prompt match
+  // would pass no matter what the bullet said.
+  const previewBullet = (p: string) => p.split("\n").find((l) => l.startsWith("- Previews:"));
+
+  it("names node as a preview server only when node is actually installed", () => {
+    const withNode = previewBullet(buildSystemPrompt({}, realCaps)); // interpreters include node
+    expect(withNode).toBeDefined();
+    expect(withNode).toMatch(/node/);
+    expect(withNode).toMatch(/http\.server/); // python3 example still there
+
+    // base/sci profile: python3 only
+    const noNode = previewBullet(buildSystemPrompt({}, { ...realCaps, interpreters: ["python3", "gcc", "git"] }));
+    expect(noNode).toBeDefined();
+    expect(noNode).toMatch(/http\.server/);
+    expect(noNode).not.toMatch(/node/);
+  });
+
+  it("keeps no hard-coded timing figure in the preview bullet — nothing in-tree measures one", () => {
+    // The old "~175 s end to end" came from a manual run; no test records it, so
+    // it could only rot. The slowness claim stays, as a qualitative one.
+    const bullet = previewBullet(buildSystemPrompt({}, realCaps))!;
+    expect(bullet).toMatch(/SLOW under emulation/);
+    expect(bullet).not.toMatch(/\d+\s*(s|sec|secs|seconds|ms|min|mins|minutes)\b/);
+  });
+
   it("phrases full egress and no package managers correctly", () => {
     const p = buildSystemPrompt({}, { ...realCaps, packageManagers: [], networkEgress: "full" as const });
     expect(p).toMatch(/No package manager/);

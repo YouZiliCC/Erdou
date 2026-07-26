@@ -19,4 +19,15 @@ jobs:
       - run: pnpm lint:deps
       - run: pnpm typecheck
       - run: pnpm test
+      # `pnpm build` runs apps/web's prebuild -> scripts/download-wheels.mjs,
+      # which fetches nine sha256-pinned wheels from files.pythonhosted.org and
+      # throws E_WHEEL_FETCH on any hiccup — a live PyPI dependency that reds
+      # unrelated PRs. Cache the staged wheels keyed on the pin file: on a hit
+      # the script only re-verifies the sha256s and fetches nothing; editing a
+      # pin changes the key and takes the full download path, so a cache can
+      # never serve bytes that do not match the pins.
+      - uses: actions/cache@v4
+        with:
+          path: apps/web/public/wheels
+          key: web-wheels-${{ hashFiles('apps/web/wheels.json') }}
       - run: pnpm build

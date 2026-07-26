@@ -6,14 +6,15 @@
 // makes its aria-modal claim true.
 //
 // Node environment, no jsdom: static-markup rendering only, matching
-// Composer.test.ts. renderToStaticMarkup drops every event handler, so these
-// tests pin the POLICIES (createScrimGesture / handleSelectKey / wrapTabTarget)
-// and the rendered ARIA attributes — NOT the JSX that wires the policies to the
-// scrim and the document listener. Deleting an onMouseUp prop or a document
-// listener would still leave this file green; that wiring plus the effects
-// (initial focus, focus restore) needs a browser and is covered by manual
-// headless verification, not here.
+// Composer.test.ts. renderToStaticMarkup drops every event handler, so the
+// policies (createScrimGesture / handleSelectKey / wrapTabTarget) are exercised
+// directly, the ARIA attributes come from the rendered markup, and the scrim's
+// USE of the gesture — the one piece of wiring whose loss silently restores the
+// bug — is pinned by reading the JSX source. Still unpinned here, because they
+// need a browser and are covered by manual headless verification: the document
+// keydown listener (Escape/Tab) and the effects (initial focus, focus restore).
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { SettingsDialog, createScrimGesture, wrapTabTarget } from "./SettingsDialog";
@@ -67,6 +68,39 @@ describe("createScrimGesture (D1: a drag across the dialog edge must not discard
     // outside the window), so nothing may dismiss on the stale `true`.
     g.onMouseDown(on(scrim));
     expect(g.dismisses()).toBe(false);
+  });
+});
+
+describe("scrim wiring (D1: the gesture above is inert unless the JSX consults it)", () => {
+  const SOURCE = readFileSync(new URL("./SettingsDialog.tsx", import.meta.url), "utf8");
+
+  /** The scrim <div>'s props: from its className to the dialog it wraps. */
+  function scrimProps(): string {
+    const start = SOURCE.indexOf('className="scrim"');
+    const end = SOURCE.indexOf('className="dialog"', start);
+    if (start < 0 || end < 0) {
+      throw new Error('SettingsDialog.tsx has no className="scrim" wrapping a className="dialog" — this slice is stale');
+    }
+    return SOURCE.slice(start, end);
+  }
+
+  it("hands the scrim BOTH ends of the press to the gesture", () => {
+    // Losing either prop leaves that end permanently false (never dismisses) or
+    // unrecorded (dismisses on a cross-edge drag) — the D1 bug, both directions.
+    expect(scrimProps()).toContain("onMouseDown={scrim.onMouseDown}");
+    expect(scrimProps()).toContain("onMouseUp={scrim.onMouseUp}");
+  });
+
+  it("gates the click on the gesture rather than closing on any click", () => {
+    // `onClick={onClose}` is exactly the pre-fix wiring: it discards every
+    // unsaved field for a drag that merely ended on the scrim.
+    expect(scrimProps()).toMatch(/onClick=\{[^}]*scrim\.dismisses\(\)/);
+  });
+
+  it("keeps one gesture per dialog, surviving re-renders", () => {
+    // A createScrimGesture() called in the render body would forget the press
+    // whenever anything re-rendered the dialog between mousedown and click.
+    expect(SOURCE).toContain("useRef(createScrimGesture()).current");
   });
 });
 

@@ -1,12 +1,33 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { THEMES, getTheme, applyTheme, type Theme } from "../lib/theme.js";
 
+// getSnapshot runs on EVERY render and again after every store notification, and
+// getTheme() is a synchronous localStorage.getItem — this menu re-renders on
+// every studio notify, so that read repeated constantly for a value that only
+// changes when <html>'s data-theme does. Cache it and let the same mutation that
+// notifies invalidate it; that also keeps the snapshot referentially stable
+// between changes, which is the identity useSyncExternalStore compares.
+let cachedTheme: Theme | null = null;
+
+/** The store's snapshot: one localStorage read per actual theme change. */
+export function themeSnapshot(): Theme {
+  cachedTheme ??= getTheme();
+  return cachedTheme;
+}
+
 /** Notify on every theme change, whoever made it: applyTheme stamps `data-theme`
  *  on <html> before persisting, so that attribute is the one signal every applier
  *  passes through — including Studio.mountFolder applying a mounted folder's
  *  .erdou/config.json theme, which this component never hears about otherwise. */
 export function subscribeToTheme(onThemeChange: () => void): () => void {
-  const observer = new MutationObserver(onThemeChange);
+  // A change applied while nothing was subscribed (menu unmounted) left no
+  // observer to drop the cache, so clear it on every (re-)subscribe — React
+  // re-reads the snapshot right after subscribing, which is what catches it.
+  cachedTheme = null;
+  const observer = new MutationObserver(() => {
+    cachedTheme = null; // invalidate BEFORE notifying: the re-read must see the new value
+    onThemeChange();
+  });
   observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
   return () => observer.disconnect();
 }
@@ -20,7 +41,7 @@ export function ThemeMenu({ onChange }: { onChange?: () => void }) {
   // and the picker's checkmark showing the old theme after an OUTSIDE applyTheme
   // (mounting a folder whose config says "cream" repainted the page but not this
   // menu) — TitleBar/ThemeMenu are rendered without a key, so they never remount.
-  const current = useSyncExternalStore<Theme>(subscribeToTheme, getTheme, getTheme);
+  const current = useSyncExternalStore<Theme>(subscribeToTheme, themeSnapshot, themeSnapshot);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
