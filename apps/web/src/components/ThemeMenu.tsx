@@ -1,12 +1,26 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { THEMES, getTheme, applyTheme, type Theme } from "../lib/theme.js";
+
+/** Notify on every theme change, whoever made it: applyTheme stamps `data-theme`
+ *  on <html> before persisting, so that attribute is the one signal every applier
+ *  passes through — including Studio.mountFolder applying a mounted folder's
+ *  .erdou/config.json theme, which this component never hears about otherwise. */
+export function subscribeToTheme(onThemeChange: () => void): () => void {
+  const observer = new MutationObserver(onThemeChange);
+  observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+  return () => observer.disconnect();
+}
 
 /** Titlebar theme picker: a swatch button that opens a popover of the themes,
  *  each previewed by its background/accent/ink dots. Applying persists (theme.ts)
  *  and calls onChange so the app can mirror the choice to the mounted folder. */
 export function ThemeMenu({ onChange }: { onChange?: () => void }) {
   const [open, setOpen] = useState(false);
-  const [current, setCurrent] = useState<Theme>(() => getTheme());
+  // Re-derived, never latched: seeding `current` from useState left the swatch
+  // and the picker's checkmark showing the old theme after an OUTSIDE applyTheme
+  // (mounting a folder whose config says "cream" repainted the page but not this
+  // menu) — TitleBar/ThemeMenu are rendered without a key, so they never remount.
+  const current = useSyncExternalStore<Theme>(subscribeToTheme, getTheme, getTheme);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -24,8 +38,7 @@ export function ThemeMenu({ onChange }: { onChange?: () => void }) {
   }, [open]);
 
   function pick(id: Theme) {
-    applyTheme(id);
-    setCurrent(id);
+    applyTheme(id); // the attribute write re-renders us through subscribeToTheme
     setOpen(false);
     onChange?.();
   }

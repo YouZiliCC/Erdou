@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { ModelGateway, type ModelConfig } from "@erdou/model-gateway";
 import { switchProvider, type ApprovalMode } from "../lib/model-config.js";
 import { createProbeSession, type ProbeResult } from "../lib/model-probe.js";
@@ -21,6 +21,60 @@ const APPROVAL_OPTIONS: { value: ApprovalMode; label: string }[] = [
   { value: "auto", label: "Auto — run shell & delete commands without asking" },
   { value: "confirm", label: "Confirm — ask before each shell or delete command" },
 ];
+
+/** A mousedown/mouseup/click as the scrim's own handler sees it. */
+type ScrimEvent = { target: EventTarget | null; currentTarget: EventTarget | null };
+
+/**
+ * Tracks one press→release gesture on the scrim to decide whether the click it
+ * produces dismisses the dialog. A `click` is dispatched on the nearest common
+ * ancestor of its mousedown and mouseup targets, so BOTH cross-edge drags —
+ * pressing on the API key input and releasing past the dialog edge, and the
+ * reverse, pressing on the scrim and releasing inside the input — dispatch
+ * click on the SCRIM with target === currentTarget, indistinguishable from a
+ * plain scrim click unless both ends are recorded. Dismissing on either threw
+ * away every unsaved field (all dialog state is local useState, no
+ * confirmation), so only a gesture whose press AND release both landed on the
+ * scrim itself dismisses.
+ */
+export function createScrimGesture() {
+  const onScrim = (e: ScrimEvent) => e.target === e.currentTarget;
+  let pressedScrim = false;
+  let releasedScrim = false;
+  return {
+    onMouseDown(e: ScrimEvent) {
+      pressedScrim = onScrim(e);
+      // Cleared here, not in the click: a release the scrim never sees (mouse
+      // let go outside the window) must not leave the previous gesture's true.
+      releasedScrim = false;
+    },
+    onMouseUp(e: ScrimEvent) {
+      releasedScrim = onScrim(e);
+    },
+    dismisses: () => pressedScrim && releasedScrim,
+  };
+}
+
+/** Selector for the controls the Tab wrap cycles through. */
+const FOCUSABLE = "button, input, textarea, select, a[href], [tabindex]:not([tabindex='-1'])";
+
+/**
+ * Where Tab must send focus to keep it inside the dialog, or null to let the
+ * browser move it normally. `aria-modal` tells assistive tech the rest of the
+ * page is unavailable, but nothing here makes the background inert — without
+ * this wrap Tab walks straight out into the titlebar/composer behind the scrim
+ * and the ARIA claim is a lie. An `active` that is not one of the dialog's own
+ * controls (clicking the scrim leaves focus on <body>) is pulled back to the
+ * near end rather than let out.
+ */
+export function wrapTabTarget<T>(focusables: readonly T[], active: T | null, shiftKey: boolean): T | null {
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (first === undefined || last === undefined) return null;
+  if (active === null || !focusables.includes(active)) return shiftKey ? last : first;
+  if (shiftKey) return active === first ? last : null;
+  return active === last ? first : null;
+}
 
 export function SettingsDialog({
   initial,
@@ -51,6 +105,60 @@ export function SettingsDialog({
   };
   const patch = (p: Partial<ModelConfig>) => update((c) => ({ ...c, ...p }));
 
+  /** Records the scrim press/release pair its click is judged by — see createScrimGesture. */
+  const scrim = useRef(createScrimGesture()).current;
+
+  // App auto-opens this dialog on first load whenever no API key is stored, so
+  // it is the FIRST surface a new user meets — it has to behave like a modal:
+  // labelled by its heading, focus moved inside (otherwise focus sits on <body>
+  // and Tab walks straight out into the titlebar/composer behind the scrim) and
+  // handed back to whatever opened it, plus Tab kept inside (what makes the
+  // aria-modal claim true, since nothing marks the background inert) and
+  // Escape-to-close on the same kind of document keydown listener ThemeMenu
+  // already uses.
+  const headingId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  // Initial focus lands on Base URL: the first EDITABLE field. The Provider
+  // Select above it is the first focusable control, but it is a popover
+  // trigger — focusing it makes Enter/Space open a listbox as the dialog's
+  // first keystroke; Shift+Tab from here reaches it.
+  const baseUrlRef = useRef<HTMLInputElement>(null);
+  // onClose is a fresh arrow on every App render; keeping it in a ref keeps
+  // this effect mount-only, so a re-render can't yank focus back to Base URL
+  // while the user is typing in another field.
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    baseUrlRef.current?.focus();
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        // An open ui/Select popover consumes its own Escape (handleSelectKey
+        // stops the keydown at the React root, below this listener), so an
+        // Escape arriving here means no inner layer wanted it — closing now
+        // can't discard fields the user was only abandoning a popover over.
+        closeRef.current();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const focusables = [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
+        (el) => !el.hasAttribute("disabled"), // the Test button while a probe is in flight
+      );
+      const next = wrapTabTarget(focusables, document.activeElement as HTMLElement | null, e.shiftKey);
+      if (next) {
+        e.preventDefault();
+        next.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      opener?.focus();
+    };
+  }, []);
+
   const runProbe = async () => {
     setProbing(true);
     setProbe(null);
@@ -67,9 +175,18 @@ export function SettingsDialog({
   };
 
   return (
-    <div className="scrim" onClick={onClose}>
-      <div className="dialog" onClick={(e) => e.stopPropagation()}>
-        <h2>Model connection</h2>
+    <div
+      className="scrim"
+      onMouseDown={scrim.onMouseDown}
+      onMouseUp={scrim.onMouseUp}
+      onClick={() => {
+        if (scrim.dismisses()) onClose();
+      }}
+    >
+      {/* No stopPropagation here: the gesture already requires both ends of the
+          press to land on the scrim, and a second guard would only hide it. */}
+      <div className="dialog" role="dialog" aria-modal="true" aria-labelledby={headingId} ref={dialogRef}>
+        <h2 id={headingId}>Model connection</h2>
         <p className="sub">Bring your own key. It's stored only in this browser and sent to your provider — never to Erdou.</p>
 
         <div className="field">
@@ -84,7 +201,12 @@ export function SettingsDialog({
         </div>
         <div className="field">
           <label>Base URL</label>
-          <input value={cfg.baseUrl} onChange={(e) => patch({ baseUrl: e.target.value })} placeholder="/llm/v1" />
+          <input
+            ref={baseUrlRef}
+            value={cfg.baseUrl}
+            onChange={(e) => patch({ baseUrl: e.target.value })}
+            placeholder="/llm/v1"
+          />
         </div>
         <div className="field">
           <label>Model</label>

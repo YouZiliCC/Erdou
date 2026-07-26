@@ -50,6 +50,15 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
   /** Ports THIS panel opened on its last run, so the next run can close them
    *  first (see the module doc above) instead of leaking them until reload. */
   const openedPorts = useRef<number[]>([]);
+  /** Synchronous re-entrancy latch for Run. `running`/`building` only turn true
+   *  INSIDE runCommand/bundleAndRun — i.e. after doRun's async prelude (a real
+   *  guest runtime.kill RPC via killTrackedServe, then a closePort per open
+   *  port, ~50-200 ms on the VM path), and for that whole window every existing
+   *  closure still reads running === false and the button is still enabled. A
+   *  second click there started a SECOND server whose settle overwrote
+   *  studio.servePid, orphaning the first, untracked. A ref flips now, not on
+   *  the next render, so the second click can't get past this. */
+  const runLatch = useRef(false);
   /** Reducer state that isn't render state: the not-yet-open agent-requested
    *  port, the last applied request nonce, and the same-port reload counter
    *  (see reducePreviewSelection). */
@@ -196,17 +205,21 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
     // sibling would otherwise survive the re-run as a chip over a dead process
     // (D5). Browser kernel: servePid is null, the helper returns null, and
     // only the panel's own registrations are closed.
-    const dead = await killTrackedServe(studio);
-    const closing = dead ?? openedPorts.current;
-    openedPorts.current = [];
-    for (const p of closing) await studio.closePort(p);
-    const result = await action();
-    openedPorts.current = result.opened;
-    if (result.ok) setNonce((n) => n + 1);
+    try {
+      const dead = await killTrackedServe(studio);
+      const closing = dead ?? openedPorts.current;
+      openedPorts.current = [];
+      for (const p of closing) await studio.closePort(p);
+      const result = await action();
+      openedPorts.current = result.opened;
+      if (result.ok) setNonce((n) => n + 1);
+    } finally {
+      runLatch.current = false;
+    }
   }
 
   function handleRun(): void {
-    if (running || building || switching) return;
+    if (runLatch.current || running || building || switching) return;
     const pf = portField.trim();
     if (pf !== "" && !/^\d+$/.test(pf)) {
       setErrors([`Port must be a number (got "${pf}") — leave it empty for auto.`]);
@@ -214,8 +227,10 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
     }
     // Empty/auto-detected field on a bundleable project -> the bundle+serve
     // flow; anything the user actually typed runs as-is.
-    if (bundleIntent) void doRun(() => bundleAndRun());
-    else if (cmd.trim()) void doRun(() => runCommand(cmd.trim()));
+    const action = bundleIntent ? () => bundleAndRun() : cmd.trim() ? () => runCommand(cmd.trim()) : null;
+    if (!action) return;
+    runLatch.current = true; // before the first await in doRun, so a double-click can't slip through
+    void doRun(action);
   }
 
   // Kernel-switch hygiene (panel half): Studio killed the outgoing kernel's

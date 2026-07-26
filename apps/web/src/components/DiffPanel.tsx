@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import type { Studio, Run } from "../lib/studio.js";
 import { lineDiff, diffStats } from "../lib/diff.js";
 import { DEFAULT_SPLIT, DIFFPANEL_SPLIT_KEY, loadSplit, saveSplit, splitForDrag } from "../lib/filepanel-split.js";
@@ -55,45 +55,56 @@ export function DiffPanel({ run, studio }: { run: Run; studio: Studio }) {
     saveSplit(DEFAULT_SPLIT, DIFFPANEL_SPLIT_KEY);
   }
 
+  // lineDiff is an O(n×m) LCS (a 2000-line file measures ~57 ms, 4000 ~208 ms),
+  // and it used to run once per changed file INSIDE the list's map plus a second
+  // time for the selected file — i.e. the whole matrix set rebuilt on every
+  // render, so selecting a file or dragging the splitter re-diffed everything.
+  // Compute each file's lines + stats exactly once here: `run.changes` is
+  // replaced wholesale whenever a change lands (revert, new run), so it is the
+  // only input that can invalidate them.
+  const diffs = useMemo(
+    () =>
+      run.changes.map((change) => {
+        const lines = lineDiff(change.before, change.after);
+        return { change, lines, stats: diffStats(lines) };
+      }),
+    [run.changes],
+  );
+
   if (run.changes.length === 0) {
     return <div className="hint">This run didn't change any files.</div>;
   }
 
-  const selected = run.changes.find((c) => c.path === sel) ?? run.changes[0];
+  const selected = diffs.find((d) => d.change.path === sel) ?? diffs[0];
   if (!selected) return null; // unreachable given the length check; satisfies the type
-
-  const lines = lineDiff(selected.before, selected.after);
-  const stats = diffStats(lines);
+  const { lines, stats, change: file } = selected;
 
   return (
     <div className="panel diff-panel">
       <div className="fp-body" ref={bodyRef}>
         {/* Top pane: the changed-file list (pinned to the persisted fraction). */}
         <div className="diff-files fp-tree" style={{ flex: `0 0 ${split * 100}%` }}>
-          {run.changes.map((c) => {
-            const { added, removed } = diffStats(lineDiff(c.before, c.after));
-            return (
-              <div
-                key={c.path}
-                className={`diff-file ${c.path === selected.path ? "sel" : ""}`}
-                onClick={() => setSel(c.path)}
+          {diffs.map(({ change: c, stats: { added, removed } }) => (
+            <div
+              key={c.path}
+              className={`diff-file ${c.path === file.path ? "sel" : ""}`}
+              onClick={() => setSel(c.path)}
+            >
+              <span className={"mark " + c.kind}>{MARK[c.kind]}</span>
+              <span className="fp">{c.path}</span>
+              <span className="add">+{added}</span>
+              <span className="del">−{removed}</span>
+              <button
+                className="btn ghost revert"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void studio.revertChange(run.id, c.path);
+                }}
               >
-                <span className={"mark " + c.kind}>{MARK[c.kind]}</span>
-                <span className="fp">{c.path}</span>
-                <span className="add">+{added}</span>
-                <span className="del">−{removed}</span>
-                <button
-                  className="btn ghost revert"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void studio.revertChange(run.id, c.path);
-                  }}
-                >
-                  Revert
-                </button>
-              </div>
-            );
-          })}
+                Revert
+              </button>
+            </div>
+          ))}
         </div>
 
         <div
@@ -114,7 +125,7 @@ export function DiffPanel({ run, studio }: { run: Run; studio: Studio }) {
         <div className="viewer fp-view diff-view">
           <div className="vhead">
             <span className="vhead-path">
-              <span className={"mark " + selected.kind}>{MARK[selected.kind]}</span> {selected.path}
+              <span className={"mark " + file.kind}>{MARK[file.kind]}</span> {file.path}
             </span>
             <span className="vhead-stats">
               <span className="add">+{stats.added}</span> <span className="del">−{stats.removed}</span>
