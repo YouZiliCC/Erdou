@@ -1,8 +1,9 @@
 import "fake-indexeddb/auto";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Studio, type Run, type TraceKind } from "./studio.js";
+import type { DirHandleLike } from "./local-mount.js";
 
-const mkRun = (id: string): Run => ({
+const mkRun = (id: string, createdAt = 1): Run => ({
   id,
   title: id,
   task: id,
@@ -10,7 +11,7 @@ const mkRun = (id: string): Run => ({
   trace: [],
   changes: [],
   messages: [],
-  createdAt: 1,
+  createdAt,
 });
 
 describe("Studio.save — snapshot-save failures are surfaced (B2)", () => {
@@ -61,6 +62,121 @@ describe("Studio.save — snapshot-save failures are surfaced (B2)", () => {
     expect(studio.lastSaveFailed).toBe(true);
     expect(failLines()).toHaveLength(1);
     expect(failLines()[0]!.detail).toContain("full again");
+  });
+});
+
+describe("Studio.boot — a dead persistence layer is visible, not silent (D5)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("surfaces the run-history failure in the systemLog and still wires runtime events", async () => {
+    // Firefox private browsing: runs-store.open() deliberately throws when
+    // IndexedDB is unavailable. use-studio.ts discards boot()'s promise, so the
+    // rejection left the app looking normal with an EMPTY log and no file panel
+    // refresh (subscribeRuntime never ran).
+    vi.stubGlobal("indexedDB", undefined);
+    const studio = new Studio();
+    await expect(studio.boot()).resolves.toBeUndefined();
+
+    const err = studio.systemLog.find((l) => l.kind === "error" && l.text.startsWith("Could not load your run history"));
+    expect(err).toBeDefined();
+    expect(err!.detail).toContain("IndexedDB");
+    expect(studio.runs).toEqual([]);
+
+    // The runtime is still wired: a file change bumps fsVersion (the file panel's
+    // refresh signal) even though persistence is dead.
+    const before = studio.fsVersion;
+    await studio.runtime.writeFile("/wired.txt", "x");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(studio.fsVersion).toBeGreaterThan(before);
+  });
+});
+
+describe("Studio.resetProject — every armed timer dies with the workspace (D2)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("cancels the snapshot/folder/state debounces and empties runs, so nothing re-writes what it just deleted", async () => {
+    const reload = vi.fn();
+    vi.stubGlobal("location", { reload, origin: "http://localhost:5173" });
+    const studio = new Studio();
+    await studio.boot();
+    studio.runs = [mkRun("history")];
+    studio.mount = { name: "proj" } as unknown as DirHandleLike;
+    const saveSpy = vi.spyOn(studio, "save").mockResolvedValue(undefined);
+    const folderSpy = vi.spyOn(studio, "saveToFolder").mockResolvedValue(undefined);
+    const internals = studio as unknown as {
+      scheduleSave(): void;
+      scheduleFolderSave(): void;
+      scheduleFolderStateSave(): void;
+      scheduleRunsSave(): void;
+      saveTimer: unknown;
+      folderSaveTimer: unknown;
+      folderStateTimer: unknown;
+      runsSaveTimer: unknown;
+    };
+    // The state the Reset click actually arrives in: window.confirm blocks the
+    // main thread, so every debounce armed before it is already OVERDUE and
+    // fires on the first await inside resetProject.
+    internals.scheduleSave();
+    internals.scheduleFolderSave();
+    internals.scheduleFolderStateSave();
+    internals.scheduleRunsSave();
+
+    await studio.resetProject();
+
+    expect(reload).toHaveBeenCalledTimes(1);
+    // The folder-state flush a pagehide would kick must find no history to mirror.
+    expect(studio.runs).toEqual([]);
+    expect([
+      internals.saveTimer,
+      internals.folderSaveTimer,
+      internals.folderStateTimer,
+      internals.runsSaveTimer,
+    ]).toEqual([undefined, undefined, undefined, undefined]);
+    // All three windows (400/500/600 ms) elapse without re-writing the deleted
+    // workspace — previously save() re-committed the snapshot after the delete.
+    await new Promise((r) => setTimeout(r, 700));
+    expect(saveSpy).not.toHaveBeenCalled();
+    expect(folderSpy).not.toHaveBeenCalled();
+    expect(studio.runsSavePending).toBe(false);
+  });
+});
+
+describe("Studio run-history cap — one bound for IndexedDB, the folder mirror and memory (D4)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("currentState() caps the .erdou mirror and hydrateRuns caps what comes back into memory", () => {
+    // currentState() reads theme/approval/model from localStorage, which this
+    // (node) test environment has none of.
+    vi.stubGlobal("localStorage", { getItem: () => null } as unknown as Storage);
+    const studio = new Studio();
+    const internals = studio as unknown as {
+      currentState(): { runs: Run[] };
+      hydrateRuns(folderRuns: Run[], mode: "merge" | "replace"): number;
+    };
+    // Each Run carries its whole trace plus every FileChange's full before AND
+    // after text, so an uncapped mirror is unbounded pretty-printed JSON.
+    studio.runs = Array.from({ length: 30 }, (_, i) => mkRun(`mem-${i}`));
+    const mirrored = internals.currentState().runs;
+    expect(mirrored).toHaveLength(20);
+    expect(mirrored.at(-1)!.id).toBe("mem-19");
+
+    // A folder holding a full list must not push memory past the cap on mount.
+    const folderRuns = Array.from({ length: 30 }, (_, i) => mkRun(`folder-${i}`));
+    studio.runs = [mkRun("mine", 2)]; // newer than every folder run → kept by the merge
+    internals.hydrateRuns(folderRuns, "merge");
+    expect(studio.runs).toHaveLength(20);
+    expect(studio.runs.map((r) => r.id).slice(0, 2)).toEqual(["mine", "folder-0"]);
+
+    // The explicit swap path takes the same bound.
+    internals.hydrateRuns(folderRuns, "replace");
+    expect(studio.runs).toHaveLength(20);
   });
 });
 

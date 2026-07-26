@@ -7,10 +7,31 @@ function splitLines(s: string): string[] {
   return lines;
 }
 
+/** Cell budget for the dense LCS table below. 4M cells is ~32 MB of JS numbers
+ *  and ~60 ms to fill (measured: 2000×2000 = 57 ms) — the largest matrix worth
+ *  building synchronously when the Diff tab renders. Nothing filters big files
+ *  out of `run.changes`, so a modified 15k-line package-lock.json asked for
+ *  225M cells (~1.9 GB) and took the tab down with an OOM. */
+const MAX_LCS_CELLS = 4_000_000;
+
+/**
+ * Line diff via LCS. Past `MAX_LCS_CELLS` the matrix is not built at all and
+ * the file is emitted as one whole-file delete block followed by one whole-file
+ * add block. That is a deliberate loss of GRANULARITY, not of correctness or
+ * content: every line of both sides is still present, with correct line
+ * numbers — only the per-line matching (and therefore the context lines) is
+ * skipped.
+ */
 export function lineDiff(before: string, after: string): DiffLine[] {
   const a = splitLines(before);
   const b = splitLines(after);
   const n = a.length, m = b.length;
+  if (n * m > MAX_LCS_CELLS) {
+    const out: DiffLine[] = [];
+    for (let i = 0; i < n; i++) out.push({ kind: "del", text: a[i]!, oldNo: i + 1 });
+    for (let j = 0; j < m; j++) out.push({ kind: "add", text: b[j]!, newNo: j + 1 });
+    return out;
+  }
   // LCS table
   const lcs: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
   for (let i = n - 1; i >= 0; i--)

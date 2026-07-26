@@ -48,10 +48,29 @@ function isBlockStart(line: string): boolean {
  *  vbscript: … — returns null and the link renders as plain text. */
 export function safeHref(href: string): string | null {
   const h = href.trim();
-  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(h);
-  if (scheme && !/^(https?|mailto)$/i.test(scheme[1]!)) return null;
+  // Allowlist by PARSING, not by pattern-matching the scheme: `String.trim`
+  // strips whitespace only, so a leading C0 control ("javascript:…") made
+  // the old scheme regex fail to match at position 0 and the value fell through
+  // as a live javascript: URL — browsers strip those controls (and interior
+  // tabs/newlines) before parsing, so the link fired. Resolving against a base
+  // keeps schemeless/relative targets working: they inherit the base's https:.
+  let protocol: string;
+  try {
+    protocol = new URL(h, "https://erdou.invalid/").protocol;
+  } catch {
+    return null; // unparseable even with a base — nothing we are willing to emit
+  }
+  if (protocol !== "http:" && protocol !== "https:" && protocol !== "mailto:") return null;
   return h;
 }
+
+/** CommonMark's intraword rule for `_`: a `_` delimiter flanked on its outer
+ *  side by a word character neither opens nor closes emphasis. Without it the
+ *  parser CONSUMED the underscores of every identifier an agent mentioned
+ *  outside a code span — "some_var_name" rendered as some<em>var</em>name, i.e.
+ *  a different identifier than the model wrote. `*` is exempt: intraword `*`
+ *  emphasis is legal (a*b*c). */
+const isWordChar = (ch: string | undefined): boolean => ch !== undefined && /[\p{L}\p{N}]/u.test(ch);
 
 /** Parse inline spans within a block's text. Recursive for nesting (e.g. bold
  *  inside a link). Unmatched delimiters fall through to literal text. */
@@ -97,7 +116,7 @@ export function parseInline(text: string): Inline[] {
     if ((c === "*" || c === "_") && text[i + 1] === c && text[i + 2] !== undefined && !/\s/.test(text[i + 2]!)) {
       const delim = c + c;
       const end = text.indexOf(delim, i + 2);
-      if (end > i + 1) {
+      if (end > i + 1 && (c === "*" || (!isWordChar(text[i - 1]) && !isWordChar(text[end + 2])))) {
         flush();
         out.push({ t: "strong", c: parseInline(text.slice(i + 2, end)) });
         i = end + 2;
@@ -107,7 +126,11 @@ export function parseInline(text: string): Inline[] {
     // Italic: *…* or _…_ (no space just inside the delimiters).
     if ((c === "*" || c === "_") && text[i + 1] !== undefined && !/\s/.test(text[i + 1]!) && text[i + 1] !== c) {
       const end = text.indexOf(c, i + 1);
-      if (end > i + 1 && !/\s/.test(text[end - 1]!)) {
+      if (
+        end > i + 1 &&
+        !/\s/.test(text[end - 1]!) &&
+        (c === "*" || (!isWordChar(text[i - 1]) && !isWordChar(text[end + 1])))
+      ) {
         flush();
         out.push({ t: "em", c: parseInline(text.slice(i + 1, end)) });
         i = end + 1;

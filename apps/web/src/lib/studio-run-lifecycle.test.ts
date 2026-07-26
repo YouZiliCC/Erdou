@@ -172,6 +172,69 @@ describe("Studio run lifecycle — stop + in-flight persistence (D1/D2)", () => 
   });
 });
 
+describe("Studio run turn — a failure during turn SETUP must not wedge the studio", () => {
+  it("a throwing skill scan ends the turn as an error instead of leaving running:true forever", async () => {
+    const studio = new Studio();
+    await studio.boot();
+    const chat = vi.fn();
+    (studio as unknown as { gateway: ModelGateway }).gateway = gatewayWith(chat);
+    // `mkdir -p /.skills/broken/SKILL.md` in the terminal is enough: scanSkills
+    // does exists(path) then readFile(path), and readFile on a directory throws
+    // EISDIR. That runs BEFORE the agent is constructed, i.e. in the setup that
+    // used to sit outside the try/finally.
+    studio.fs.mkdir("/.skills/broken/SKILL.md", { recursive: true });
+    const seenRunning: boolean[] = [];
+    studio.subscribe(() => seenRunning.push(studio.running));
+
+    // The rejection used to escape as an unhandled promise rejection with
+    // nothing shown in the UI.
+    await expect(studio.startRun("setup blows up", DEFAULT_MODEL, "auto")).resolves.toBeUndefined();
+
+    // Settled: the Composer is usable again, the kernel toggle unlocks, Stop is
+    // no longer needed, and the next task is accepted.
+    expect(studio.running).toBe(false);
+    expect(studio.stopping).toBe(false);
+    const run = studio.runs.find((r) => r.task === "setup blows up");
+    expect(run).toBeDefined();
+    expect(run!.status).toBe("error");
+    expect(
+      run!.trace.some((l) => l.kind === "error" && l.text === "Agent stopped" && l.detail?.includes("EISDIR")),
+    ).toBe(true);
+    // The agent never ran, and the UI was told about the settled state.
+    expect(chat).not.toHaveBeenCalled();
+    expect(seenRunning.at(-1)).toBe(false);
+    // The error run reached IndexedDB like any other finished turn.
+    const stored = await loadRuns();
+    expect(stored.find((r) => r.task === "setup blows up")?.status).toBe("error");
+
+    // The turn's final save wrote the broken skill into the shared (fake)
+    // snapshot store, which every later boot() restores — drop it again.
+    studio.fs.rm("/.skills/broken", { recursive: true, force: true });
+    await studio.save();
+  });
+
+  it("a failed runs flush at turn end is surfaced and still notifies (no 'Working…' freeze)", async () => {
+    const studio = new Studio();
+    await studio.boot();
+    const chat = vi.fn().mockResolvedValue({ content: "all done", toolCalls: [] });
+    (studio as unknown as { gateway: ModelGateway }).gateway = gatewayWith(chat);
+    // saveRuns' IndexedDB put can reject (quota, aborted transaction); every
+    // other call site catches, this one used to skip the final notify().
+    vi.spyOn(studio, "flushRunsSave").mockRejectedValue(new Error("QuotaExceededError: runs store full"));
+    const seenRunning: boolean[] = [];
+    studio.subscribe(() => seenRunning.push(studio.running));
+
+    await expect(studio.startRun("quota at turn end", DEFAULT_MODEL, "auto")).resolves.toBeUndefined();
+
+    expect(studio.running).toBe(false);
+    const err = studio.systemLog.find((l) => l.kind === "error" && l.text === "Could not persist run history");
+    expect(err?.detail).toContain("QuotaExceededError");
+    // The last render the UI got shows a settled studio — without the fix the
+    // final notify() never ran and the Composer stayed on "Working…"/Stop.
+    expect(seenRunning.at(-1)).toBe(false);
+  });
+});
+
 describe("Studio run turn — diff capture survives a mid-run failure (B5)", () => {
   it("a turn that throws after changing files still populates run.changes (Review/revert have content)", async () => {
     const studio = new Studio();

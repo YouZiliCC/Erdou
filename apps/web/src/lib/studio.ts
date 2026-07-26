@@ -18,7 +18,7 @@ import {
   type Kernel,
   type RpcShellSession,
 } from "./kernel.js";
-import { loadRuns, saveRuns, clearRuns } from "./runs-store.js";
+import { loadRuns, saveRuns, clearRuns, capRuns } from "./runs-store.js";
 import { SnapshotReader, buildFileChanges } from "./snapshot-read.js";
 import { startPreviewProxy, setPreviewRuntime } from "./preview-bridge.js";
 import { runServeCommand, type RunServeResult } from "./run-serve.js";
@@ -368,22 +368,45 @@ export class Studio {
   async boot(): Promise<void> {
     if (this.booted) return;
     this.booted = true;
-    await this.runtime.boot();
-    this._browserBooted = true;
+    try {
+      await this.runtime.boot();
+      this._browserBooted = true;
+    } catch (err) {
+      // Same reason as the run-history guard below: an unguarded throw here
+      // rejected a promise nobody awaits. Reported instead, so the user sees
+      // WHY the workspace is unusable rather than an app that just does nothing.
+      this.logSystem("error", "Could not start the runtime — the workspace is unavailable.", asMessage(err));
+    }
     // Preview reverse-proxy: SW intercepts /__preview__/<port>/ iframe requests
     // and forwards them here to `runtime.dispatch`. Fire-and-forget: SW
     // registration must not block boot, and it self-guards for no-SW envs.
     // Installs the listener + seeds the preview-runtime holder; a later kernel
     // switch re-aims it via `setPreviewRuntime` instead of re-registering.
     void startPreviewProxy(this.runtime);
-    this.runs = await loadRuns();
-    // Seed the id counter past the loaded runs BEFORE any new line is stamped
-    // (normalizeInterruptedRuns appends a marker), so nothing collides with a
-    // prior session's persisted ids.
-    this.reseedTraceIds();
-    // D2: a stored run still marked "running" was interrupted by a reload/crash
-    // mid-run (no run survives its session) — normalize it honestly and persist.
-    if (this.normalizeInterruptedRuns()) await saveRuns(this.runs);
+    // The run-history load is guarded like the restore below it: use-studio.ts
+    // fires boot() and DISCARDS the promise (`void singleton.boot()`), and the
+    // app installs no unhandledrejection handler and no error boundary — so a
+    // throw here (runs-store deliberately throws when IndexedDB is unavailable,
+    // e.g. Firefox private browsing) skipped subscribeRuntime/installUnloadFlush
+    // and left a normal-looking app with an EMPTY log and a file panel that
+    // never refreshed. Persistence being dead must be VISIBLE and must not take
+    // the live runtime down with it.
+    try {
+      this.runs = await loadRuns();
+      // Seed the id counter past the loaded runs BEFORE any new line is stamped
+      // (normalizeInterruptedRuns appends a marker), so nothing collides with a
+      // prior session's persisted ids.
+      this.reseedTraceIds();
+      // D2: a stored run still marked "running" was interrupted by a reload/crash
+      // mid-run (no run survives its session) — normalize it honestly and persist.
+      if (this.normalizeInterruptedRuns()) await saveRuns(this.runs);
+    } catch (err) {
+      this.logSystem(
+        "error",
+        "Could not load your run history from this browser — chat history will not be saved this session.",
+        asMessage(err),
+      );
+    }
     try {
       const snap = await this.store.load(SNAPSHOT_ID);
       if (snap) {
@@ -981,7 +1004,7 @@ export class Studio {
    */
   private hydrateRuns(folderRuns: Run[], mode: "merge" | "replace"): number {
     if (mode === "replace") {
-      this.runs = [...folderRuns];
+      this.runs = capRuns([...folderRuns]);
       this.reseedTraceIds(); // folder runs came from other sessions — bump past their ids
       if (this.activeRunId !== null && !this.runs.some((r) => r.id === this.activeRunId)) this.activeRunId = null;
       return 0;
@@ -997,16 +1020,26 @@ export class Studio {
       return r.createdAt > newestFolder;
     });
     const keptIds = new Set(kept.map((r) => r.id));
-    this.runs = [...kept, ...folderRuns.filter((r) => !keptIds.has(r.id))];
+    // capRuns here too (kept runs first, so nothing this session drove is cut):
+    // the folder mirror is written capped, but a folder written by an older
+    // build — or one whose runs.json a user grew by hand — would otherwise pour
+    // its whole list back into memory on EVERY mount, permanently defeating the
+    // bound saveRuns applies. Each Run carries its full trace plus every
+    // FileChange's entire before AND after text.
+    this.runs = capRuns([...kept, ...folderRuns.filter((r) => !keptIds.has(r.id))]);
     this.reseedTraceIds(); // merged-in folder runs came from other sessions — bump past their ids
     if (this.activeRunId !== null && !this.runs.some((r) => r.id === this.activeRunId)) this.activeRunId = null;
     return kept.length;
   }
 
-  /** Snapshot of what would be written to `.erdou/` right now. */
+  /** Snapshot of what would be written to `.erdou/` right now. Capped by the
+   *  SAME `capRuns` bound IndexedDB gets: `writeFolderState` pretty-prints the
+   *  whole array into `.erdou/runs.json`, and hydrateRuns reads it straight
+   *  back, so an uncapped mirror is both an unbounded file and a way around the
+   *  in-memory bound. */
   private currentState(): FolderState {
     return {
-      runs: this.runs,
+      runs: capRuns(this.runs),
       config: { theme: getTheme(), approvalMode: loadApprovalMode(), model: loadModel() },
     };
   }
@@ -1664,214 +1697,223 @@ export class Studio {
     const abort = new AbortController();
     this.runAbort = abort; // D1: stopRun() aborts this turn
 
-    // Capture the VFS at turn start, then collect every path the agent
-    // touches via a run-scoped subscription (separate from the boot-time
-    // save handler). `unsub` is re-pointed by `repointRunDiff` if the agent
-    // switches environments mid-run, so post-switch edits are still captured.
-    const startSnap = await this.runtime.createSnapshot();
     const changed = new Set<string>();
     const collect = (e: RuntimeEvent): void => {
       // Skip package-manager / tool / VM-system output (node_modules, /root/.local,
       // …) so `pip install`/`npm install` never reads as the agent's edits.
       if (e.type === "file.changed" && !this.isNonProjectPath(e.path)) changed.add(e.path);
     };
-    let unsub = this.runtime.subscribe(collect);
-    this.repointRunDiff = () => {
-      unsub();
+    // The whole TURN SETUP runs inside the try below — snapshot capture, skill
+    // scan, agent construction. Anything throwing there used to skip the
+    // finally entirely: `running` stayed true forever (Composer stuck on
+    // "Working…", the kernel toggle locked, every later task refused, Stop a
+    // no-op) and the rejection escaped unhandled with nothing shown in the UI —
+    // only a page reload recovered. `scanSkills` alone is enough to trigger it:
+    // `mkdir -p /.skills/x/SKILL.md` makes its readFile throw EISDIR.
+    let unsub: Unsubscribe | undefined;
+    let startSnap: Snapshot | undefined;
+    try {
+      // Capture the VFS at turn start, then collect every path the agent
+      // touches via a run-scoped subscription (separate from the boot-time
+      // save handler). `unsub` is re-pointed by `repointRunDiff` if the agent
+      // switches environments mid-run, so post-switch edits are still captured.
+      startSnap = await this.runtime.createSnapshot();
       unsub = this.runtime.subscribe(collect);
-    };
-    // Attribution rule for external disk edits (mounted-folder rescan): a pull
-    // writes the USER's edit into the VFS, whose file.changed lands in
-    // `changed` like any other — blaming the agent for it in the run diff. The
-    // watcher reports each pull's paths here and they are DISCOUNTED after the
-    // pull's own events settle. If the agent later writes the same path, that
-    // write re-adds it (its own event), so agent edits to user-edited files
-    // stay attributed — spanning run-start content to the agent's content. A
-    // pull that clobbers an EARLIER agent write drops the path: honest, since
-    // the agent's content no longer exists in the workspace. (Known narrow
-    // race: an agent write to the same path landing between the pull and its
-    // settle is discounted with it — bounded by one rescan tick.)
-    this.discountExternalPulls = async (paths) => {
-      await eventsSettled(); // VM-kernel events may deliver a macrotask late
-      for (const p of paths) changed.delete(p);
-    };
+      this.repointRunDiff = () => {
+        unsub?.();
+        unsub = this.runtime.subscribe(collect);
+      };
+      // Attribution rule for external disk edits (mounted-folder rescan): a pull
+      // writes the USER's edit into the VFS, whose file.changed lands in
+      // `changed` like any other — blaming the agent for it in the run diff. The
+      // watcher reports each pull's paths here and they are DISCOUNTED after the
+      // pull's own events settle. If the agent later writes the same path, that
+      // write re-adds it (its own event), so agent edits to user-edited files
+      // stay attributed — spanning run-start content to the agent's content. A
+      // pull that clobbers an EARLIER agent write drops the path: honest, since
+      // the agent's content no longer exists in the workspace. (Known narrow
+      // race: an agent write to the same path landing between the pull and its
+      // settle is discounted with it — bounded by one rescan tick.)
+      this.discountExternalPulls = async (paths) => {
+        await eventsSettled(); // VM-kernel events may deliver a macrotask late
+        for (const p of paths) changed.delete(p);
+      };
 
-    // Discover skills fresh each turn (a mid-run reply may run after the user
-    // dropped a new one). Malformed skills are surfaced, not silently dropped.
-    const { skills: skillBriefs, warnings: skillWarnings } = scanSkills(this.fs);
-    for (const w of skillWarnings) this.logSystem("system", w);
+      // Discover skills fresh each turn (a mid-run reply may run after the user
+      // dropped a new one). Malformed skills are surfaced, not silently dropped.
+      const { skills: skillBriefs, warnings: skillWarnings } = scanSkills(this.fs);
+      for (const w of skillWarnings) this.logSystem("system", w);
 
-    const agent = new CodingAgent({
-      // The delegating facade (M1), NOT `this.runtime` — a mid-run switch
-      // re-points which concrete runtime the agent's tools hit at call time.
-      runtime: this.agentRuntime,
-      gateway: this.gateway,
-      model,
-      maxSteps: 25,
-      environment: {
-        languages: AGENT_LANGUAGES,
-        commands: AGENT_COMMANDS,
-        notes:
-          "You can build & preview web apps: write a React/TS project (e.g. /src/main.tsx) and the user can Bundle & Run it (bundled in-browser, npm deps from a CDN), `erdou serve <dir>` a static site, or `erdou.serve(app, port)` a Python WSGI app — any of these serves it on a port to preview." +
-          " After open_preview, verify the app yourself: preview_read (rendered DOM), preview_click (click an element), preview_logs (console output + uncaught errors).",
-        // The environments catalog: which env the agent is in now + every env
-        // it can switch into (interpreters, package managers, install recipes,
-        // switch guidance). Without this, agent-core's environmentsCatalogSection
-        // returns "" and the R13 "ENVIRONMENTS & PACKAGES" brief is dead in
-        // production (final-switch.md FINDING 1). Duck-typed projection: each
-        // EnvironmentDescriptor structurally satisfies agent-core's
-        // EnvironmentBrief — no cross-import, keeps layering (apps/web → agent-core).
-        catalog: {
-          current: this.currentEnvId,
-          available: ENVIRONMENTS.map((e) => ({
-            id: e.id,
-            label: e.label,
-            interpreters: e.interpreters,
-            packageManagers: e.packageManagers,
-            installRecipes: e.installRecipes,
-            switchGuidance: e.switchGuidance,
-            speed: e.speed,
-          })),
+      const agent = new CodingAgent({
+        // The delegating facade (M1), NOT `this.runtime` — a mid-run switch
+        // re-points which concrete runtime the agent's tools hit at call time.
+        runtime: this.agentRuntime,
+        gateway: this.gateway,
+        model,
+        maxSteps: 25,
+        environment: {
+          languages: AGENT_LANGUAGES,
+          commands: AGENT_COMMANDS,
+          notes:
+            "You can build & preview web apps: write a React/TS project (e.g. /src/main.tsx) and the user can Bundle & Run it (bundled in-browser, npm deps from a CDN), `erdou serve <dir>` a static site, or `erdou.serve(app, port)` a Python WSGI app — any of these serves it on a port to preview." +
+            " After open_preview, verify the app yourself: preview_read (rendered DOM), preview_click (click an element), preview_logs (console output + uncaught errors).",
+          // The environments catalog: which env the agent is in now + every env
+          // it can switch into (interpreters, package managers, install recipes,
+          // switch guidance). Without this, agent-core's environmentsCatalogSection
+          // returns "" and the R13 "ENVIRONMENTS & PACKAGES" brief is dead in
+          // production (final-switch.md FINDING 1). Duck-typed projection: each
+          // EnvironmentDescriptor structurally satisfies agent-core's
+          // EnvironmentBrief — no cross-import, keeps layering (apps/web → agent-core).
+          catalog: {
+            current: this.currentEnvId,
+            available: ENVIRONMENTS.map((e) => ({
+              id: e.id,
+              label: e.label,
+              interpreters: e.interpreters,
+              packageManagers: e.packageManagers,
+              installRecipes: e.installRecipes,
+              switchGuidance: e.switchGuidance,
+              speed: e.speed,
+            })),
+          },
+          // Task-playbook skills discovered in /.skills/ (built-in + any the user
+          // dropped in). agent-core renders these as the SKILLS pointer list; the
+          // agent reads a skill's SKILL.md on demand. Duck-typed like the catalog.
+          skills: skillBriefs,
         },
-        // Task-playbook skills discovered in /.skills/ (built-in + any the user
-        // dropped in). agent-core renders these as the SKILLS pointer list; the
-        // agent reads a skill's SKILL.md on demand. Duck-typed like the catalog.
-        skills: skillBriefs,
-      },
-      // The agent can move itself to an environment with the interpreter /
-      // package manager the task needs; the callback performs the sanctioned
-      // mid-run switch and returns the new-env brief for the model.
-      extraTools: [
-        createSwitchEnvironmentTool((t) => this.switchEnvironmentForRun(t), {
-          environments: ENVIRONMENTS.map((e) => e.id),
-        }),
-        // App-UI tool (defined here, not in agent-tools — opening a panel is
-        // app business, not a runtime capability): lets the agent surface its
-        // running app to the user instead of hoping they find the Preview tab.
-        {
-          name: "open_preview",
-          description:
-            "Show the user your running app in Erdou's Preview panel. Two forms: " +
-            "(1) with `command`, starts that server as a managed preview process (the sanctioned way to run a blocking " +
-            "server — run_shell would hang on it) and then opens the panel on the port it binds; " +
-            "(2) without `command`, just opens the panel — call it right after a server you already started is listening. " +
-            "Servers must bind 0.0.0.0. `port` picks which port to focus (useful for multi-port servers); omit for the latest.",
-          parameters: {
-            type: "object",
-            properties: {
-              command: {
-                type: "string",
-                description:
-                  "Optional shell command that starts a server (e.g. `python3 -m http.server 8000` or `erdou serve dist`). " +
-                  "Run detached and tracked by the preview — omit if your server is already running.",
-              },
-              port: {
-                type: "number",
-                description: "The port to focus. Omit to focus the most recently opened port.",
+        // The agent can move itself to an environment with the interpreter /
+        // package manager the task needs; the callback performs the sanctioned
+        // mid-run switch and returns the new-env brief for the model.
+        extraTools: [
+          createSwitchEnvironmentTool((t) => this.switchEnvironmentForRun(t), {
+            environments: ENVIRONMENTS.map((e) => e.id),
+          }),
+          // App-UI tool (defined here, not in agent-tools — opening a panel is
+          // app business, not a runtime capability): lets the agent surface its
+          // running app to the user instead of hoping they find the Preview tab.
+          {
+            name: "open_preview",
+            description:
+              "Show the user your running app in Erdou's Preview panel. Two forms: " +
+              "(1) with `command`, starts that server as a managed preview process (the sanctioned way to run a blocking " +
+              "server — run_shell would hang on it) and then opens the panel on the port it binds; " +
+              "(2) without `command`, just opens the panel — call it right after a server you already started is listening. " +
+              "Servers must bind 0.0.0.0. `port` picks which port to focus (useful for multi-port servers); omit for the latest.",
+            parameters: {
+              type: "object",
+              properties: {
+                command: {
+                  type: "string",
+                  description:
+                    "Optional shell command that starts a server (e.g. `python3 -m http.server 8000` or `erdou serve dist`). " +
+                    "Run detached and tracked by the preview — omit if your server is already running.",
+                },
+                port: {
+                  type: "number",
+                  description: "The port to focus. Omit to focus the most recently opened port.",
+                },
               },
             },
-          },
-          execute: async (_ctx, args) => {
-            const port = typeof args.port === "number" ? args.port : null;
-            const command = typeof args.command === "string" && args.command.trim() !== "" ? args.command.trim() : null;
-            if (command) {
-              const r = await this.runServe(command);
-              if (!r.ok) {
-                return { ok: false, output: r.stderr?.trim() || r.stdout?.trim() || "serve failed" };
+            execute: async (_ctx, args) => {
+              const port = typeof args.port === "number" ? args.port : null;
+              const command = typeof args.command === "string" && args.command.trim() !== "" ? args.command.trim() : null;
+              if (command) {
+                const r = await this.runServe(command);
+                if (!r.ok) {
+                  return { ok: false, output: r.stderr?.trim() || r.stdout?.trim() || "serve failed" };
+                }
+                if (r.openedPorts.length === 0) {
+                  return {
+                    ok: false,
+                    output:
+                      r.loopbackPorts.length > 0
+                        ? `The server bound 127.0.0.1 only (port ${r.loopbackPorts.join(", ")}) — bind 0.0.0.0 so the preview proxy can reach it.`
+                        : "The command exited without opening a port — a preview needs a server that binds 0.0.0.0 and keeps running.",
+                  };
+                }
+                const focus = port !== null && r.openedPorts.includes(port) ? port : r.openedPorts[r.openedPorts.length - 1]!;
+                this.requestPreview(focus);
+                const portsNote = r.openedPorts.length > 1 ? ` (ports open: ${r.openedPorts.join(", ")})` : "";
+                return { ok: true, output: `Server running; preview opened for the user on port ${focus}${portsNote}.` };
               }
-              if (r.openedPorts.length === 0) {
-                return {
-                  ok: false,
-                  output:
-                    r.loopbackPorts.length > 0
-                      ? `The server bound 127.0.0.1 only (port ${r.loopbackPorts.join(", ")}) — bind 0.0.0.0 so the preview proxy can reach it.`
-                      : "The command exited without opening a port — a preview needs a server that binds 0.0.0.0 and keeps running.",
-                };
-              }
-              const focus = port !== null && r.openedPorts.includes(port) ? port : r.openedPorts[r.openedPorts.length - 1]!;
-              this.requestPreview(focus);
-              const portsNote = r.openedPorts.length > 1 ? ` (ports open: ${r.openedPorts.join(", ")})` : "";
-              return { ok: true, output: `Server running; preview opened for the user on port ${focus}${portsNote}.` };
-            }
-            this.requestPreview(port);
-            return {
-              ok: true,
-              output:
-                port === null
-                  ? "Preview panel opened for the user (latest port)."
-                  : `Preview panel opened for the user on port ${port}.`,
-            };
-          },
-        },
-        // Preview observation (spike 3): read the served app's DOM, click an
-        // element, drain its console/error hook — the agent's verify loop
-        // after open_preview. Ungated by design: they act only inside the
-        // sandboxed preview iframe on code the agent itself served (serving
-        // was the gated step); gating would break click→read→logs in Confirm
-        // mode. Reversal is one string in agent-core's GATED_TOOLS.
-        ...createPreviewTools(() => this.previewFrame),
-        // Multi-agent fan-out (spike 4): ONE batch delegate call runs 1..3
-        // sub-agents concurrently in throwaway browser-kernel sandboxes seeded
-        // from a snapshot of the CURRENT workspace, then merges their diffs
-        // back through `agentRuntime` — contract writes, so the run-scoped
-        // diff subscription above picks the merged changes up and Review/
-        // Diff/revert work with zero new plumbing. Approval-gated centrally
-        // (agent-core GATED_TOOLS) on the delegate call itself; children run
-        // ungated inside their sandboxes — nothing touches the real workspace
-        // until this already-approved call applies diffs. NOTE: the ungated-
-        // children decision leans on `pendingApproval` being a SINGLE slot
-        // (concurrent per-child prompts would overwrite each other) — a future
-        // "gate children too" change must first redesign that surface.
-        createDelegateTool({
-          runtime: this.agentRuntime,
-          gateway: this.gateway,
-          model,
-          signal: abort.signal,
-          onChildUpdate: this.makeSubagentReporter(run),
-        }),
-        // App-UI tool (same inline style as open_preview): packages the
-        // workspace as a .zip and puts a Download button in front of the user.
-        // Read-only + UI-only, so it is deliberately NOT approval-gated (not
-        // in agent-core's GATED_TOOLS).
-        {
-          name: "package_project",
-          description:
-            "Package the user's whole project as a downloadable .zip and hand them a Download button in the " +
-            "conversation. Zips the entire workspace including .git (version history is part of the project), " +
-            "excluding node_modules (regenerable) and Erdou-internal state. Use it when the user asks to export, " +
-            "download, save a copy of, or hand off the project. Optional `name` sets the zip's file name.",
-          parameters: {
-            type: "object",
-            properties: {
-              name: {
-                type: "string",
-                description: "Optional base name for the zip file (defaults to the project folder's name).",
-              },
-            },
-          },
-          execute: async (_ctx, args) => {
-            const name = typeof args.name === "string" && args.name.trim() !== "" ? args.name.trim() : undefined;
-            try {
-              // Pass THIS turn's `run`, not activeRun: if the user selects
-              // another thread (or New Draft) mid-run, the card must still
-              // land on the conversation that invoked the tool — otherwise
-              // the "Download button in the conversation" claim below lies.
-              const e = this.exportProject(name, run);
+              this.requestPreview(port);
               return {
                 ok: true,
-                output: `Packaged ${e.fileCount} files (${e.byteSize} bytes) into ${e.name}; the user now has a Download button in the conversation.`,
+                output:
+                  port === null
+                    ? "Preview panel opened for the user (latest port)."
+                    : `Preview panel opened for the user on port ${port}.`,
               };
-            } catch (err) {
-              return { ok: false, output: asMessage(err) };
-            }
+            },
           },
-        },
-      ],
-      onEvent: (e) => this.onAgentEvent(run, e),
-      approve: this.makeApprove(approvalMode),
-      signal: abort.signal,
-    });
-    try {
+          // Preview observation (spike 3): read the served app's DOM, click an
+          // element, drain its console/error hook — the agent's verify loop
+          // after open_preview. Ungated by design: they act only inside the
+          // sandboxed preview iframe on code the agent itself served (serving
+          // was the gated step); gating would break click→read→logs in Confirm
+          // mode. Reversal is one string in agent-core's GATED_TOOLS.
+          ...createPreviewTools(() => this.previewFrame),
+          // Multi-agent fan-out (spike 4): ONE batch delegate call runs 1..3
+          // sub-agents concurrently in throwaway browser-kernel sandboxes seeded
+          // from a snapshot of the CURRENT workspace, then merges their diffs
+          // back through `agentRuntime` — contract writes, so the run-scoped
+          // diff subscription above picks the merged changes up and Review/
+          // Diff/revert work with zero new plumbing. Approval-gated centrally
+          // (agent-core GATED_TOOLS) on the delegate call itself; children run
+          // ungated inside their sandboxes — nothing touches the real workspace
+          // until this already-approved call applies diffs. NOTE: the ungated-
+          // children decision leans on `pendingApproval` being a SINGLE slot
+          // (concurrent per-child prompts would overwrite each other) — a future
+          // "gate children too" change must first redesign that surface.
+          createDelegateTool({
+            runtime: this.agentRuntime,
+            gateway: this.gateway,
+            model,
+            signal: abort.signal,
+            onChildUpdate: this.makeSubagentReporter(run),
+          }),
+          // App-UI tool (same inline style as open_preview): packages the
+          // workspace as a .zip and puts a Download button in front of the user.
+          // Read-only + UI-only, so it is deliberately NOT approval-gated (not
+          // in agent-core's GATED_TOOLS).
+          {
+            name: "package_project",
+            description:
+              "Package the user's whole project as a downloadable .zip and hand them a Download button in the " +
+              "conversation. Zips the entire workspace including .git (version history is part of the project), " +
+              "excluding node_modules (regenerable) and Erdou-internal state. Use it when the user asks to export, " +
+              "download, save a copy of, or hand off the project. Optional `name` sets the zip's file name.",
+            parameters: {
+              type: "object",
+              properties: {
+                name: {
+                  type: "string",
+                  description: "Optional base name for the zip file (defaults to the project folder's name).",
+                },
+              },
+            },
+            execute: async (_ctx, args) => {
+              const name = typeof args.name === "string" && args.name.trim() !== "" ? args.name.trim() : undefined;
+              try {
+                // Pass THIS turn's `run`, not activeRun: if the user selects
+                // another thread (or New Draft) mid-run, the card must still
+                // land on the conversation that invoked the tool — otherwise
+                // the "Download button in the conversation" claim below lies.
+                const e = this.exportProject(name, run);
+                return {
+                  ok: true,
+                  output: `Packaged ${e.fileCount} files (${e.byteSize} bytes) into ${e.name}; the user now has a Download button in the conversation.`,
+                };
+              } catch (err) {
+                return { ok: false, output: asMessage(err) };
+              }
+            },
+          },
+        ],
+        onEvent: (e) => this.onAgentEvent(run, e),
+        approve: this.makeApprove(approvalMode),
+        signal: abort.signal,
+      });
       // Empty `run.messages` (a fresh run) makes the agent build its system
       // prompt from scratch; a non-empty transcript (a reply) makes it
       // continue the existing conversation instead — see CodingAgent.run.
@@ -1886,16 +1928,21 @@ export class Studio {
       // need them. Settle the async-delivered file.changed events BEFORE
       // dropping the run-scoped subscription, then read `changed`.
       await eventsSettled();
-      unsub();
+      unsub?.(); // undefined when setup threw before the subscription existed
       this.repointRunDiff = undefined;
       this.discountExternalPulls = undefined;
       try {
-        const turnChanges = await this.computeRunChanges(startSnap, changed);
-        run.changes = this.mergeChanges(run.changes, turnChanges);
-        // Still "running" here ⇔ the turn succeeded (the catch above sets
-        // "error"): decide review/done AFTER the diff, so "review" actually
-        // triggers when the turn changed files.
-        if (run.status === "running") run.status = run.changes.length > 0 ? "review" : "done";
+        // No `startSnap` ⇔ setup threw before the capture, so there is no
+        // baseline to diff against — skip the diff (the catch above already
+        // marked the run "error") rather than inventing one from nothing.
+        if (startSnap !== undefined) {
+          const turnChanges = await this.computeRunChanges(startSnap, changed);
+          run.changes = this.mergeChanges(run.changes, turnChanges);
+          // Still "running" here ⇔ the turn succeeded (the catch above sets
+          // "error"): decide review/done AFTER the diff, so "review" actually
+          // triggers when the turn changed files.
+          if (run.status === "running") run.status = run.changes.length > 0 ? "review" : "done";
+        }
       } catch (err) {
         // A diff failure inside the finally must not wedge the studio
         // (`running` would stay true forever) — surface it on the run instead
@@ -1910,7 +1957,14 @@ export class Studio {
       // doesn't show a stale approval for a run that is no longer executing.
       this.pendingApproval = null;
       await this.save();
-      await this.flushRunsSave(); // also cancels the trace-append debounce timer
+      // also cancels the trace-append debounce timer. Caught like every other
+      // saveRuns call site: its IndexedDB put CAN reject (quota, aborted
+      // transaction), and an escaping rejection skipped the notify() below —
+      // `running` was false internally but the Composer never re-rendered, so
+      // it kept showing "Working…" over a Stop button that did nothing.
+      await this.flushRunsSave().catch((err) =>
+        this.logSystem("error", "Could not persist run history", asMessage(err)),
+      );
       this.scheduleFolderStateSave();
       this.notify();
     }
@@ -2096,7 +2150,12 @@ export class Studio {
     const run = this.runs.find((r) => r.id === id);
     if (!run || run.status !== "review") return;
     run.status = "done";
-    void saveRuns(this.runs);
+    // Catch like every other saveRuns call site: a bare `void` here turned a
+    // quota/aborted-transaction rejection into an unhandled promise rejection
+    // that told the user nothing about the accept not being persisted.
+    void saveRuns(this.runs).catch((err) =>
+      this.logSystem("error", "Could not persist the reviewed run", asMessage(err)),
+    );
     this.scheduleFolderStateSave();
     this.notify();
   }
@@ -2301,12 +2360,29 @@ export class Studio {
   }
 
   async resetProject(): Promise<void> {
-    // Kill a pending debounced runs save first — firing between clearRuns and
-    // the reload would resurrect the just-cleared history on next boot.
-    if (this.runsSaveTimer) {
-      clearTimeout(this.runsSaveTimer);
-      this.runsSaveTimer = undefined;
+    // Kill EVERY armed debounce first — one firing between the deletes and the
+    // reload puts back exactly what the user asked us to destroy. TitleBar's
+    // window.confirm blocks the main thread, so any timer armed before the
+    // click is already OVERDUE and fires on the first await below: the snapshot
+    // debounce (400 ms, armed by every file.changed) would re-run
+    // store.save(SNAPSHOT_ID, …) in a transaction created AFTER the delete's —
+    // committing after it, so the files came back and the next boot announced
+    // "Restored your project from this browser" despite the promise that this
+    // deletes the workspace. Same for the runs debounce (history) and the two
+    // folder timers (a re-mirror onto the mounted disk).
+    for (const timer of [this.saveTimer, this.runsSaveTimer, this.folderSaveTimer, this.folderStateTimer]) {
+      if (timer) clearTimeout(timer);
     }
+    this.saveTimer = undefined;
+    this.runsSaveTimer = undefined;
+    this.folderSaveTimer = undefined;
+    this.folderStateTimer = undefined;
+    // Drop the history from memory too, so nothing is left to write back: a
+    // folder-state save re-armed between here and the reload — or kicked by the
+    // pagehide flush the reload itself fires — would otherwise mirror the
+    // just-cleared history straight back into `.erdou/runs.json`.
+    this.runs = [];
+    this.activeRunId = null;
     await this.store.delete(SNAPSHOT_ID);
     await clearRuns();
     location.reload();

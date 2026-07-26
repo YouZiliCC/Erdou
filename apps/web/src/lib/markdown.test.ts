@@ -34,6 +34,33 @@ describe("parseInline", () => {
     expect(parseInline("2 * 3 * 4")).toEqual([{ t: "text", v: "2 * 3 * 4" }]);
     expect(parseInline("**oops")).toEqual([{ t: "text", v: "**oops" }]);
   });
+
+  it("intraword `_` is literal — identifiers keep their underscores (CommonMark)", () => {
+    // The parser used to EAT these underscores: "run some<em>var</em>name here".
+    expect(parseInline("run some_var_name here")).toEqual([{ t: "text", v: "run some_var_name here" }]);
+    expect(parseInline("st.session_state")).toEqual([{ t: "text", v: "st.session_state" }]);
+    expect(parseInline("use __init__ and snake_case_id")).toEqual([
+      { t: "text", v: "use " },
+      { t: "strong", c: [{ t: "text", v: "init" }] },
+      { t: "text", v: " and snake_case_id" },
+    ]);
+    // A word-boundary `_` still emphasizes, before and after a rejected one.
+    expect(parseInline("snake_case _real_")).toEqual([
+      { t: "text", v: "snake_case " },
+      { t: "em", c: [{ t: "text", v: "real" }] },
+    ]);
+    // `*` is exempt: intraword `*` emphasis is legal and must keep working.
+    expect(parseInline("a*b*c")).toEqual([
+      { t: "text", v: "a" },
+      { t: "em", c: [{ t: "text", v: "b" }] },
+      { t: "text", v: "c" },
+    ]);
+    expect(parseInline("a**b**c")).toEqual([
+      { t: "text", v: "a" },
+      { t: "strong", c: [{ t: "text", v: "b" }] },
+      { t: "text", v: "c" },
+    ]);
+  });
 });
 
 describe("safeHref", () => {
@@ -43,6 +70,21 @@ describe("safeHref", () => {
     expect(safeHref("mailto:x@y.com")).toBe("mailto:x@y.com");
     expect(safeHref("javascript:alert(1)")).toBeNull();
     expect(safeHref("data:text/html,x")).toBeNull();
+  });
+
+  it("a C0 control before the scheme does not smuggle javascript: past the check", () => {
+    // String.trim strips whitespace only, so these fell through as LIVE
+    // javascript: URLs — browsers strip leading C0 controls before parsing.
+    expect(safeHref("\u0001javascript:alert(1)")).toBeNull();
+    expect(safeHref("\u001Fjavascript:alert(1)")).toBeNull();
+    expect(safeHref("\u000Bjavascript:alert(1)")).toBeNull();
+    expect(safeHref("\u0000javascript:alert(1)")).toBeNull();
+    // Tabs/newlines inside the scheme are stripped by the URL parser too.
+    expect(safeHref("java\nscript:alert(1)")).toBeNull();
+    expect(safeHref("\u0001vbscript:msgbox(1)")).toBeNull();
+    // Relative targets still pass through untouched.
+    expect(safeHref("#anchor")).toBe("#anchor");
+    expect(safeHref("docs/readme.md")).toBe("docs/readme.md");
   });
 });
 
