@@ -79,6 +79,22 @@ describe("GuestdClient", () => {
     await expect(client.ps()).rejects.toThrow(/list_procs: \/proc unreadable/);
   });
 
+  it("ps()/ptyOpen() carry guestd's error CODE, not just its message", async () => {
+    // guestd always sends {"code","message"} (src/guest/guestd.py). Dropping the code
+    // loses the only machine-readable half, and a frame that somehow lacks `message`
+    // used to surface as literally "Error: undefined" — nothing to debug from.
+    const channel = fakeGuest((type, id, _body, reply) => {
+      if (type === FrameType.PS) reply(encodeJsonFrame(FrameType.ERROR, id, { code: "EIO", message: "list_procs: /proc unreadable" }));
+      if (type === FrameType.PTY_OPEN) reply(encodeJsonFrame(FrameType.ERROR, id, { code: "EADDRINUSE" })); // no message
+    });
+    const client = new GuestdClient(channel);
+    await client.ready();
+    await expect(client.ps()).rejects.toThrow(/EIO.*list_procs: \/proc unreadable/);
+    const ptyErr = await client.ptyOpen(7681).then(() => undefined, (e: Error) => e);
+    expect(ptyErr?.message).toContain("EADDRINUSE");
+    expect(ptyErr?.message).not.toContain("undefined");
+  });
+
   it("ready() rejects after the deadline if the guest never answers", async () => {
     // a channel that swallows PINGs and never emits READY
     const channel: GuestChannel = { send() {}, subscribe() {} };

@@ -182,6 +182,15 @@ export class GuestdClient {
     }
   }
 
+  /** Turn a control-request ERROR frame into an Error. guestd sends
+   *  {"code","message"} (src/guest/guestd.py send_json("!", ...)); keep BOTH — the
+   *  code is the only machine-readable half, and a frame missing `message` would
+   *  otherwise surface as literally "Error: undefined" with nothing to debug from. */
+  private controlError(op: string, body: Uint8Array): Error {
+    const { code, message } = decodeJson(body) as { code?: string; message?: string };
+    return new Error(`guestd ${op} failed — ${code ?? "no code"}: ${message ?? "no message in the error frame"}`);
+  }
+
   private run(op: string, payload: Record<string, unknown>): Promise<GuestProcess> {
     if (this.disposed) return Promise.reject(new Error("GuestdClient disposed"));
     const id = this.nextId++;
@@ -241,7 +250,7 @@ export class GuestdClient {
       this.control.set(id, ({ type, body }) => {
         this.control.delete(id);
         this.ptyOpenResolvers.delete(id);
-        if (type === FrameType.ERROR) reject(new Error((decodeJson(body) as { message: string }).message));
+        if (type === FrameType.ERROR) reject(this.controlError("ptyOpen", body));
         else resolve(decodeJson(body) as { pid: number; port: number });
       });
       this.channel.send(encodeJsonFrame(FrameType.PTY_OPEN, id, { port }));
@@ -261,8 +270,8 @@ export class GuestdClient {
         // with the SAME request id, so a list_procs() blow-up arrives here as an ERROR
         // frame. Decoding it as a PROCS reply yields `.procs === undefined`, which
         // resolves and then TypeErrors inside VmRuntime.getProcesses' live.map() far
-        // from the cause — reject with guestd's own message instead.
-        if (type === FrameType.ERROR) { reject(new Error((decodeJson(body) as { message: string }).message)); return; }
+        // from the cause — reject with guestd's own code+message instead.
+        if (type === FrameType.ERROR) { reject(this.controlError("ps", body)); return; }
         resolver?.((decodeJson(body) as { procs: ProcessInfo[] }).procs);
       });
       this.channel.send(encodeJsonFrame(FrameType.PS, id, {}));

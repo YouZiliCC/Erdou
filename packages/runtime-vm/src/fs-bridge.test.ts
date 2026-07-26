@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import type { RuntimeEvent } from "@erdou/runtime-contract";
-import { Fs9pBridge } from "./fs-bridge.js";
+import { Fs9pBridge, WORKSPACE, SKELETON_DIRS } from "./fs-bridge.js";
 import { makeFakeFs9p, bootWorkspace } from "./test-support/fake-fs9p.js";
 
 describe("Fs9pBridge", () => {
@@ -116,6 +116,20 @@ describe("Fs9pBridge", () => {
     expect(events.filter((e) => e.type === "file.changed").at(-1)).toMatchObject({ path: "/a/c.txt", kind: "create" });
   });
 
+  it("ROOTS a relative contract path into the workspace (deliberate divergence from the browser kernel's EINVAL)", async () => {
+    const fs = makeFakeFs9p(); bootWorkspace(fs);
+    const bridge = new Fs9pBridge(fs, () => {}); bridge.attach();
+    // runtime-browser's vfs normalize() throws EINVAL here; the VM roots it. Nothing
+    // upstream checks absoluteness, so model-authored "notes.md" must keep working —
+    // rooting CONTAINS: the file lands under workspace/, and the skeleton guard,
+    // which reads the NORMALIZED first segment, still fires on a relative path.
+    await bridge.writeFile("notes.md", "rel");
+    expect(new TextDecoder().decode(await bridge.readFile("/notes.md"))).toBe("rel");
+    expect(fs.SearchPath("workspace/notes.md").id).not.toBe(-1);
+    expect(fs.Search(0, "notes.md")).toBe(-1); // NOT at the guest image root
+    await expect(bridge.writeFile("usr/lib/x", "no")).rejects.toThrow(/EACCES/);
+  });
+
   it("rm frees the inode bytes (v86's Unlink only drops the direntry)", async () => {
     const fs = makeFakeFs9p(); bootWorkspace(fs);
     const bridge = new Fs9pBridge(fs, () => {}); bridge.attach();
@@ -138,6 +152,49 @@ describe("Fs9pBridge", () => {
     const ids = [fs.SearchPath("workspace/d/a.txt").id, fs.SearchPath("workspace/d/sub/b.txt").id];
     await bridge.rm("/d", { recursive: true });
     for (const id of ids) expect(fs.inodedata[id]).toBeUndefined();
+  });
+
+  it("writeFile onto an existing DIRECTORY throws EISDIR instead of overwriting the dir inode", async () => {
+    const fs = makeFakeFs9p(); bootWorkspace(fs);
+    const events: RuntimeEvent[] = [];
+    const bridge = new Fs9pBridge(fs, (e) => events.push(e)); bridge.attach();
+    await bridge.mkdir("/a/b", { recursive: true });
+    await bridge.writeFile("/a/keep.txt", "kept");
+    const aId = fs.SearchPath("workspace/a").id;
+
+    await expect(bridge.writeFile("/a", "clobber")).rejects.toThrow(/EISDIR/);
+    // Round 2's normalization makes the SAME directory reachable through "..".
+    await expect(bridge.writeFile("/a/b/..", "clobber")).rejects.toThrow(/EISDIR/);
+
+    // Without the check, ChangeSize+Write run against the directory inode: they
+    // install file bytes and rewrite inode.size, so the dir stats as a 7-byte
+    // object and get_state serialises garbage for it.
+    expect(fs.inodedata[aId]).toBeUndefined();
+    expect((await bridge.stat("/a")).type).toBe("directory");
+    expect((await bridge.stat("/a")).size).toBe(0);
+    expect((await bridge.readdir("/a")).map((e) => e.name)).toEqual(["b", "keep.txt"]);
+    expect(events.filter((e) => e.type === "file.changed" && e.path === "/a" && e.kind === "modify")).toEqual([]);
+  });
+
+  it("rm of a path that normalizes to the workspace root refuses BEFORE deleting anything", async () => {
+    // A workspace whose direntry order puts a USER entry ahead of the skeleton —
+    // pre-fix, rm("/") walked these children and deleted user-owned.txt before the
+    // first skeleton dir raised EACCES, i.e. a half-erased workspace.
+    const fs = makeFakeFs9p();
+    const wsId = fs.CreateDirectory(WORKSPACE, 0);
+    await fs.CreateBinaryFile("user-owned.txt", wsId, new TextEncoder().encode("mine"));
+    for (const d of SKELETON_DIRS) fs.CreateDirectory(d, wsId);
+    const bridge = new Fs9pBridge(fs, () => {}); bridge.attach();
+    await bridge.mkdir("/dir", { recursive: true });
+    await bridge.writeFile("/dir/deep.txt", "also mine");
+
+    // force must NOT swallow this: the refusal is the point, not a missing path.
+    await expect(bridge.rm("/", { recursive: true, force: true })).rejects.toThrow(/EACCES.*'\/'/);
+    await expect(bridge.rm("/a/..", { recursive: true, force: true })).rejects.toThrow(/EACCES.*'\/'/);
+
+    expect(new TextDecoder().decode(await bridge.readFile("/user-owned.txt"))).toBe("mine");
+    expect(new TextDecoder().decode(await bridge.readFile("/dir/deep.txt"))).toBe("also mine");
+    expect(fs.SearchPath(WORKSPACE).id).toBe(wsId); // and the workspace root itself survived
   });
 
   it("readFile of an empty (never-written) file returns 0 bytes, not ENOENT", async () => {

@@ -31,8 +31,15 @@ export interface Fs9p {
 
 type ChangeKind = "create" | "modify" | "delete";
 
-/** Collapse "." / ".." and clamp at the root — same semantics as runtime-browser's
- *  vfs normalize(), so both kernels honour the identical contract-path grammar.
+/** Collapse "." / ".." and clamp at the root. The COLLAPSE is exactly
+ *  runtime-browser's vfs normalize(); the GRAMMAR deliberately is NOT — that
+ *  normalize() throws EINVAL for anything not starting with "/", while this ROOTS a
+ *  relative path ("etc/passwd" -> "/etc/passwd"). Both VM FS implementations have
+ *  always rooted relatives and nothing upstream checks absoluteness (agent-tools'
+ *  read_file/write_file only assert `typeof path === "string"`), so tightening to
+ *  EINVAL would break working VM sessions and buy nothing: rooting CONTAINS rather
+ *  than escapes — the result is "/"-prefixed, clamped at the root by the stack.pop()
+ *  below, and ws() still puts WORKSPACE in front of it.
  *  MANDATORY before mapping to a 9p path: agent tools hand model-authored paths
  *  through untouched, and v86 puts REAL "."/".." direntries on every directory
  *  (link_under_dir), so an uncollapsed "/../etc/passwd" maps to 9p
@@ -241,6 +248,11 @@ export class Fs9pBridge {
         idx = await this.fs.CreateBinaryFile(this.base(path), w.parentid, buf);
         kind = "create";
       } else {
+        // A contract path can resolve onto a DIRECTORY ("/somedir", or "/a/b/.."
+        // after normalization). ChangeSize+Write against a directory inode install
+        // file bytes and rewrite inode.size on it — silent corruption that survives
+        // into get_state. Same refusal (and shape) as SyncFs9pFs.writeFile.
+        if ((this.fs.GetInode(w.id).mode & S_IFMT) === S_IFDIR) throw new ErrnoError("EISDIR", { path, syscall: "write" });
         await this.fs.ChangeSize(w.id, buf.length);
         await this.fs.Write(w.id, 0, buf.length, buf);
         idx = w.id; kind = "modify";
@@ -290,6 +302,12 @@ export class Fs9pBridge {
 
   async rm(path: string, opts?: RmOptions): Promise<void> {
     this.guardSkeleton(path, "unlink");
+    // The workspace ROOT is never removable, and refusing it must happen BEFORE the
+    // recursive walk: "/" (or anything normalizing to it, e.g. "/a/..") otherwise
+    // deletes the user's top-level entries one by one until the first skeleton dir
+    // raises EACCES — a half-erased workspace, and with force:true not even an error.
+    // Deleting the root itself would also unlink workspace/ from the export root.
+    if (normalizeContractPath(path) === "/") throw new ErrnoError("EACCES", { path: "/", syscall: "unlink" });
     this.suppress++;
     try {
       const w = this.fs.SearchPath(this.ws(path));
