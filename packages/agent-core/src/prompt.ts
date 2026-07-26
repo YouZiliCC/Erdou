@@ -241,7 +241,12 @@ function simulatedPrompt(env: EnvironmentInfo, caps: RuntimeCapabilities): strin
     "",
     "ENVIRONMENT",
     "- A virtual OS inside a web browser tab: an in-memory POSIX-ish filesystem, processes, and a shell. Paths are absolute and start with '/'. Your project is rooted at `/`; the filesystem starts empty.",
-    `- Shell: pipes (|), redirection (> >> <), && || ; and trailing-& background jobs (see \`jobs\`). Built-in commands: ${SHELL_BUILTINS}. cd and export change the shell state. sed/awk are honest busybox-style subsets that ERROR on anything unsupported (JS RegExp semantics) — prefer simple invocations.`,
+    `- Shell: pipes (|), redirection (> >> <), && || ; and trailing-& background jobs (see \`jobs\`). Built-in commands: ${SHELL_BUILTINS}. cd and export change the shell state. sed/awk/grep are honest busybox-style subsets that ERROR on anything unsupported (JS RegExp semantics, and grep takes only -i/-n/-v) — prefer simple invocations.`,
+    // The shell parses a SUBSET of sh and rejects the rest loudly. Spelling out
+    // which expansions raise a syntax error is what stops the agent from
+    // writing `PORT=$(cat port.txt)` — a line that used to expand to empty and
+    // now fails outright — instead of a two-command equivalent that works.
+    "- Shell quoting/expansion is a subset: `$VAR` / `${VAR}`, single and double quotes, and backslash escapes (`\\\"`, `\\$`, `\\ `, trailing-backslash line continuation) work. Command substitution (`$(...)`, backticks), `$'...'` ANSI-C quoting, and non-trivial parameter expansion (`${X:-d}`, `${X#p}`, `${X%%s}`, `${#X}`, `${X/a/b}`) are UNSUPPORTED and raise a syntax error — do that work in python or across separate commands instead.",
     extraCommands.length > 0 ? `- Extra commands: ${extraCommands.join(", ")}.` : "",
     `- Languages you can run: ${canRun}.${wasiNote}`,
     caps.virtualPorts
@@ -296,7 +301,7 @@ function realOsPrompt(env: EnvironmentInfo, caps: RuntimeCapabilities): string {
     `- ${pkg}`,
     `- ${network}`,
     caps.virtualPorts
-      ? "- Previews: this VM's emulated network can't hold an ordinary listening socket, so BLOCKING Python web servers (Flask `app.run()`, werkzeug, wsgiref, gunicorn) exit WITHOUT ever serving. The only server that works here is `python3 -m http.server <port> --bind 0.0.0.0` — STATIC files only, and even then it's racy with a ~16s cold start (poll the port before previewing). To serve a Flask/WSGI app, switch to the browser kernel and use `erdou.serve(app, port)` (never `app.run()`)."
+      ? "- Previews: ordinary blocking servers DO serve here — Flask (`app.run(host=\"0.0.0.0\", port=<port>)`), other WSGI servers, `python3 -m http.server <port> --bind 0.0.0.0`, node — and streaming responses (SSE) reach the browser too. Two real constraints: the bind MUST be 0.0.0.0 (a default/127.0.0.1 bind is reachable only inside the guest, so the preview never sees it), and start-up is SLOW under emulation (tens of seconds; a `pip install flask` + first served request measured ~175 s end to end). So poll the port until it answers (`wget -qO- http://0.0.0.0:<port>/`) instead of assuming it is up, and expect the port chip to appear a beat after the bind — the port watcher polls."
       : "",
     "",
     ...HOW_TO_WORK,

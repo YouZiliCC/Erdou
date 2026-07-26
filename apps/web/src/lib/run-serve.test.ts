@@ -174,6 +174,56 @@ describe("runServeCommand (VM / realOs path)", () => {
     expect(r.stderr).toContain("warning: no config found");
   });
 
+  // A Flask app.run() on 0.0.0.0 DOES serve on the VM (proven by
+  // runtime-vm's net.e2e Flask cases), so the exit-without-port hint must
+  // teach the bind rule, not tell the user to leave the kernel.
+  it("the Flask hint states the bind rule instead of claiming the VM cannot serve WSGI", async () => {
+    const { runtime, shell } = fake(() => Promise.reject(new Error("unused")), {
+      realOs: true,
+      runtimeExec: () =>
+        Promise.resolve({
+          ...fakeHandle(7),
+          wait: async () => ({ code: 0, signal: null }),
+          stdout: { text: async () => "" },
+          stderr: { text: async () => "" },
+        }),
+    });
+    const r = await runServeCommand(runtime as any, shell as any, "python3 app.py --flask");
+    expect(r.ok).toBe(false);
+    expect(r.stderr).toContain('app.run(host="0.0.0.0", port=<port>)');
+    expect(r.stderr).not.toMatch(/exit without serving/);
+    expect(r.stderr).not.toMatch(/erdou\.serve/);
+    expect(r.stderr).not.toMatch(/BROWSER kernel/);
+  });
+
+  // Nobody starts a Flask app as `python3 -c "app.run()"` — they write
+  // `python3 server.py`, whose command line names no framework at all. So the
+  // hint keys on `python <script>.py` and is phrased conditionally: a build
+  // script gets one extra "if this was meant to be a web server" paragraph
+  // (harmless), where keying on a framework token missed every real server.
+  it("hints on `python <script>.py`, conditionally, so a build script is not mis-lectured", async () => {
+    const fakeExit0 = (stdout: string) =>
+      fake(() => Promise.reject(new Error("unused")), {
+        realOs: true,
+        runtimeExec: () =>
+          Promise.resolve({
+            ...fakeHandle(7),
+            wait: async () => ({ code: 0, signal: null }),
+            stdout: { text: async () => stdout },
+            stderr: { text: async () => "" },
+          }),
+      });
+    const server = fakeExit0("");
+    const r = await runServeCommand(server.runtime as any, server.shell as any, "python3 server.py");
+    expect(r.stderr).toContain('app.run(host="0.0.0.0", port=<port>)');
+    expect(r.stderr).toContain("If this was meant to be a web server");
+
+    // `-m http.server` is a server too, but a static one with different advice.
+    const stdlib = fakeExit0("");
+    const s = await runServeCommand(stdlib.runtime as any, stdlib.shell as any, "python3 -m http.server 8000");
+    expect(s.stderr).not.toMatch(/app\.run/);
+  });
+
   it("a server that exits before opening a port fails with its stderr", async () => {
     const { runtime, shell } = fake(() => Promise.reject(new Error("unused")), {
       realOs: true,

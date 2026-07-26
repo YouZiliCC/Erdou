@@ -65,6 +65,22 @@ describe("buildSystemPrompt (real OS)", () => {
     expect(p).toMatch(/2048MB/);
   });
 
+  // The VM Flask e2e (net.e2e.test.ts) proves a blocking `app.run()` on
+  // 0.0.0.0 serves through dispatch, SSE included. The prompt claimed the
+  // opposite, which made the agent burn a kernel switch it did not need.
+  it("tells the truth about VM previews: blocking servers serve, the bind must be 0.0.0.0, start-up is slow", () => {
+    const p = buildSystemPrompt({}, realCaps);
+    expect(p).toMatch(/Previews:/);
+    expect(p).toMatch(/app\.run\(host="0\.0\.0\.0"/);
+    expect(p).toMatch(/poll the port/i);
+    expect(p).toMatch(/SLOW under emulation/);
+    // none of the disproven absolutes survive
+    expect(p).not.toMatch(/exit WITHOUT ever serving/);
+    expect(p).not.toMatch(/only server that works/i);
+    expect(p).not.toMatch(/STATIC files only/);
+    expect(p).not.toMatch(/switch to the browser kernel and use `erdou\.serve/);
+  });
+
   it("phrases full egress and no package managers correctly", () => {
     const p = buildSystemPrompt({}, { ...realCaps, packageManagers: [], networkEgress: "full" as const });
     expect(p).toMatch(/No package manager/);
@@ -242,6 +258,32 @@ describe("buildSystemPrompt (browser pip brief is accurate)", () => {
     expect(p).toMatch(/session-only|reset on reload/i);
     // the old understatement ("pure-Python PyPI wheels, online only") is gone
     expect(p).not.toMatch(/pure-Python PyPI wheels, online only/);
+    // …and it must not send the agent to a VM for packages Pyodide ships
+    expect(p).toMatch(/do NOT need to switch to a vm:\* kernel just for NumPy\/Pandas/);
+  });
+});
+
+describe("buildSystemPrompt (browser shell brief is accurate)", () => {
+  // The browser shell parses a subset of sh and now raises a syntax error on
+  // the rest instead of expanding it to "" — an agent that does not know this
+  // writes `X=$(cmd)` and gets a hard failure it cannot diagnose from the brief.
+  it("names the expansions that raise a syntax error rather than silently expanding", () => {
+    const p = buildSystemPrompt({ languages: ["python"] }, caps);
+    expect(p).toMatch(/\$\(\.\.\.\)/); // command substitution
+    expect(p).toMatch(/backticks/);
+    expect(p).toMatch(/\$'\.\.\.'/); // ANSI-C quoting
+    expect(p).toMatch(/\$\{X:-d\}/); // non-trivial parameter expansion
+    expect(p).toMatch(/UNSUPPORTED and raise a syntax error/);
+    // what DOES work, so the agent still uses the supported forms
+    expect(p).toMatch(/backslash escapes/);
+    expect(p).toMatch(/\$VAR/);
+  });
+
+  it("describes grep as a regex matcher limited to -i/-n/-v (unknown flags error)", () => {
+    const p = buildSystemPrompt({ languages: ["python"] }, caps);
+    expect(p).toMatch(/sed\/awk\/grep/);
+    expect(p).toMatch(/grep takes only -i\/-n\/-v/);
+    expect(p).toMatch(/ERROR on anything unsupported/);
   });
 });
 

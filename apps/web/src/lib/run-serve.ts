@@ -20,8 +20,14 @@ export interface RunServeResult {
 
 type ServeRuntime = Pick<Runtime, "subscribe" | "getCapabilities" | "exec">;
 
-/** python `-m http.server` cold-start (~16s) + bind + the guestd watcher poll. */
-const VM_SERVE_TIMEOUT_MS = 45_000;
+/** Process start → `port.opened`, under emulation. Sized off the repo's own
+ *  acceptance run, not a guess: net.e2e.test.ts's Flask leg allows 90s for
+ *  exactly this event (`waitForEvent(… "port.opened" … 90_000)`) after
+ *  `exec("python3 /root/app.py")`. The old 45s was budgeted for `-m http.server`
+ *  (~16s cold start) alone; a framework server pays for its imports first, so
+ *  anything under the e2e's own allowance would time out servers this app now
+ *  actively tells the agent to run. */
+const VM_SERVE_TIMEOUT_MS = 90_000;
 
 /**
  * Run a (possibly serving) command. Capability-gated:
@@ -85,7 +91,14 @@ function runServeDetached(runtime: ServeRuntime, commandLine: string): Promise<R
           openedPorts: [...openedPorts],
           loopbackPorts: [...loopbackPorts],
           pid,
-          stderr: `no port opened within ${VM_SERVE_TIMEOUT_MS / 1000}s (does the server bind 0.0.0.0?)`,
+          // Name every real cause, not just the bind: the process is still
+          // alive here (an exit takes the branch above), so "still starting up"
+          // and "bound loopback" are both live possibilities and blaming only
+          // 0.0.0.0 sends the agent to fix something that may not be wrong.
+          stderr:
+            `no port opened within ${VM_SERVE_TIMEOUT_MS / 1000}s — the process is still running, so either ` +
+            `it is still starting up (imports are slow under emulation), it bound 127.0.0.1 instead of 0.0.0.0, ` +
+            `or it never reached its listen call`,
         }),
       VM_SERVE_TIMEOUT_MS,
     );
@@ -133,15 +146,18 @@ const STDOUT_TAIL_LINES = 10;
 function exitedWithoutPortMessage(stdout: string, stderr: string, commandLine: string): string {
   let msg =
     "Command exited without opening a port — a preview needs a server that binds 0.0.0.0 and keeps running.";
-  // This path is realOs (VM) only. A BLOCKING Python web server can't hold a
-  // listening socket on the VM's emulated network — Flask app.run()/werkzeug/
-  // wsgiref/gunicorn exit without ever serving. Redirect instead of leaving a
-  // self-contradictory "exited with code 0".
+  // This path is realOs (VM) only. Blocking Python web servers DO serve here
+  // (the e2e installs Flask and dispatches against app.run on 0.0.0.0), so the
+  // useful hint is the bind rule — not a "can't serve" claim. Requiring a
+  // framework token IN THE COMMAND LINE missed the normal case: nobody writes
+  // `python3 -c "app.run()"`, they write `python3 server.py`. So any
+  // `python <script>.py` qualifies and the hint is phrased conditionally —
+  // wrong-but-harmless on a build script, versus useless on every real one.
   const isPy = /\bpython[0-9.]*\b/.test(commandLine);
   const wsgiish = /app\.run|flask|werkzeug|wsgiref|gunicorn|uvicorn|\.py\b/i.test(commandLine);
   if (isPy && wsgiish && !/http\.server/.test(commandLine)) {
     msg +=
-      "\n\nBlocking Python web servers (Flask app.run, werkzeug, wsgiref, gunicorn) don't hold a listening socket on the VM kernel — they exit without serving. Serve a WSGI/Flask app on the BROWSER kernel with `erdou.serve(app, port)` (not app.run()), or serve STATIC output here with `python3 -m http.server <port> --bind 0.0.0.0`.";
+      "\n\nIf this was meant to be a web server: Flask/WSGI servers do serve on the VM kernel, but only bound to 0.0.0.0 and left running in the foreground — `app.run(host=\"0.0.0.0\", port=<port>)`. This process returned instead, so it never reached its listen call (or the server exited immediately).";
   }
   const tail = stdout.trimEnd().split("\n").slice(-STDOUT_TAIL_LINES).join("\n").trim();
   if (tail) msg += `\n\nstdout (tail):\n${tail}`;

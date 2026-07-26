@@ -66,8 +66,12 @@ export function staticServeCommand(kind: KernelKind, dir: string): string {
  */
 export function detectRunCommand(fs: FileSystemApi, kind: KernelKind = "browser"): string | null {
   if (kind !== "vm") {
-    // The erdou.serve/Flask shim is pyodide-only; the guest's bare python3 has
-    // no flask and no egress, so a WSGI prefill on the vm is guaranteed-broken.
+    // Browser-kernel only, but NOT because the guest can't serve WSGI — the
+    // net e2e pip-installs Flask through the fetch-NAT and dispatches against
+    // `app.run` on 0.0.0.0. The reason is narrower: no VM profile ships flask,
+    // so prefilling `python app.py` there hands the user a command that
+    // ImportErrors until they pip-install it themselves. On the browser kernel
+    // the erdou.serve shim is always present, so the prefill always runs.
     const wsgiEntry = findWsgiEntry(fs, "/");
     if (wsgiEntry) return `python ${wsgiEntry}`;
   }
