@@ -28,8 +28,9 @@ Erdou is a browser-native operating environment — a virtual filesystem, proces
 ## Highlights
 
 - **Two kernels, one contract.** A fast browser-native kernel (VFS, process table, shell, virtual ports) and a real 32-bit **Alpine Linux VM** (v86/WASM) implement the same runtime contract. The agent adapts through capability discovery and can `switch_environment` mid-task (approval-gated) — its files follow it across kernels.
-- **A serious coding agent.** Plan → act → observe loop with a live syscall-style trace, per-run **diff review and one-click revert**, multi-turn threads, Auto/Confirm approval modes, and a Stop button that actually aborts mid-call.
-- **Real packages.** `pip install` / `npm install` work from *inside the VM* — guest HTTP rides the browser's own `fetch` out to PyPI/npm, no proxy server, and installs persist in the workspace. The browser kernel installs pure-Python wheels via micropip/Pyodide.
+- **A serious coding agent.** Plan → act → observe loop with a live syscall-style trace, per-run **diff review and one-click revert**, multi-turn threads, Auto/Confirm approval modes, and a Stop button that actually aborts mid-call. It also verifies its own web apps from inside the preview (`preview_read` / `preview_click` / `preview_logs`).
+- **Sub-agents that actually merge.** One `delegate` call fans out up to 3 sub-agents in parallel, each on a throwaway runtime restored from one parent snapshot; their byte-exact diffs are merged back into the parent workspace, and a child touching a file an earlier child already changed is rejected **whole**, naming the paths. Approval-gated, one level deep by construction.
+- **Real packages.** `pip install` / `npm install` work from *inside the VM* — guest HTTP rides the browser's own `fetch` out to PyPI/npm, no proxy server, and installs persist in the workspace. On the browser kernel `pip install` loads Pyodide's prebuilt wheels first — NumPy, Pandas, SciPy, lxml, Pillow and friends install natively in-tab — and falls back to micropip for pure-Python PyPI wheels (session-only, they reset on reload).
 - **A real dev server, in the tab.** Programs bind ports in the sandbox; a Service Worker reverse-proxies the preview iframe onto them. Static sites, Python WSGI apps and bundled React apps all render in the Preview panel — the agent can start a server and open the preview for you.
 - **Languages as plug-ins.** JavaScript/TypeScript built in; **Python** via Pyodide (real CPython in-browser); any `wasm32-wasi` binary (Rust/C/C++/Zig/TinyGo) via the WASI host. A language pack is just an `Executor` registered under a command name.
 - **Git in the browser — including the network.** A `git` executor over isomorphic-git: init/add/commit/log/status/branch fully client-side, plus **clone / fetch / pull / push** over smart-HTTP (token auth with redacted logging; browsers need a CORS proxy for github.com — `--cors-proxy` / `GIT_CORS_PROXY`, Node needs none).
@@ -92,7 +93,10 @@ This is **enforced in CI**, not merely documented — `pnpm lint:deps` fails the
 Languages are a first-class extension point. The contract defines an `Executor` (`ExecContext → exit code`); a language runtime is just an `Executor` you register under a command name:
 
 ```ts
-runtime.registerProgram("python", createPythonRunner({ load: loadPyodide }));
+// createPythonRunners returns one Executor per command name it backs
+const { python, pip } = createPythonRunners({ load: loadPyodide });
+runtime.registerProgram("python", python);
+runtime.registerProgram("pip", pip);
 // now the shell, exec, and the agent can all run: python app.py
 ```
 

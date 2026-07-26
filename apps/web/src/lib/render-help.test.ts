@@ -1,5 +1,10 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { inject, renderMd } from "../../scripts/render-help.mjs";
+
+const HELP_MD = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "docs", "help.md"), "utf8");
 
 const PROFILES = {
   base: { version: "alpine-3.24.1-r13-base", packages: ["python3", "py3-pip"], label: "Python 3", interpreters: ["python3"], packageManagers: ["apk", "pip"] },
@@ -72,5 +77,63 @@ describe("inject", () => {
 
   it("fails fast when the placeholder is missing", () => {
     expect(() => inject("# no placeholder\n", PROFILES)).toThrow(/\{\{environments\}\}/);
+  });
+});
+
+// The browser row is hardcoded here (profiles.data.json only covers the VM), so
+// it can drift from what pip actually does — python.ts resolves the LOCAL WHEEL
+// INDEX first, then loadPackage, and only then micropip. A "pure-Python wheels
+// only" help page sends NumPy/Pandas users into an 84 MB VM download they never
+// needed; dropping the bundled index hides that the document libraries install
+// from our own origin (the offline path the wheels e2e covers).
+describe("browser-kernel pip facts (help page vs. lang-python's pip)", () => {
+  const browserRow = (): string => {
+    const row = inject("{{environments}}\n", PROFILES)
+      .split("\n")
+      .find((l) => l.includes("Browser kernel"));
+    if (row === undefined) throw new Error("inject() produced no Browser kernel row");
+    return row;
+  };
+
+  it("injects a browser row describing Pyodide's prebuilt wheels plus the micropip fallback", () => {
+    const row = browserRow();
+    expect(row).toMatch(/Pyodide.*wheels/);
+    expect(row).toMatch(/NumPy/);
+    expect(row).toMatch(/micropip/);
+    expect(row).not.toMatch(/pure-Python wheels only/);
+  });
+
+  it("injects all three install paths in resolution order (bundled wheels → loadPackage → micropip)", () => {
+    const row = browserRow();
+    expect(row).toMatch(/python-pptx/);
+    const bundled = row.search(/bundled|same-origin|our own origin|Erdou's own origin/);
+    const prebuilt = row.indexOf("loadPackage");
+    const micropip = row.indexOf("micropip");
+    expect(bundled).toBeGreaterThanOrEqual(0);
+    expect(prebuilt).toBeGreaterThan(bundled);
+    expect(micropip).toBeGreaterThan(prebuilt);
+    // environments.ts's recipe qualifies the offline claim; the row must not drop it
+    expect(row).toMatch(/openpyxl/);
+    expect(row).toMatch(/lxml/);
+  });
+
+  it("keeps help.md's install bullet on all three paths, not just two", () => {
+    const bullet = HELP_MD.split("\n").find((l) => l.startsWith("- **Browser kernel**: `pip install"));
+    expect(bullet).toBeDefined();
+    expect(bullet).toMatch(/python-pptx|python-docx|openpyxl|fpdf2/);
+    expect(bullet).toMatch(/micropip/);
+    // the two-path phrasing round 1 introduced, which omits the local wheel index
+    expect(bullet).not.toMatch(/^- \*\*Browser kernel\*\*: `pip install <package>` first loads Pyodide/);
+  });
+
+  it("keeps help.md off the micropip-only claim and off 'switch for NumPy/Pandas'", () => {
+    expect(HELP_MD).not.toMatch(/pure-Python wheels from PyPI only/);
+    expect(HELP_MD).not.toMatch(/NumPy\/Pandas: use the \*\*sci\*\* profile/);
+    // The pre-round-1 page sent EVERY native-code package to the VM ("a real
+    // shell, `npm`, or packages with native code") — the exact advice that
+    // buries NumPy/Pandas users in an 84 MB image. Only Pyodide's gaps qualify.
+    expect(HELP_MD).not.toMatch(/or packages with native code/);
+    expect(HELP_MD).toMatch(/native package Pyodide doesn't provide/);
+    expect(HELP_MD).toMatch(/NumPy\/Pandas.*run natively|natively.*NumPy\/Pandas/);
   });
 });

@@ -28,7 +28,7 @@ A direct provider URL also works as the Base URL whenever the provider permits b
 
 ### Approvals: Auto vs Confirm
 
-The **Command approvals** setting (also switchable in the composer) controls the gated tools — `run_shell`, `remove_path`, `switch_environment`, and the server-starting form of `open_preview`:
+The **Command approvals** setting (also switchable in the composer) controls the gated tools — `run_shell`, `remove_path`, `switch_environment`, `delegate`, and the server-starting form of `open_preview`:
 
 - **Auto** — the agent runs them freely.
 - **Confirm** — the run pauses on each gated call with an inline prompt: **Allow**, **Always allow** (for that tool, for the rest of the run), or **Deny**. A bare `open_preview` that only shows you the panel (starts nothing) never asks.
@@ -42,6 +42,12 @@ Every task is a **thread** in the left sidebar:
 - **Rename** — hover a thread and click the pencil (✎); Enter commits, Escape cancels.
 - **Delete** — hover and click ×, then click **Delete?** to confirm (the confirmation disarms itself after a few seconds). A *running* thread can't be deleted — stop it first.
 - A pulsing dot marks the thread whose turn is currently in flight.
+
+### Sub-agents (`delegate`)
+
+For work that splits cleanly, the agent can call `delegate` and fan out **up to 3 sub-agents in one call**, which run in parallel and report back. Each child works on its own throwaway copy of the workspace (restored from one snapshot taken when the call starts, always on the browser kernel) with a smaller step budget, so nothing it does touches your files until it finishes. The children's changes are then merged into the real workspace in order; if two children edited the same file the second one is rejected **whole**, naming the conflicting paths, and the parent decides what to do next. Their work appears as nested cards inside the parent's trace, and the merged result lands in the same run diff as everything else.
+
+The call is approval-gated like any other gated tool (in Confirm mode you approve the fan-out once, not each child). Sub-agents cannot delegate further — the tree is exactly one level deep.
 
 Threads persist in the browser (IndexedDB) — or in the mounted folder's `.erdou/` when one is mounted — and survive reload. A run interrupted by closing the page is marked as an error with an explanatory line. The sidebar and review pane are resizable by dragging their edges; the sidebar collapses with the ‹ button.
 
@@ -69,6 +75,14 @@ Either way the working directory and environment persist across commands.
 ### Preview
 
 The Preview is **agent-primary**: when the agent starts a server or calls its `open_preview` tool, the pane switches to Preview and shows it. Every open port appears as a chip in the **ports bar** — **view** it, open it in a browser tab (↗), or stop it (×). The previewed app may use relative or absolute URLs (both are proxied), and can reach a *sibling* open port via `/__port__/<n>/…`.
+
+The agent can also *look inside* the frame, and is instructed to do so after every `open_preview` rather than assume its app works:
+
+- **`preview_read`** — the rendered DOM: the page's title, URL and visible text, or, with a CSS selector, the `outerHTML` of the matches plus their key computed styles (so it can tell "my stylesheet applied" from "a `<style>` tag exists").
+- **`preview_click`** — clicks the first element matching a selector and reports the resulting URL/title. It fires the click activation only, so UIs driven by `pointerdown`/hover won't react.
+- **`preview_logs`** — console output and uncaught errors captured since its last call (the buffer drains on read; a reload restarts capture).
+
+Screenshots and visual assertions are not available — the agent reads the page, it doesn't see it.
 
 You can also run something yourself with the **command + port row** under the frame:
 
@@ -113,11 +127,15 @@ The bake needs network access to the Alpine CDN plus three boot blobs staged in 
 
 ## Installing packages
 
-- **Browser kernel**: `pip install <package>` uses micropip — pure-Python wheels from PyPI only, no C extensions.
+- **Browser kernel**: `pip install <package>` resolves through three sets, in this order.
+  1. **Wheels bundled with Erdou** — the document-editing libraries (`python-pptx`, `python-docx`, `openpyxl`, `fpdf2`) and their pure-Python dependency closure, served from Erdou's own origin at pinned versions, so no request reaches PyPI. Only `openpyxl` is *fully* offline; the other three still pull their native deps (lxml, Pillow) from the Pyodide CDN. Pinning a version (`openpyxl==3.1.5`) deliberately opts out of the bundle — the requirement goes to PyPI instead of being silently served the bundled version.
+  2. **Pyodide's prebuilt wheel set** — the C-extension packages (NumPy, Pandas, SciPy, lxml, Pillow, …), loaded natively.
+  3. **micropip** — pure-Python wheels from PyPI.
+- Installs on the browser kernel are session-only (see above).
 - **Linux VM (all profiles)**: `pip install <package>` goes through the package gateway (guest HTTP rides the browser's own `fetch` out to PyPI); a small package takes about 40 s.
 - **Linux VM · Node.js**: `npm install <package>` works the same way (about 30 s for a small package).
 - Virtualenvs work but are heavy under emulation: `python3 -m venv` takes ~95 s and adds ~1.5k small files to every snapshot. Prefer the default user-site installs.
-- NumPy/Pandas: use the **sci** profile — they are preinstalled. The first `import pandas` in a process takes ~50 s; later imports in the same process are fast.
+- NumPy/Pandas: the **browser kernel** is the fast home for them — Pyodide provides them prebuilt, so `pip install pandas` (or a plain import after it) works in-tab in seconds. The **sci** VM profile preinstalls them as well, but under emulation the first `import pandas` in a process takes ~50 s; choose it only when you need the VM for other reasons (a real shell, npm, persistent installs).
 - `apk` system packages are baked into the VM images, not installed at runtime — switch to the profile that has what you need.
 
 ## Working with a local folder
@@ -144,5 +162,5 @@ The swatch button in the title bar opens the theme picker: **Ink** (dark, the de
 - **Preview shows no page / a port never opens**: make sure the command actually serves HTTP and keeps running; on the VM it must bind `0.0.0.0`, not `127.0.0.1`. If you named a port in the port field and the command opened a different one, the panel tells you which ports actually opened.
 - **"Couldn't save your project to this browser (storage may be full or restricted)"**: the IndexedDB snapshot save is failing — free browser storage (or leave private-browsing mode). The message clears itself once a save succeeds; your in-memory session keeps working meanwhile.
 - **The VM is slow**: expected, not a hang — emulated x86, no hardware virtualization. pip runs take tens of seconds; heavy imports around a minute. Watch the terminal output.
-- **`pip` fails on the browser kernel**: the package probably has native code — micropip only handles pure-Python wheels. Switch to a Linux VM profile and install there.
+- **`pip` fails on the browser kernel**: the package is in none of the three sets `pip` has here — not bundled with Erdou, not in Pyodide's prebuilt wheel set, not published as a pure-Python wheel. Native code by itself is not the problem (NumPy/Pandas/SciPy/lxml/Pillow are prebuilt and install natively); switch to a Linux VM profile for anything outside all three.
 - **Python won't start on the browser kernel**: Pyodide loads from a CDN on first use — it needs network access the first time.

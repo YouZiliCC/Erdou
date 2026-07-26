@@ -27,8 +27,9 @@ Erdou 是一个浏览器原生的操作环境——虚拟文件系统、进程�
 ## 亮点
 
 - **双内核,同一契约。** 快速的浏览器原生内核(VFS、进程表、shell、虚拟端口)与真实的 32 位 **Alpine Linux 虚拟机**(v86/WASM)实现同一份 runtime 契约。Agent 通过能力发现自适应,并可在任务中途 `switch_environment`(需审批)——文件跟随它跨内核迁移。
-- **认真的编码 Agent。** 计划 → 行动 → 观察循环,实时系统调用式 trace,每次运行的 **diff 审阅与一键回滚**,多轮对话线程,Auto/Confirm 审批模式,以及一个真正能中途掐断请求的停止按钮。
-- **真实的包管理。** 在*虚拟机内部* `pip install` / `npm install` 直接可用——guest 的 HTTP 借浏览器自身的 `fetch` 出站到 PyPI/npm,无需任何代理服务器,安装结果持久保存在工作区。浏览器内核则通过 micropip/Pyodide 安装纯 Python wheel。
+- **认真的编码 Agent。** 计划 → 行动 → 观察循环,实时系统调用式 trace,每次运行的 **diff 审阅与一键回滚**,多轮对话线程,Auto/Confirm 审批模式,以及一个真正能中途掐断请求的停止按钮。它还能在预览内部自我验证所写的 Web 应用(`preview_read` / `preview_click` / `preview_logs`)。
+- **能真正合并结果的子 Agent。** 一次 `delegate` 调用可并行派出最多 3 个子 Agent,每个都跑在由同一份父快照恢复出来的一次性 runtime 上;它们的逐字节 diff 会被合并回父工作区,若某个子 Agent 改到了前一个已改过的文件,则**整体拒绝**并列出冲突路径。需审批,且按构造只有一层深。
+- **真实的包管理。** 在*虚拟机内部* `pip install` / `npm install` 直接可用——guest 的 HTTP 借浏览器自身的 `fetch` 出站到 PyPI/npm,无需任何代理服务器,安装结果持久保存在工作区。浏览器内核上的 `pip install` 会先加载 Pyodide 自带的预编译 wheel —— NumPy、Pandas、SciPy、lxml、Pillow 等带 C 扩展的包都能直接在标签页内原生安装 —— 再回退到 micropip 安装 PyPI 上的纯 Python wheel(仅限当前会话,刷新即失效)。
 - **标签页里的真实开发服务器。** 程序在沙箱内绑定端口,Service Worker 把预览 iframe 反向代理到端口上。静态站点、Python WSGI 应用、打包后的 React 应用都能在 Preview 面板渲染——Agent 可以自己启动服务器并为你打开预览。
 - **语言即插件。** JavaScript/TypeScript 内置;**Python** 经 Pyodide(浏览器内真实 CPython);任何 `wasm32-wasi` 二进制(Rust/C/C++/Zig/TinyGo)经 WASI 宿主运行。一个语言包就是注册到某命令名下的一个 `Executor`。
 - **浏览器里的 Git——包括网络操作。** 基于 isomorphic-git 的 `git` 执行器:init/add/commit/log/status/branch 全部在客户端完成,并支持 smart-HTTP 上的 **clone / fetch / pull / push**(token 认证、日志脱敏;浏览器访问 github.com 需 CORS 代理——`--cors-proxy` / `GIT_CORS_PROXY`,Node 下无需)。
@@ -91,7 +92,10 @@ browser APIs → runtime-contract → runtime implementations → agent-tools �
 语言是一等扩展点。契约定义了 `Executor`(`ExecContext → 退出码`);语言运行时就是注册到某命令名下的一个 `Executor`:
 
 ```ts
-runtime.registerProgram("python", createPythonRunner({ load: loadPyodide }));
+// createPythonRunners 为它支撑的每个命令名各返回一个 Executor
+const { python, pip } = createPythonRunners({ load: loadPyodide });
+runtime.registerProgram("python", python);
+runtime.registerProgram("pip", pip);
 // 此后 shell、exec、Agent 都能运行: python app.py
 ```
 

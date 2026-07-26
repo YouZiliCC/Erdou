@@ -12,14 +12,14 @@ What Erdou ships today is in the [README](../README.md) and the [user guide](./u
 
 ## Preview & serving
 
-- **WebSockets/SSE through the preview** — the Service-Worker proxy is strictly request→response, so HMR-over-WS and streaming endpoints don't reach the preview iframe; needs a duplex bridge over the SW boundary.
+- **WebSockets on the browser kernel** — only the WS half is missing. SSE (contract `HttpResponse.stream`, piped through the Service Worker as a real `ReadableStream`) works on **both** kernels: the browser kernel produces it from Python via `erdou.serve` and the browser conformance suite asserts the head-time resolve plus ordered chunks through `dispatch`. WebSockets (contract `Runtime.upgrade` + the injected page shim, tunneled to the guest) reach the preview iframe on `vm:*` kernels only — the browser kernel deliberately implements no `upgrade` and declines every handshake, so HMR-over-WS and WS apps need the VM.
 - **ASGI/FastAPI bridge** — the browser kernel serves WSGI apps (Flask-class) only; async ASGI needs a new bridge into Pyodide's event loop.
 - **Separate preview origin** — the preview iframe is same-origin with the app (sandboxed, but CSP-level isolation of generated code from the model key wants a second origin in production).
-- **Agent-driven preview testing** — the proposal's "agent clicks the page, queries the DOM, screenshots, reads console errors" loop; today the agent can start/open the preview but not observe inside it.
+- **Screenshots / visual assertions in the preview** — the agent already queries the DOM (`preview_read`), clicks (`preview_click`) and reads console errors (`preview_logs`) inside the preview iframe; what is missing is the pixel half of the proposal's loop — capturing the rendered frame and asserting on it, which no page-level API gives you for a live iframe (it needs a rasterization path of its own, e.g. DOM-to-canvas).
 
 ## Agent
 
-- **Multi-agent orchestration** — the proposal's main-agent-spawns-implementer/tester/reviewer tree, parallel workspaces and result merging; today there is exactly one agent loop per thread, and it stays that way until the single-agent loop stops being the bottleneck.
+- **Deeper multi-agent orchestration** — one level of it ships: `delegate` fans out up to 3 sub-agents in parallel, each on a throwaway runtime restored from one parent snapshot, and merges their byte-exact diffs back with wholesale conflict rejection. Unbuilt: nesting (children get `createTools()` only, so depth is capped at 1 by construction), children on anything but the browser kernel, and per-child approval (the single `pendingApproval` slot would have concurrent prompts overwrite each other, so the fan-out is approved once as a whole).
 - **Streaming tool-use (incl. Anthropic parity)** — both providers' streaming paths yield text deltas only and the agent loop runs non-streaming turns; token-level streaming of tool-calling turns (and Anthropic tool-use event parity) is unbuilt.
 - **Checkpoint branching** — per-run diff + per-file revert exist; named checkpoints, project branches and "open snapshot X in a new tab" don't.
 - **Model capability probing** — the proposal's auto-detection of an endpoint's streaming/tool-call/JSON-schema support; today a misconfigured endpoint just fails loudly on first use.

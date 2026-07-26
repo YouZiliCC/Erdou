@@ -66,7 +66,15 @@ export function renderMd(md) {
 export function inject(md, profiles) {
   if (!md.includes("{{environments}}")) throw new Error("help.md: missing {{environments}} placeholder");
   const rows = [
-    "- **Browser kernel** — instant, in-tab simulated OS. Interpreters: python (Pyodide), wasi. Packages: `pip install` via micropip (pure-Python wheels only).",
+    // The browser row is hardcoded (profiles.data.json is VM-only) — keep it in
+    // step with environments.ts's browser installRecipes, all three of pip's
+    // paths in the order python.ts resolves them: the local wheel index first,
+    // then loadPackage, then micropip. Claiming "pure-Python only" sends
+    // NumPy/Pandas users into an 84 MB vm:sci download they never needed;
+    // dropping the bundled index hides that the document libraries install with
+    // no PyPI round-trip — and dropping its lxml/Pillow caveat oversells that as
+    // fully offline for every one of them.
+    "- **Browser kernel** — instant, in-tab simulated OS. Interpreters: python (Pyodide), wasi. Packages: `pip install` resolves in three steps — the bundled document wheels (python-pptx, python-docx, openpyxl, fpdf2 + closure) install from Erdou's own origin, version-locked, no PyPI round-trip (only openpyxl is fully offline; the others still pull lxml/Pillow from the Pyodide CDN); anything else goes to Pyodide's prebuilt wheels via `loadPackage` (NumPy/Pandas/SciPy/lxml/Pillow…), then to micropip for pure-Python PyPI wheels. Session-only.",
     ...Object.entries(profiles).map(
       ([id, p]) =>
         // "Linux VM · <label>" matches the selector labels (src/lib/environments.ts).

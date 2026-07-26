@@ -4,7 +4,7 @@ A second Erdou Runtime: a real 32-bit Alpine Linux guest in a [v86](https://gith
 
 - **Workspace over 9p:** the Erdou VFS backs the guest's `/workspace` (the contract `/`); the Alpine system lives in `/sys-root`, bind-mounted read-only into the workspace chroot. Guest writes surface as `file.changed`; snapshots are workspace-scoped (user files only, not the 37 MB system).
 - **Processes via `guestd`:** a resident Python daemon runs `exec`/`spawn`/`kill`/`ps` inside the workspace chroot, framed over a virtio-console channel.
-- **Self-contained state:** the whole machine (incl. the 9p FS) is baked into `assets/state.zst` once; boot = restore (~1 s).
+- **Self-contained state:** the whole machine (incl. the 9p FS) is baked into `assets/state-<profile>.zst` once (one per profile since Round 13); boot = restore (~1 s).
 
 ## Build the assets (once; not committed)
 
@@ -27,9 +27,10 @@ import { loadBrowserInputs, VmRuntime } from "@erdou/runtime-vm";
 
 const vm = new VmRuntime(
   () => loadBrowserInputs({
-    baseUrl: "/vm-assets",   // dir serving seabios.bin/vgabios.bin/kernel.bin/state.zst
+    baseUrl: "/vm-assets",   // dir serving seabios.bin/vgabios.bin/kernel.bin/state-<profile>.zst
     wasmUrl,                 // resolved URL to v86.wasm — see "Using it in a Vite app" below
-    version: "v1",           // cache key for state.zst; bump on re-bake
+    profile: "base",         // REQUIRED, no default — picks state-base.zst and its cache lineage
+    version: "v1",           // cache key for the state blob; bump on re-bake
     memoryMB: 512,            // must equal the baked state's (default 512)
   }),
   { bootTimeoutMs: 30_000 },  // optional; also accepts `clock`
@@ -37,11 +38,14 @@ const vm = new VmRuntime(
 await vm.boot();
 ```
 
-`loadBrowserInputs` fetches `state.zst` cache-first from IndexedDB (keyed by `version`; on a miss it
-fetches over the network and caches the result best-effort), decompresses it with the native
-`DecompressionStream`, fetches bios/vga/kernel fresh every boot, and returns the `V86BootInputs`
-`VmRuntime`'s loader must resolve to. The `memoryMB` and asset set must match whatever backed
-`assets/state.zst`.
+`loadBrowserInputs` fetches `state-<profile>.zst` cache-first from IndexedDB (keyed by
+`state:<profile>:<version>`, so profiles never evict each other; on a miss it fetches over the network
+and caches the result best-effort), decompresses it with the native `DecompressionStream`, fetches
+bios/vga/kernel fresh every boot, and returns the `V86BootInputs` `VmRuntime`'s loader must resolve
+to. `profile` and `version` are both required — the `memoryMB` and asset set must match whatever
+backed that profile's baked state. Pass `expectedStateVersion` too and a cache-miss fetch first
+validates `state-<profile>.meta.json`, so a stale or cross-linked on-disk bake fail-fasts with the
+re-bake command instead of being cached under the new key.
 
 ### Using it in a Vite app
 
@@ -56,12 +60,12 @@ does **not** work under Vite (it resolves relative to the wrong origin/base and 
    ```typescript
    import wasmUrl from "v86/build/v86.wasm?url";
 
-   const inputs = loadBrowserInputs({ baseUrl: "/vm-assets", wasmUrl, version: "v1" });
+   const inputs = loadBrowserInputs({ baseUrl: "/vm-assets", wasmUrl, profile: "base", version: "v1" });
    ```
 
 2. **Serve the boot assets from `public/vm-assets/`.** `kernel.bin`, `seabios.bin`, `vgabios.bin`, and
-   `state.zst` live in `packages/runtime-vm/assets/` (gitignored — built locally via `download-assets`
-   + `bake`, never committed). A `predev`/`prebuild` script (e.g. `scripts/link-vm-assets.mjs` in
+   each baked `state-<profile>.zst` (+ its `.meta.json`) live in `packages/runtime-vm/assets/`
+   (gitignored — built locally via `download-assets` + `bake`, never committed). A `predev`/`prebuild` script (e.g. `scripts/link-vm-assets.mjs` in
    `apps/web`) symlinks each of them into the app's `public/vm-assets/` with `symlinkSync` (idempotent,
    `ln -sfn`-style). **The symlink targets are gitignored — never commit them or their contents.** Vite's
    dev server serves `public/` following symlinks as-is; `vite build` dereferences them into real files

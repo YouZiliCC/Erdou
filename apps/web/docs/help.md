@@ -19,17 +19,17 @@ Your code runs in one of several environments. Pick one from the selector in the
 
 How to choose:
 
-- Start on the **Browser kernel** — instant, and it covers pure-Python and static-web work.
-- Switch to a **Linux VM** profile when you need a real shell, `npm`, or packages with native code. The VM is emulated x86 — expect it to be roughly 10-100x slower than native.
+- Start on the **Browser kernel** — instant, and it covers most Python (including NumPy/Pandas, which run natively here) plus static-web work.
+- Switch to a **Linux VM** profile when you need a real shell, `npm`, a native package Pyodide doesn't provide, or installs that must survive a reload. The VM is emulated x86 — expect it to be roughly 10-100x slower than native.
 - Switching copies your project across. The first boot of a VM profile downloads its image (roughly 48-84 MB depending on profile, then cached); a profile that has not been baked fails loudly with the bake command to run.
 
 ## Installing packages
 
-- **Browser kernel**: `pip install <package>` uses micropip — pure-Python wheels from PyPI only, no C extensions. Installs reset on page reload; the next session prints a one-line `pip install` restore hint listing what you had.
+- **Browser kernel**: `pip install <package>` has three paths, tried in this order. (1) **Bundled wheels** — the document libraries (`python-pptx`, `python-docx`, `openpyxl`, `fpdf2` and their pure-Python dependencies) ship with Erdou and install from its own origin, version-locked, with no PyPI round-trip; only `openpyxl` is fully offline, the others still pull lxml/Pillow from the Pyodide CDN. Name a version (`openpyxl==3.1.5`) and you opt out of the bundle — the request goes to PyPI so you get exactly what you asked for. (2) **Pyodide's prebuilt wheels** — C-extension packages such as NumPy, Pandas, SciPy, lxml and Pillow, loaded natively. (3) **micropip** — pure-Python wheels from PyPI. Installs reset on page reload; the next session prints a one-line `pip install` restore hint listing what you had.
 - **Linux VM (all profiles)**: `pip install <package>` goes through the package gateway; a small package takes about 40 s. Installs land in the user site (`/root/.local`), which lives in your project workspace and **persists** across VM reboots and snapshots.
 - **Linux VM · Node.js**: `npm install <package>` works the same way (about 30 s for a small package) and persists in `node_modules`.
 - Virtualenvs work but are heavy under emulation: `python3 -m venv` takes ~95 s and adds ~1.5k small files to every snapshot. Prefer the default user-site installs unless you need isolation.
-- NumPy/Pandas: use the **sci** profile — they are preinstalled. The first `import pandas` in a process takes ~50 s; later imports in the same process are fast.
+- NumPy/Pandas: prefer the **Browser kernel** — Pyodide ships them prebuilt and they run near native speed. The **sci** VM profile preinstalls them too, but the first `import pandas` in a process takes ~50 s there; pick it only when you need the VM for other reasons.
 - `apk` system packages are baked into the VM images, not installed at runtime — switch to the profile that has what you need.
 
 ```sh
@@ -65,7 +65,7 @@ python3 -c "import requests; print(requests.__version__)"
 - **The VM is slow.** Emulated x86 without hardware virtualization: pip runs take tens of seconds; heavy imports take ~1 min. This is expected, not a hang — watch the terminal output.
 - **"image not baked"** when switching to a VM profile: run the bake command from the error (`pnpm --filter @erdou/runtime-vm bake --profile <p>`) and reload.
 - **Preview shows no page**: make sure the command actually serves HTTP, and on the VM that it binds `0.0.0.0` (not `127.0.0.1`).
-- **pip fails on the browser kernel**: the package probably has native code — switch to a Linux VM profile and install it there.
+- **pip fails on the browser kernel**: the package is in none of the three sets — not bundled with Erdou, not prebuilt by Pyodide, not published as a pure-Python wheel — so switch to a Linux VM profile and install it there. (Native code alone is not the reason: NumPy/Pandas/SciPy/lxml/Pillow are prebuilt and install fine here.)
 - **Memory**: each VM guest has 512 MB of RAM; very large installs or builds can run out.
 - **Yellow banner about Preview and folder-mount**: you opened the app on a plain `http://<ip>` origin (not a secure context). The agent, terminal and model calls still work — tunnel via ssh or serve behind https to get the rest.
 - **"Couldn't save your project to this browser"**: the storage quota is full or restricted — free browser storage; the message clears once a save succeeds.

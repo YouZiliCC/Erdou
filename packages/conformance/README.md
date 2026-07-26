@@ -11,4 +11,4 @@ import { BrowserRuntime } from "@erdou/runtime-browser";
 runConformance("BrowserRuntime", () => new BrowserRuntime());
 ```
 
-Assumes a POSIX-ish baseline of shell built-ins (`echo`, `grep`, `false`). Requires `vitest` (peer dependency).
+Assumes a POSIX-ish baseline of shell built-ins (`echo`, `grep`, `false`, `sleep`) — the same list `runConformance`'s own docstring states. Requires `vitest` (peer dependency).
