@@ -1,7 +1,13 @@
 import type { Word } from "./ast.js";
 import type { Vfs } from "../vfs/vfs.js";
 import { join, normalize, split } from "../vfs/path.js";
-import { globToRegExp, hasGlobChars } from "./glob.js";
+import {
+  escapeGlobBackslashes,
+  escapeGlobLiteral,
+  globToRegExp,
+  hasGlobChars,
+  unescapeGlob,
+} from "./glob.js";
 
 function joinPath(dir: string, name: string): string {
   return dir === "/" ? "/" + name : dir + "/" + name;
@@ -19,7 +25,9 @@ function relativePath(from: string, to: string): string {
 
 /** Expand a glob pattern against the filesystem. Returns matching paths, in the
  *  same relativity as the pattern. If nothing matches, returns the literal
- *  pattern (POSIX default). */
+ *  pattern (POSIX default). `pattern` is escaped in the sense of glob.ts: every
+ *  `*`/`?` that was quoted in the source carries a backslash, so it is unescaped
+ *  again wherever the text itself is wanted rather than matched. */
 function expandGlob(vfs: Vfs, cwd: string, pattern: string): string[] {
   const absolute = pattern.startsWith("/");
   const abs = absolute ? normalize(pattern) : join(cwd, pattern);
@@ -39,14 +47,14 @@ function expandGlob(vfs: Vfs, cwd: string, pattern: string): string[] {
           if (re.test(entry.name)) next.push(joinPath(dir, entry.name));
         }
       } else {
-        const child = joinPath(dir, seg);
+        const child = joinPath(dir, unescapeGlob(seg));
         if (vfs.exists(child)) next.push(child);
       }
     }
     candidates = next;
   }
 
-  if (candidates.length === 0) return [pattern];
+  if (candidates.length === 0) return [unescapeGlob(pattern)];
   candidates.sort();
   if (absolute) return candidates;
   return candidates.map((p) => relativePath(cwd, p));
@@ -58,15 +66,27 @@ function expandGlob(vfs: Vfs, cwd: string, pattern: string): string[] {
  * glob words expand against the filesystem.
  */
 export function expandWord(word: Word, env: Record<string, string>, vfs: Vfs, cwd: string): string[] {
+  // Two strings at once, because concatenating the parts is what destroys the
+  // quoting information: this loop is the last place that knows a `*` came from
+  // a `lit` part. `text` is the word with no globbing; `pattern` is the same
+  // text with the quoted metacharacters escaped, so `\*d*` and `"*"d*` glob on
+  // their second star only, as bash does.
+  let text = "";
   let pattern = "";
   let isGlob = false;
   for (const part of word.parts) {
-    if (part.t === "lit") pattern += part.v;
-    else if (part.t === "var") pattern += env[part.name] ?? "";
-    else {
-      pattern += part.v;
+    if (part.t === "lit") {
+      text += part.v;
+      pattern += escapeGlobLiteral(part.v);
+    } else if (part.t === "var") {
+      const value = env[part.name] ?? "";
+      text += value;
+      pattern += escapeGlobBackslashes(value);
+    } else {
+      text += part.v;
+      pattern += escapeGlobBackslashes(part.v);
       isGlob = true;
     }
   }
-  return isGlob ? expandGlob(vfs, cwd, pattern) : [pattern];
+  return isGlob ? expandGlob(vfs, cwd, pattern) : [text];
 }

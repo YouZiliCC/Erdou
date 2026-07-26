@@ -71,6 +71,34 @@ describe("tokenize", () => {
     expect(tokenize("echo \\*")[1]).toEqual({ type: "word", parts: [{ t: "lit", v: "*" }] });
   });
 
+  it("keeps an escaped metacharacter out of a later unescaped one's glob run", () => {
+    // The escaped star must not share a part with the unescaped one: a part is
+    // classified as a whole, so `\*d*` in one part globbed as `*d*` and `echo
+    // \*d*` printed `d.txt` where bash prints `*d*`.
+    expect(tokenize("echo \\*d*")[1]).toEqual({
+      type: "word",
+      parts: [
+        { t: "lit", v: "*" },
+        { t: "glob", v: "d*" },
+      ],
+    });
+    expect(tokenize("echo *\\*")[1]).toEqual({
+      type: "word",
+      parts: [
+        { t: "glob", v: "*" },
+        { t: "lit", v: "*" },
+      ],
+    });
+    expect(tokenize("echo a\\?b?")[1]).toEqual({
+      type: "word",
+      parts: [
+        { t: "lit", v: "a" },
+        { t: "lit", v: "?" },
+        { t: "glob", v: "b?" },
+      ],
+    });
+  });
+
   it("treats a backslash before a newline as a line continuation", () => {
     expect(tokenize("echo a\\\nb")[1]).toEqual({ type: "word", parts: [{ t: "lit", v: "ab" }] });
     expect(tokenize("echo a \\\n b").filter((t) => t.type === "word")).toHaveLength(3);

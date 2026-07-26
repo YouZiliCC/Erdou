@@ -112,8 +112,16 @@ export function tokenize(src: string): Token[] {
         }
         i++;
         if (esc === "\n") continue; // line continuation: both characters vanish
-        // The escaped character is literal, so it can neither end the word
-        // (`a\ b` is one argument) nor make it a glob (`\*` is a literal star).
+        // The escaped character is literal, so it cannot end the word (`a\ b`
+        // is one argument). An escaped metacharacter also has to leave `buf`:
+        // bufGlob classifies the whole buffer, so a `\*` left in it would be
+        // reclassified by a later unescaped `*` and `echo \*d*` would answer
+        // `d.txt` where bash answers `*d*`. A `lit` part of its own cannot be.
+        if (esc === "*" || esc === "?") {
+          flush();
+          parts.push({ t: "lit", v: esc });
+          continue;
+        }
         buf += esc;
         continue;
       }
