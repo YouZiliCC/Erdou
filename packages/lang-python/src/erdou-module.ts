@@ -1,4 +1,4 @@
-import type { ExecContext, HttpHandler, HttpRequest, HttpResponse } from "@erdou/runtime-contract";
+import type { ExecContext, HttpHandler, HttpRequest, HttpResponse, WritableByteStream } from "@erdou/runtime-contract";
 import type { Pyodide, PyProxy, PyCallable } from "./pyodide.js";
 import { buildEnviron, collectResponse } from "./wsgi.js";
 
@@ -149,6 +149,50 @@ __erdou_mod.serve = __erdou_serve_py
 __erdou_sys.modules['erdou'] = __erdou_mod
 `;
 
+/** Where Pyodide's stdout/stderr should land — an `ExecContext` satisfies it. */
+export interface OutputTarget {
+  stdout: WritableByteStream;
+  stderr: WritableByteStream;
+}
+
+// Pyodide exposes no getter for its current output routing, so remember the
+// last target set per instance: a served request can land in the middle of a
+// `runPythonAsync`, and it has to put back the routing it interrupted.
+const routed = new WeakMap<Pyodide, OutputTarget>();
+
+/**
+ * Point Pyodide's INSTANCE-WIDE stdout/stderr at `target`, returning a restore
+ * for whatever routing it replaced. Every re-point must go through here: the
+ * served WSGI handler runs outside any run and re-points per request, so a
+ * python/pip run whose routing it clobbered would otherwise lose the rest of
+ * its output into the served app's streams.
+ *
+ * Writes reach the stream only while it is open. A served app keeps writing
+ * long after the launching process exited — a plain `print()`, or `wsgi.errors`
+ * which ERDOU_SETUP binds to `sys.stderr` — and writing to a closed pipe throws
+ * EBADF, which `__erdou_wsgi_start`'s `except BaseException` would turn into a
+ * 500 + traceback for every such request. That output is a log line, not the
+ * response: drop it once there is no stream left to reach.
+ */
+export function routeOutput(py: Pyodide, target: OutputTarget): () => void {
+  const previous = routed.get(py);
+  routed.set(py, target);
+  py.setStdout({ batched: (t) => writeIfOpen(target.stdout, t) });
+  py.setStderr({ batched: (t) => writeIfOpen(target.stderr, t) });
+  return () => {
+    if (previous) routeOutput(py, previous);
+  };
+}
+
+// `isClosed` is the concrete pipe's (runtime-browser `PipeStream`), not part of
+// the `WritableByteStream` contract — read it structurally and treat a stream
+// that does not report closedness as open, so a genuine write failure still
+// surfaces instead of being swallowed by a blanket try/catch.
+function writeIfOpen(stream: WritableByteStream, text: string): void {
+  if ((stream as { isClosed?: boolean }).isClosed === true) return;
+  stream.write(text);
+}
+
 function errorResponse(message: string): HttpResponse {
   return {
     status: 500,
@@ -175,8 +219,12 @@ function isEventStream(contentType: string | undefined): boolean {
  * blocks the main thread for that sleep on every pull (paced SSE servers
  * belong on the VM kernel). Every other response drains to completion,
  * byte-identical to the old single-shot bridge.
+ *
+ * `output` is captured at serve time and re-established around every call into
+ * Python, because the routing Pyodide happens to carry when a request arrives
+ * belongs to some unrelated (often already-exited) run.
  */
-function makeWsgiHandler(py: Pyodide, app: PyCallable): HttpHandler {
+function makeWsgiHandler(py: Pyodide, app: PyCallable, output: OutputTarget): HttpHandler {
   // Resolved once at serve time; the `__erdou_wsgi_*` primitives live in
   // Pyodide's globals for the life of the instance, so the same handles are
   // reused per request.
@@ -184,11 +232,24 @@ function makeWsgiHandler(py: Pyodide, app: PyCallable): HttpHandler {
   const wsgiNext = py.globals.get("__erdou_wsgi_next") as PyCallable;
   const wsgiClose = py.globals.get("__erdou_wsgi_close") as PyCallable;
 
+  // Wraps every call INTO Python (head, body pull, close). Without it a view's
+  // `print()` writes into whichever run last touched this instance: the exited
+  // launching process (EBADF → a 500 for a request that actually succeeded), or
+  // a python/pip run in flight (its output silently interleaved with the app's).
+  const inPython = <T>(call: () => T): T => {
+    const restore = routeOutput(py, output);
+    try {
+      return call();
+    } finally {
+      restore();
+    }
+  };
+
   // Pull the next non-empty body chunk out of Python. Three outcomes,
   // mirroring `__erdou_wsgi_next`: a bytes chunk; null = exhausted (closed on
   // the Python side); or `{error}` = the app raised mid-body (also closed).
   const pullNext = (token: number): Uint8Array | { error: Uint8Array } | null => {
-    const r = wsgiNext(token) as PyProxy | undefined | null;
+    const r = inPython(() => wsgiNext(token)) as PyProxy | undefined | null;
     if (r == null) return null;
     try {
       const v = r.toJs() as Uint8Array | [Uint8Array];
@@ -207,7 +268,7 @@ function makeWsgiHandler(py: Pyodide, app: PyCallable): HttpHandler {
       if (released) return;
       released = true;
       try {
-        wsgiClose(token);
+        inPython(() => wsgiClose(token));
       } catch {
         // The client is gone — there is no one left to report a close error to.
       }
@@ -253,7 +314,7 @@ function makeWsgiHandler(py: Pyodide, app: PyCallable): HttpHandler {
     let startProxy: PyProxy | undefined;
     try {
       const environ = buildEnviron(req);
-      startProxy = wsgiStart(app, environ, req.body) as PyProxy;
+      startProxy = inPython(() => wsgiStart(app, environ, req.body)) as PyProxy;
       const [status, headers, first, exhausted, token] = startProxy.toJs() as [
         string,
         [string, string][],
@@ -309,10 +370,15 @@ function makeWsgiHandler(py: Pyodide, app: PyCallable): HttpHandler {
  * for every future request — well past the script's exit and the executor's
  * `syncBack`/teardown (which never touches it). The copy is intentionally never
  * destroyed: the server lives for the life of the Pyodide instance.
+ *
+ * The launching run's streams are captured here too and re-established per
+ * request (see `makeWsgiHandler`): Pyodide's output routing is instance-wide,
+ * so a served app that never bound its own would print into whatever run last
+ * touched the instance.
  */
 export function createServeBinding(py: Pyodide, ctx: ExecContext): (port: number, appProxy: PyProxy) => void {
   return (port, appProxy) => {
     const app = appProxy.copy() as PyCallable;
-    ctx.serve(port, makeWsgiHandler(py, app));
+    ctx.serve(port, makeWsgiHandler(py, app, ctx));
   };
 }

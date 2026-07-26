@@ -1,7 +1,7 @@
 import * as git from "isomorphic-git";
 import webHttp from "isomorphic-git/http/web";
 import type { HttpClient } from "isomorphic-git";
-import type { Executor, ExecContext, FileSystemApi } from "@erdou/runtime-contract";
+import type { Executor, ExecContext } from "@erdou/runtime-contract";
 import { createGitFs } from "./fs-adapter.js";
 import { describeError, makeOnAuth, parseNetArgs, redactUrl, redactSecrets, splitUrlAuth, withRemoteContext } from "./net.js";
 
@@ -16,21 +16,6 @@ export interface GitOptions {
    * network.
    */
   http?: HttpClient;
-}
-
-function listFiles(fs: FileSystemApi, dir: string): string[] {
-  const out: string[] = [];
-  const walk = (abs: string, rel: string): void => {
-    for (const e of fs.readdir(abs)) {
-      if (e.name === ".git") continue;
-      const childAbs = abs === "/" ? `/${e.name}` : `${abs}/${e.name}`;
-      const childRel = rel ? `${rel}/${e.name}` : e.name;
-      if (e.type === "directory") walk(childAbs, childRel);
-      else out.push(childRel);
-    }
-  };
-  walk(dir, "");
-  return out;
 }
 
 function relTo(dir: string, p: string): string {
@@ -80,10 +65,29 @@ export function createGitRunner(opts: GitOptions = {}): Executor {
         }
         case "add": {
           const target = args[1] ?? ".";
-          const files =
-            target === "." || target === "-A" ? listFiles(ctx.fs, dir) : [relTo(dir, target)];
-          for (const filepath of files) await git.add({ fs, dir, filepath });
-          out(`added ${files.length} file(s)`);
+          if (target !== "." && target !== "-A") {
+            await git.add({ fs, dir, filepath: relTo(dir, target) });
+            out("added 1 file(s)");
+            return 0;
+          }
+          // Diff against the INDEX, never the worktree. A deleted path is by
+          // definition not on disk, so walking the worktree could never visit
+          // it: `git add -A` staged every removal as a no-op, the commit kept
+          // the file, and `git status` stayed dirty forever.
+          const matrix = await git.statusMatrix({ fs, dir });
+          let added = 0;
+          let removed = 0;
+          for (const [filepath, head, work, stage] of matrix) {
+            if (head === 1 && work === 1 && stage === 1) continue; // tracked, unmodified
+            if (work === 0) {
+              await git.remove({ fs, dir, filepath });
+              removed += 1;
+            } else {
+              await git.add({ fs, dir, filepath });
+              added += 1;
+            }
+          }
+          out(removed > 0 ? `added ${added} file(s), removed ${removed} file(s)` : `added ${added} file(s)`);
           return 0;
         }
         case "commit": {

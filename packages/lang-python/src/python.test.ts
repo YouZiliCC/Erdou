@@ -41,6 +41,15 @@ class MockFS implements EmscriptenFS {
   analyzePath(path: string) {
     return { exists: this.dirs.has(path) || this.files.has(path) };
   }
+  // The deletion half of the real Emscripten FS — what os.remove/shutil.rmtree
+  // reach, and what the sync uses to prune stale paths out of the cached FS.
+  unlink(path: string): void {
+    if (!this.files.delete(path)) throw new Error("ENOENT " + path);
+  }
+  rmdir(path: string): void {
+    if (this.readdir(path).length > 2) throw new Error("ENOTEMPTY " + path);
+    if (!this.dirs.delete(path)) throw new Error("ENOENT " + path);
+  }
 }
 
 interface SimArgs {
@@ -190,6 +199,54 @@ describe("python runner (plumbing, mock Pyodide)", () => {
     const { ctx } = makeCtx(["python", "-c", "open('/app/out.txt','w').write('generated')"], fs);
     await run(ctx);
     expect(fs.readFileText("/app/out.txt")).toBe("generated");
+  });
+
+  // The Pyodide instance is cached for the whole session, so its FS keeps
+  // whatever a previous run put there. Without a directional prune, syncBack
+  // copies those stale paths back and a deleted file is immortal.
+  it("propagates a deletion made in the Erdou fs into the cached Pyodide FS, instead of resurrecting it", async () => {
+    const fs = new Vfs({ clock: () => 0 });
+    fs.writeFile("/a.py", "print('a')");
+    fs.writeFile("/b.py", "print('b')");
+    fs.mkdir("/pkg");
+    fs.writeFile("/pkg/mod.py", "x = 1");
+    const py = new MockPyodide();
+    const run = makeRunners(py).python;
+
+    expect(await run(makeCtx(["python", "/a.py"], fs).ctx)).toBe(0);
+    expect(py.FS.files.has("/a.py")).toBe(true);
+    expect(py.FS.files.has("/pkg/mod.py")).toBe(true);
+
+    fs.rm("/a.py");
+    fs.rm("/pkg", { recursive: true });
+    expect(await run(makeCtx(["python", "/b.py"], fs).ctx)).toBe(0);
+
+    expect(py.FS.files.has("/a.py")).toBe(false); // pruned from Pyodide's FS
+    expect(py.FS.dirs.has("/pkg")).toBe(false);
+    expect(fs.exists("/a.py")).toBe(false); // and never written back
+    expect(fs.exists("/pkg")).toBe(false);
+    expect(fs.readFileText("/b.py")).toBe("print('b')"); // untouched files survive
+  });
+
+  it("applies a deletion the script made (os.remove) to the Erdou filesystem", async () => {
+    const fs = new Vfs({ clock: () => 0 });
+    fs.writeFile("/keep.txt", "keep");
+    fs.mkdir("/out");
+    fs.writeFile("/out/gone.txt", "bye");
+    fs.writeFile("/out/stay.txt", "stay");
+    const run = makeRunners(
+      new MockPyodide((a) => {
+        a.fs.unlink("/out/gone.txt");
+        return 0;
+      }),
+    ).python;
+
+    const { ctx } = makeCtx(["python", "-c", "import os; os.remove('/out/gone.txt')"], fs);
+    expect(await run(ctx)).toBe(0);
+    expect(fs.exists("/out/gone.txt")).toBe(false);
+    expect(fs.exists("/out")).toBe(true);
+    expect(fs.readFileText("/out/stay.txt")).toBe("stay");
+    expect(fs.readFileText("/keep.txt")).toBe("keep");
   });
 
   it("returns 2 with a clear error when the script is missing", async () => {

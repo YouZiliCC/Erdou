@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { PipeStream } from "@erdou/runtime-browser";
 import type { ExecContext, HttpHandler, HttpRequest, HttpResponse } from "@erdou/runtime-contract";
-import { ERDOU_SETUP, createServeBinding } from "./erdou-module.js";
+import { ERDOU_SETUP, createServeBinding, routeOutput } from "./erdou-module.js";
 import type { Pyodide, PyProxy } from "./pyodide.js";
 
 // Unit tests for the WSGI streaming plumbing: a fake Pyodide provides JS
@@ -257,6 +258,90 @@ describe("WSGI handler — streaming path (text/event-stream)", () => {
     const res = await servedHandler(py)(GET);
     expect(res.stream).toBeUndefined();
     expect(res.body.length).toBe(0);
+  });
+});
+
+describe("WSGI handler — output routing of a served app", () => {
+  /** A fake Pyodide whose "app" writes through the INSTANCE-WIDE output routing
+   *  before returning its body — a Flask view with a `print()` in it, plus the
+   *  `wsgi.errors` write ERDOU_SETUP binds to sys.stderr. `emit` writes through
+   *  whatever routing is currently installed, standing in for a later run's
+   *  Python output. */
+  function printingPyodide(): { py: Pyodide; emit: (t: string) => void } {
+    let stdout: (t: string) => void = () => {};
+    let stderr: (t: string) => void = () => {};
+    const globals = new Map<string, unknown>([
+      [
+        "__erdou_wsgi_start",
+        () => {
+          stdout("hello from the view\n");
+          stderr("wsgi.errors line\n");
+          return proxy(["200 OK", [["Content-Type", "text/plain"]], enc("real body"), true, null]);
+        },
+      ],
+      ["__erdou_wsgi_next", () => undefined],
+      ["__erdou_wsgi_close", () => undefined],
+    ]);
+    const py: Pyodide = {
+      runPythonAsync: async () => undefined,
+      setStdout: (o) => {
+        stdout = o.batched;
+      },
+      setStderr: (o) => {
+        stderr = o.batched;
+      },
+      globals: { get: (n: string) => globals.get(n), set: () => {} },
+      FS: {} as Pyodide["FS"],
+    };
+    return { py, emit: (t) => stdout(t) };
+  }
+
+  /** Serve through the real binding with the launching run's pipes, then exit
+   *  that process (`end()` closes them, as the process table does). */
+  function serveThenExit(py: Pyodide): HttpHandler {
+    let handler: HttpHandler | undefined;
+    const stdout = new PipeStream();
+    const stderr = new PipeStream();
+    const ctx = {
+      stdout,
+      stderr,
+      serve: (_port: number, h: HttpHandler) => (handler = h),
+    } as unknown as ExecContext;
+    createServeBinding(py, ctx)(8000, proxy("the-app"));
+    stdout.end();
+    stderr.end();
+    if (!handler) throw new Error("serve was not called");
+    return handler;
+  }
+
+  it("a served app that print()s after the launching process exited still returns its real 200 body", async () => {
+    const { py } = printingPyodide();
+    const handler = serveThenExit(py);
+    // What the exited run left behind: Pyodide's instance-wide routing still
+    // points at its pipe, and PipeStream.write throws EBADF once closed. The
+    // handler must not depend on that routing at all.
+    const dead = new PipeStream();
+    dead.end();
+    py.setStdout({ batched: (t) => dead.write(t) });
+    py.setStderr({ batched: (t) => dead.write(t) });
+
+    const res = await handler(GET);
+    expect(res.status).toBe(200);
+    expect(dec.decode(res.body)).toBe("real body");
+  });
+
+  it("restores the routing a request interrupted, and never leaks the view's output into it", async () => {
+    const { py, emit } = printingPyodide();
+    const handler = serveThenExit(py);
+    // A python run now owns the instance-wide routing; a request lands mid-run.
+    const later = new PipeStream();
+    routeOutput(py, { stdout: later, stderr: later });
+
+    expect(dec.decode((await handler(GET)).body)).toBe("real body");
+
+    emit("output from the later run\n");
+    later.end();
+    expect(await later.text()).toBe("output from the later run\n");
   });
 });
 
