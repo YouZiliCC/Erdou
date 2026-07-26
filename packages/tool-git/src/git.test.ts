@@ -12,6 +12,15 @@ async function filesAtHead(vfs: Vfs): Promise<string[]> {
   return igit.listFiles({ fs, dir: "/repo", ref: "HEAD" });
 }
 
+/** The committed content of a path — proof a modification was staged, not just
+ *  that the path survived in the tree. */
+async function blobAtHead(vfs: Vfs, filepath: string): Promise<string> {
+  const fs = createGitFs(vfs) as unknown as Parameters<typeof igit.readBlob>[0]["fs"];
+  const oid = await igit.resolveRef({ fs, dir: "/repo", ref: "HEAD" });
+  const { blob } = await igit.readBlob({ fs, dir: "/repo", oid, filepath });
+  return new TextDecoder().decode(blob);
+}
+
 async function run(
   runner: Executor,
   argv: string[],
@@ -77,8 +86,8 @@ describe("git tool (local, isomorphic-git over the Erdou VFS)", () => {
     fs.rm("/repo/a.txt");
     const add = await run(git, ["git", "add", "-A"], fs);
     expect(add.code).toBe(0);
-    // Honest accounting: nothing was added, one path was staged for removal.
-    expect(add.out).toBe("added 0 file(s), removed 1 file(s)\n");
+    // Honest accounting: no content was staged, one path was staged for removal.
+    expect(add.out).toBe("staged 0 file(s), removed 1 file(s)\n");
 
     expect((await run(git, ["git", "commit", "-m", "delete a"], fs)).code).toBe(0);
 
@@ -100,12 +109,67 @@ describe("git tool (local, isomorphic-git over the Erdou VFS)", () => {
     fs.rm("/repo/src/drop.txt");
     fs.writeFile("/repo/src/keep.txt", "keep, modified");
     const add = await run(git, ["git", "add", "."], fs);
-    expect(add.out).toBe("added 1 file(s), removed 1 file(s)\n");
+    // keep.txt was modified, not added — "staged" is the honest verb for both.
+    expect(add.out).toBe("staged 1 file(s), removed 1 file(s)\n");
     await run(git, ["git", "commit", "-m", "c2"], fs);
 
     expect((await run(git, ["git", "status"], fs)).out).toMatch(/clean/);
     // The removal is in the tree, not merely out of the index: a fresh checkout
     // of HEAD would have keep.txt and no drop.txt.
     expect(await filesAtHead(fs)).toEqual(["src/keep.txt"]);
+  });
+
+  it("git add . skips an untracked .gitignore'd file and leaves the tree clean", async () => {
+    const fs = new Vfs({ clock: () => 1_700_000_000_000 });
+    fs.mkdir("/repo", { recursive: true });
+    fs.writeFile("/repo/.gitignore", "*.log\n");
+    fs.writeFile("/repo/app.js", "code");
+    fs.writeFile("/repo/debug.log", "noise");
+    const git = createGitRunner({ author: { name: "T", email: "t@e" } });
+    await run(git, ["git", "init"], fs);
+
+    const add = await run(git, ["git", "add", "."], fs);
+    expect(add.out).toBe("staged 2 file(s)\n");
+    await run(git, ["git", "commit", "-m", "c1"], fs);
+
+    expect(await filesAtHead(fs)).toEqual([".gitignore", "app.js"]);
+    // An ignored file must not keep the tree permanently dirty either.
+    expect((await run(git, ["git", "status"], fs)).out).toMatch(/clean/);
+  });
+
+  it("git add . stages a modification to a file that was tracked BEFORE it became ignored", async () => {
+    const fs = new Vfs({ clock: () => 1_700_000_000_000 });
+    fs.mkdir("/repo", { recursive: true });
+    fs.writeFile("/repo/notes.txt", "v1");
+    const git = createGitRunner({ author: { name: "T", email: "t@e" } });
+    await run(git, ["git", "init"], fs);
+    await run(git, ["git", "add", "."], fs);
+    await run(git, ["git", "commit", "-m", "c1"], fs);
+
+    // .gitignore never un-tracks: real git keeps staging changes to a path that
+    // is already in the index, ignore rules apply to untracked paths only.
+    fs.writeFile("/repo/.gitignore", "notes.txt\n");
+    fs.writeFile("/repo/notes.txt", "v2, now longer"); // differing size: the VFS clock is frozen, so equal-size edits look stat-clean
+    const add = await run(git, ["git", "add", "."], fs);
+    expect(add.out).toBe("staged 2 file(s)\n");
+    await run(git, ["git", "commit", "-m", "c2"], fs);
+
+    expect(await blobAtHead(fs, "notes.txt")).toBe("v2, now longer");
+    expect((await run(git, ["git", "status"], fs)).out).toMatch(/clean/);
+  });
+
+  it("git add <path> refuses an ignored path instead of reporting a phantom success", async () => {
+    const fs = new Vfs({ clock: () => 1_700_000_000_000 });
+    fs.mkdir("/repo", { recursive: true });
+    fs.writeFile("/repo/.gitignore", "*.log\n");
+    fs.writeFile("/repo/debug.log", "noise");
+    const git = createGitRunner({ author: { name: "T", email: "t@e" } });
+    await run(git, ["git", "init"], fs);
+
+    const add = await run(git, ["git", "add", "debug.log"], fs);
+    expect(add.code).toBe(1);
+    expect(add.err).toContain("debug.log");
+    expect(add.err).toMatch(/ignored/);
+    expect(add.out).toBe("");
   });
 });

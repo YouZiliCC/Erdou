@@ -228,6 +228,65 @@ describe("python runner (plumbing, mock Pyodide)", () => {
     expect(fs.readFileText("/b.py")).toBe("print('b')"); // untouched files survive
   });
 
+  // A served WSGI app outlives the run that launched it (the browser path's
+  // script exits right after erdou.serve), so a request it handles BETWEEN runs
+  // writes straight into Pyodide's FS — that file exists nowhere else until the
+  // next syncBack copies it out. An unconditional "delete what the VFS lacks"
+  // prune destroyed it on the next `python` command.
+  it("keeps what a served app wrote into Pyodide's FS between runs, and syncs it out", async () => {
+    const fs = new Vfs({ clock: () => 0 });
+    fs.writeFile("/server.py", "print('serving')");
+    const py = new MockPyodide();
+    const run = makeRunners(py).python;
+    expect(await run(makeCtx(["python", "/server.py"], fs).ctx)).toBe(0);
+
+    // The request: the still-registered handler writes the app's database.
+    py.FS.mkdir("/data");
+    py.FS.writeFile("/data/db.json", new TextEncoder().encode('{"hits":1}'));
+
+    expect(await run(makeCtx(["python", "/server.py"], fs).ctx)).toBe(0);
+    expect(py.FS.files.has("/data/db.json")).toBe(true); // survived the prune
+    expect(fs.readFileText("/data/db.json")).toBe('{"hits":1}'); // and reached the VFS
+  });
+
+  // The same resurrection defect for a file the SCRIPT created: syncBack put it
+  // in the VFS, so a later `rm` of it is a real deletion the prune must apply —
+  // even though no syncInto ever mirrored it in.
+  it("propagates a deletion of a file an earlier script created, instead of resurrecting it", async () => {
+    const fs = new Vfs({ clock: () => 0 });
+    fs.writeFile("/gen.py", "1");
+    const py = new MockPyodide((a) => {
+      if (a.argv[0] === "/gen.py") a.fs.writeFile("/out.txt", new TextEncoder().encode("generated"));
+      return 0;
+    });
+    const run = makeRunners(py).python;
+    expect(await run(makeCtx(["python", "/gen.py"], fs).ctx)).toBe(0);
+    expect(fs.readFileText("/out.txt")).toBe("generated");
+
+    fs.rm("/out.txt");
+    expect(await run(makeCtx(["python", "-c", "1"], fs).ctx)).toBe(0); // any later run
+    expect(fs.exists("/out.txt")).toBe(false);
+    expect(py.FS.files.has("/out.txt")).toBe(false);
+  });
+
+  it("prunes only what it mirrored: a deleted file goes, a served app's sibling in the same dir stays", async () => {
+    const fs = new Vfs({ clock: () => 0 });
+    fs.mkdir("/pkg");
+    fs.writeFile("/pkg/mod.py", "x = 1");
+    fs.writeFile("/run.py", "1");
+    const py = new MockPyodide();
+    const run = makeRunners(py).python;
+    expect(await run(makeCtx(["python", "/run.py"], fs).ctx)).toBe(0);
+
+    py.FS.writeFile("/pkg/notes.txt", new TextEncoder().encode("from a request"));
+    fs.rm("/pkg", { recursive: true });
+
+    expect(await run(makeCtx(["python", "/run.py"], fs).ctx)).toBe(0);
+    expect(py.FS.files.has("/pkg/mod.py")).toBe(false); // the VFS deletion propagated
+    expect(py.FS.dirs.has("/pkg")).toBe(true); // kept: rmdir on it would throw ENOTEMPTY
+    expect(fs.readFileText("/pkg/notes.txt")).toBe("from a request");
+  });
+
   it("applies a deletion the script made (os.remove) to the Erdou filesystem", async () => {
     const fs = new Vfs({ clock: () => 0 });
     fs.writeFile("/keep.txt", "keep");

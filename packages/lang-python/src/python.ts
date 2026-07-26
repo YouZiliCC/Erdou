@@ -50,18 +50,6 @@ export interface PyodidePackages {
 export type PipPyodide = Pyodide & PyodidePackages;
 
 /**
- * Deletion surface of a real Emscripten FS. Typed here rather than widening the
- * minimal `EmscriptenFS` in pyodide.ts (same reasoning as `PyodidePackages`
- * above): only the two-way sync needs it, and every real Pyodide `FS` has both.
- */
-interface EmscriptenDeletes {
-  unlink(path: string): void;
-  rmdir(path: string): void;
-}
-
-type SyncFS = EmscriptenFS & EmscriptenDeletes;
-
-/**
  * Install-transparency hooks the app attaches: browser-kernel installs land
  * only in the session's in-memory Pyodide, so the app records what a session
  * installed and hints at restoring it in the next one. This package stays
@@ -191,6 +179,11 @@ interface InstallNotices {
  * reports the script's exit code.
  */
 function pythonExecutor(getPyodide: () => Promise<PipPyodide>, notices: InstallNotices): Executor {
+  // Every path the PREVIOUS run left in the (session-long, cached) Pyodide FS
+  // and propagated into the Erdou FS — the only paths the next prune may
+  // remove. Lives here, not per run, because one executor closure owns exactly
+  // one Pyodide instance.
+  let backed = new Set<string>();
   return async (ctx) => {
     notices.restoreHint(ctx);
     const args = ctx.argv.slice(1);
@@ -236,10 +229,8 @@ function pythonExecutor(getPyodide: () => Promise<PipPyodide>, notices: InstallN
       return 1;
     }
 
-    // The Emscripten FS carries unlink/rmdir; `EmscriptenFS` is the minimal
-    // read/write slice the rest of this package needs, so widen it just here.
-    const pfs = py.FS as SyncFS;
-    const synced = syncInto(ctx.fs, pfs);
+    const pfs = py.FS;
+    const synced = syncInto(ctx.fs, pfs, backed);
     routeOutput(py, ctx);
     py.globals.set("__erdou_code", code);
     py.globals.set("__erdou_file", scriptArgv[0]);
@@ -259,7 +250,7 @@ function pythonExecutor(getPyodide: () => Promise<PipPyodide>, notices: InstallN
       ctx.stderr.write(message(err) + "\n");
       exitCode = 1;
     }
-    syncBack(pfs, ctx.fs, synced);
+    backed = syncBack(pfs, ctx.fs, synced);
     return exitCode;
   };
 }
@@ -422,12 +413,21 @@ function ensureDir(pfs: EmscriptenFS, dir: string): void {
  * touched it".
  *
  * The Pyodide instance is cached for the whole session, so anything a previous
- * run left in its FS is still there. Prune what the Erdou FS no longer has,
- * under the non-RESERVED top-level dirs only (the same ownership rule the copy
- * loop uses): without this, `rm foo.py` followed by any python run has
- * `syncBack` copy the stale Pyodide-side foo.py straight back into the VFS.
+ * run left in its FS is still there. Prune the stale ones, under the
+ * non-RESERVED top-level dirs only (the same ownership rule the copy loop
+ * uses): without this, `rm foo.py` followed by any python run has `syncBack`
+ * copy the stale Pyodide-side foo.py straight back into the VFS.
+ *
+ * "Stale" is deliberately narrow: a path in `backed` (the previous `syncBack`'s
+ * return — everything that run left in Pyodide's FS AND propagated into the
+ * Erdou FS) that the Erdou FS no longer has. Anything else in Pyodide's FS
+ * arrived out of band and is NOT ours to delete: a served WSGI app outlives the
+ * run that launched it (see `createServeBinding`), so a request it handles
+ * between runs writes straight into Pyodide's FS, and that file exists nowhere
+ * else until the next `syncBack` copies it out. An unconditional "delete what
+ * the Erdou FS lacks" destroyed a served app's data on the next `python`.
  */
-function syncInto(fs: FileSystemApi, pfs: SyncFS): Set<string> {
+function syncInto(fs: FileSystemApi, pfs: EmscriptenFS, backed: ReadonlySet<string>): Set<string> {
   const seen = new Set<string>();
   const walk = (path: string): void => {
     const st = fs.stat(path);
@@ -445,24 +445,32 @@ function syncInto(fs: FileSystemApi, pfs: SyncFS): Set<string> {
   for (const e of fs.readdir("/")) {
     if (!RESERVED.has(e.name)) walk(`/${e.name}`);
   }
-  for (const name of pfs.readdir("/")) {
-    if (name === "." || name === ".." || RESERVED.has(name)) continue;
-    prune(pfs, `/${name}`, seen);
+  for (const name of entries(pfs, "/")) {
+    if (RESERVED.has(name)) continue;
+    prune(pfs, `/${name}`, backed, seen);
   }
   return seen;
 }
 
-/** Depth-first so a directory is empty by the time its own rmdir runs. */
-function prune(pfs: SyncFS, path: string, keep: Set<string>): void {
-  if (pfs.isDir(pfs.stat(path).mode)) {
-    for (const name of pfs.readdir(path)) {
-      if (name === "." || name === "..") continue;
-      prune(pfs, `${path}/${name}`, keep);
-    }
-    if (!keep.has(path)) pfs.rmdir(path);
-  } else if (!keep.has(path)) {
-    pfs.unlink(path);
+/** Real Emscripten `readdir` (and the mocks that mimic it) includes "." and "..". */
+const entries = (pfs: EmscriptenFS, path: string): string[] =>
+  pfs.readdir(path).filter((n) => n !== "." && n !== "..");
+
+/**
+ * Remove `path` when the previous run propagated it to the Erdou FS (`backed`)
+ * and the Erdou FS no longer has it (`seen`) — anything else in Pyodide's FS is
+ * state we did not put there and must survive. Depth-first so a directory is
+ * empty by the time its own rmdir runs; a directory holding a survivor is kept
+ * too, because rmdir on it would throw ENOTEMPTY and fail the whole run.
+ */
+function prune(pfs: EmscriptenFS, path: string, backed: ReadonlySet<string>, seen: ReadonlySet<string>): void {
+  const stale = backed.has(path) && !seen.has(path);
+  if (!pfs.isDir(pfs.stat(path).mode)) {
+    if (stale) pfs.unlink(path);
+    return;
   }
+  for (const name of entries(pfs, path)) prune(pfs, `${path}/${name}`, backed, seen);
+  if (stale && entries(pfs, path).length === 0) pfs.rmdir(path);
 }
 
 /**
@@ -471,28 +479,35 @@ function prune(pfs: SyncFS, path: string, keep: Set<string>): void {
  * started, so a path in it that is gone from Pyodide's FS was removed by the
  * script (os.remove, shutil.rmtree, a rename) — leaving it in the VFS discards
  * that removal silently, and the next `syncInto` puts it back into Pyodide.
+ *
+ * Returns every path propagated, which is exactly the `backed` set the next
+ * `syncInto` prunes against. It has to be collected HERE, not from `syncInto`:
+ * a file the script itself created (`open('out.txt','w')`) is in the Erdou FS
+ * from this point on, so a later `rm out.txt` is a real deletion to apply — and
+ * `syncInto`'s set, taken before the script ran, never contained it.
  */
-function syncBack(pfs: SyncFS, fs: FileSystemApi, synced: Set<string>): void {
+function syncBack(pfs: EmscriptenFS, fs: FileSystemApi, synced: Set<string>): Set<string> {
+  const propagated = new Set<string>();
   const walk = (path: string): void => {
     const st = pfs.stat(path);
     if (pfs.isDir(st.mode)) {
       if (!fs.exists(path)) fs.mkdir(path, { recursive: true });
-      for (const name of pfs.readdir(path)) {
-        if (name === "." || name === "..") continue;
-        walk(path === "/" ? `/${name}` : `${path}/${name}`);
-      }
+      propagated.add(path);
+      for (const name of entries(pfs, path)) walk(path === "/" ? `/${name}` : `${path}/${name}`);
     } else if (pfs.isFile(st.mode)) {
       const dir = path.slice(0, path.lastIndexOf("/")) || "/";
       if (dir !== "/" && !fs.exists(dir)) fs.mkdir(dir, { recursive: true });
       fs.writeFile(path, pfs.readFile(path, { encoding: "binary" }));
+      propagated.add(path);
     }
   };
-  for (const name of pfs.readdir("/")) {
-    if (name === "." || name === ".." || RESERVED.has(name)) continue;
+  for (const name of entries(pfs, "/")) {
+    if (RESERVED.has(name)) continue;
     walk(`/${name}`);
   }
   for (const path of synced) {
     // `exists` guards the child of an already-recursively-removed directory.
     if (!pfs.analyzePath(path).exists && fs.exists(path)) fs.rm(path, { recursive: true });
   }
+  return propagated;
 }

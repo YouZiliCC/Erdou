@@ -88,15 +88,23 @@ function fakeWsgi(start: StartResult, chunks: Array<Uint8Array | { error: Uint8A
       writeFile: () => {},
       mkdir: () => {},
       analyzePath: () => ({ exists: false }),
+      unlink: () => {},
+      rmdir: () => {},
     },
   };
   return { py, calls, live };
 }
 
-/** Register a handler through the real createServeBinding and return it. */
+/** Register a handler through the real createServeBinding and return it. The
+ *  launching run's pipes are real: the binding writes its serve-time notice to
+ *  ctx.stderr. */
 function servedHandler(py: Pyodide): HttpHandler {
   let handler: HttpHandler | undefined;
-  const ctx = { serve: (_port: number, h: HttpHandler) => (handler = h) } as unknown as ExecContext;
+  const ctx = {
+    stdout: new PipeStream(),
+    stderr: new PipeStream(),
+    serve: (_port: number, h: HttpHandler) => (handler = h),
+  } as unknown as ExecContext;
   const bind = createServeBinding(py, ctx);
   bind(8000, proxy("the-app"));
   if (!handler) throw new Error("serve was not called");
@@ -296,9 +304,9 @@ describe("WSGI handler — output routing of a served app", () => {
     return { py, emit: (t) => stdout(t) };
   }
 
-  /** Serve through the real binding with the launching run's pipes, then exit
-   *  that process (`end()` closes them, as the process table does). */
-  function serveThenExit(py: Pyodide): HttpHandler {
+  /** Serve through the real binding, with the launching run STILL ALIVE — its
+   *  pipes stay open, so they are where the served app's output belongs. */
+  function serveStillRunning(py: Pyodide): { handler: HttpHandler; stdout: PipeStream; stderr: PipeStream } {
     let handler: HttpHandler | undefined;
     const stdout = new PipeStream();
     const stderr = new PipeStream();
@@ -308,11 +316,57 @@ describe("WSGI handler — output routing of a served app", () => {
       serve: (_port: number, h: HttpHandler) => (handler = h),
     } as unknown as ExecContext;
     createServeBinding(py, ctx)(8000, proxy("the-app"));
+    if (!handler) throw new Error("serve was not called");
+    return { handler, stdout, stderr };
+  }
+
+  /** …and the browser path's real shape: the script exits right after
+   *  `erdou.serve` returns, so `end()` closes both pipes before any request. */
+  function serveThenExit(py: Pyodide): HttpHandler {
+    const { handler, stdout, stderr } = serveStillRunning(py);
     stdout.end();
     stderr.end();
-    if (!handler) throw new Error("serve was not called");
     return handler;
   }
+
+  it("routes a served view's output into the LAUNCHING run's streams", async () => {
+    const { py } = printingPyodide();
+    const { handler, stdout, stderr } = serveStillRunning(py);
+
+    expect(dec.decode((await handler(GET)).body)).toBe("real body");
+
+    stdout.end();
+    stderr.end();
+    expect(await stdout.text()).toBe("hello from the view\n");
+    expect(await stderr.text()).toContain("wsgi.errors line\n");
+  });
+
+  // The launching pipes close when the script exits, and routeOutput then drops
+  // every line the app prints. That drop is permanent and invisible, so the run
+  // that started the server says it will happen while its stderr is still open.
+  it("warns the launching run that output printed after it exits is not captured", async () => {
+    const { py } = printingPyodide();
+    const { stderr } = serveStillRunning(py);
+    stderr.end();
+    const notice = await stderr.text();
+    expect(notice).toContain("erdou.serve");
+    expect(notice).toContain("not captured");
+    expect(notice).toContain("print()");
+  });
+
+  // routeOutput's contract is "restores whatever routing it replaced". With
+  // nothing to replace, leaving the request's routing installed would send
+  // Python's next write — outside any call — into the launching run's streams.
+  it("unsets the routing after a request when the instance carried none before", async () => {
+    const { py, emit } = printingPyodide();
+    const { handler, stdout } = serveStillRunning(py);
+
+    await handler(GET);
+    emit("stray write between requests\n");
+
+    stdout.end();
+    expect(await stdout.text()).toBe("hello from the view\n");
+  });
 
   it("a served app that print()s after the launching process exited still returns its real 200 body", async () => {
     const { py } = printingPyodide();

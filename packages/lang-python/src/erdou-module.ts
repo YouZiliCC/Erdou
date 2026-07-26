@@ -172,7 +172,9 @@ const routed = new WeakMap<Pyodide, OutputTarget>();
  * which ERDOU_SETUP binds to `sys.stderr` — and writing to a closed pipe throws
  * EBADF, which `__erdou_wsgi_start`'s `except BaseException` would turn into a
  * 500 + traceback for every such request. That output is a log line, not the
- * response: drop it once there is no stream left to reach.
+ * response: drop it once there is no stream left to reach. The user is told
+ * this will happen, once, at serve time (see `createServeBinding`) — a drop
+ * nobody is warned about is the failure mode this codebase refuses.
  */
 export function routeOutput(py: Pyodide, target: OutputTarget): () => void {
   const previous = routed.get(py);
@@ -180,7 +182,18 @@ export function routeOutput(py: Pyodide, target: OutputTarget): () => void {
   py.setStdout({ batched: (t) => writeIfOpen(target.stdout, t) });
   py.setStderr({ batched: (t) => writeIfOpen(target.stderr, t) });
   return () => {
-    if (previous) routeOutput(py, previous);
+    if (previous) {
+      routeOutput(py, previous);
+      return;
+    }
+    // Nothing was routed before this call, so there is no owner to hand the
+    // instance back to. Leaving `target` installed would send whatever Python
+    // writes next — a stray thread, a later request's callback — into a run
+    // that is no longer listening; unset instead, so the next writer has to
+    // route first.
+    routed.delete(py);
+    py.setStdout({ batched: () => {} });
+    py.setStderr({ batched: () => {} });
   };
 }
 
@@ -375,10 +388,22 @@ function makeWsgiHandler(py: Pyodide, app: PyCallable, output: OutputTarget): Ht
  * request (see `makeWsgiHandler`): Pyodide's output routing is instance-wide,
  * so a served app that never bound its own would print into whatever run last
  * touched the instance.
+ *
+ * Those streams close when the script exits — which on the browser kernel is
+ * immediately after `erdou.serve` returns — and `routeOutput` then drops every
+ * line the app prints while handling requests. Say so HERE, on the launching
+ * run's stderr while it is still open: silently discarding a view's `print()`
+ * for the rest of the session, with nothing anywhere to explain where it went,
+ * is worse than the one advisory line.
  */
 export function createServeBinding(py: Pyodide, ctx: ExecContext): (port: number, appProxy: PyProxy) => void {
   return (port, appProxy) => {
     const app = appProxy.copy() as PyCallable;
     ctx.serve(port, makeWsgiHandler(py, app, ctx));
+    ctx.stderr.write(
+      `erdou.serve: note: port ${port} keeps serving after this script exits, but its stdout/stderr close with the ` +
+        `script — anything the app prints while handling later requests (print(), wsgi.errors) is not captured. ` +
+        `Write to a file under the workspace if you need those logs.\n`,
+    );
   };
 }

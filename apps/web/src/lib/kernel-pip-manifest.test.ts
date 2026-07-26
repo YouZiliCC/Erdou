@@ -79,6 +79,8 @@ function fakePyodide(): PipPyodide {
       writeFile: () => {},
       mkdir: () => {},
       analyzePath: () => ({ exists: true }),
+      unlink: () => {},
+      rmdir: () => {},
     },
     loadedPackages,
     loadPackage: async (names) => {

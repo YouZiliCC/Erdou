@@ -66,16 +66,32 @@ export function createGitRunner(opts: GitOptions = {}): Executor {
         case "add": {
           const target = args[1] ?? ".";
           if (target !== "." && target !== "-A") {
-            await git.add({ fs, dir, filepath: relTo(dir, target) });
-            out("added 1 file(s)");
+            const filepath = relTo(dir, target);
+            // isomorphic-git's add SILENTLY skips a .gitignore'd path: no error,
+            // no index entry, and we would have printed a success line for a
+            // file that was never staged. Ignore rules apply to untracked paths
+            // only, so an already-tracked path is forced through (real git keeps
+            // staging edits to a file that a later rule started matching) and an
+            // untracked ignored one is refused out loud.
+            const tracked = (await git.listFiles({ fs, dir })).includes(filepath);
+            if (!tracked && (await git.isIgnored({ fs, dir, filepath }))) {
+              err(`git add: '${target}' is ignored by .gitignore and was NOT staged — drop the rule to track it`);
+              return 1;
+            }
+            await git.add({ fs, dir, filepath, force: tracked });
+            out("staged 1 file(s)");
             return 0;
           }
           // Diff against the INDEX, never the worktree. A deleted path is by
           // definition not on disk, so walking the worktree could never visit
           // it: `git add -A` staged every removal as a no-op, the commit kept
-          // the file, and `git status` stayed dirty forever.
+          // the file, and `git status` stayed dirty forever. It also settles
+          // .gitignore the way real git does — the matrix omits ignored-and-
+          // untracked paths, so they are no longer swept into the index (the
+          // old worktree walk excluded only `.git`) and `add` now agrees with
+          // `status`, which has always read the same matrix.
           const matrix = await git.statusMatrix({ fs, dir });
-          let added = 0;
+          let staged = 0;
           let removed = 0;
           for (const [filepath, head, work, stage] of matrix) {
             if (head === 1 && work === 1 && stage === 1) continue; // tracked, unmodified
@@ -83,11 +99,18 @@ export function createGitRunner(opts: GitOptions = {}): Executor {
               await git.remove({ fs, dir, filepath });
               removed += 1;
             } else {
-              await git.add({ fs, dir, filepath });
-              added += 1;
+              // force: statusMatrix already dropped every ignored-AND-untracked
+              // path, so what is left is either not ignored or already tracked —
+              // and for a tracked path add() must not consult .gitignore, or an
+              // edit to a file a later rule started matching is silently lost.
+              await git.add({ fs, dir, filepath, force: true });
+              staged += 1;
             }
           }
-          out(removed > 0 ? `added ${added} file(s), removed ${removed} file(s)` : `added ${added} file(s)`);
+          // Count what was done, not what was walked: these paths are new,
+          // modified AND deleted, so a single "added N" was a lie whenever a
+          // removal or an in-place edit was in the batch.
+          out(removed > 0 ? `staged ${staged} file(s), removed ${removed} file(s)` : `staged ${staged} file(s)`);
           return 0;
         }
         case "commit": {

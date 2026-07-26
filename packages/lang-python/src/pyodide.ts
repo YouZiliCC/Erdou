@@ -12,6 +12,12 @@ export interface EmscriptenFS {
   writeFile(path: string, data: Uint8Array): void;
   mkdir(path: string): void;
   analyzePath(path: string): { exists: boolean };
+  // Declared even though only the two-way sync's prune calls them: a real
+  // Pyodide `FS` has both, and a test double that omits them used to type-check
+  // (the executor cast `FS` to a wider local type) and then blow up at runtime
+  // the first time a run pruned a stale path.
+  unlink(path: string): void;
+  rmdir(path: string): void;
 }
 
 export interface PyGlobals {
