@@ -40,6 +40,7 @@ export interface EsbuildApi {
     jsxImportSource?: string;
     sourcemap?: boolean;
     minify?: boolean;
+    outdir?: string;
     plugins: { name: string; setup(build: EsbuildPluginBuild): void }[];
   }): Promise<{ outputFiles?: { path: string; text: string }[]; errors: { text: string }[] }>;
 }
@@ -151,6 +152,11 @@ export async function bundle(input: BundleInput): Promise<BundleOutput> {
         // Bare (npm) import → fetch from the CDN and bundle it in (self-contained preview).
         return { path: cdn + spec, namespace: HTTP };
       });
+      // Both sites call resolveFile and neither is redundant. onResolve's call decides
+      // module IDENTITY (so "./App" and "./App.tsx" are one module, not two copies) and
+      // the importer path children resolve against. This call is the single fail-fast
+      // site: onResolve deliberately passes an unresolvable specifier through as-is, and
+      // only here does it become a named error instead of an esbuild-internal one.
       build.onLoad({ filter: /.*/, namespace: NS }, (args) => {
         const resolved = resolveFile(fs, args.path);
         if (!resolved) return { errors: [{ text: `cannot resolve module '${args.path}'` }] };
@@ -179,13 +185,21 @@ export async function bundle(input: BundleInput): Promise<BundleOutput> {
       format: "esm",
       jsx: "automatic",
       jsxImportSource: input.jsxImportSource ?? "react",
+      // outdir is what makes `import "./app.css"` from a JS/TS module work at all:
+      // without an output path esbuild refuses with 'Cannot import "…css" into a
+      // JavaScript file without an output path configured', and BundleOutput.css
+      // stays permanently empty. write:false means nothing is ever written to it —
+      // it only gives the emitted JS/CSS names to tell them apart below.
+      outdir: "/",
       plugins: [plugin],
     });
   } catch (err) {
     return { js: "", css: "", errors: [err instanceof Error ? err.message : String(err)] };
   }
 
-  // Single-entry write:false builds name JS "<stdout>" and CSS "<stdout>.css".
+  // With outdir set, a single-entry build names its outputs after the entry
+  // ("/main.js", plus "/main.css" only when some module imported CSS). Pick by
+  // extension rather than by position — the order is not contractual.
   const files = result.outputFiles ?? [];
   const cssFile = files.find((f) => f.path.endsWith(".css"));
   const jsFile = files.find((f) => f !== cssFile);

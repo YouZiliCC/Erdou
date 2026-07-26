@@ -53,7 +53,10 @@ describe("bundle", () => {
     fs.writeFile("/src/components/Button.ts", "export const Button = 'btn';");
     fs.writeFile("/src/components/index.ts", 'export { Button } from "./Button";');
     fs.writeFile("/src/main.ts", 'import { Button } from "./components";\nconsole.log(Button);');
-    const out = await bundle({ esbuild: es, fs, entry: "/src/main.ts" });
+    // stubFetch, though nothing here is a bare specifier: that is the point. If a
+    // regression routed a local specifier into the CDN branch the test must fail on
+    // resolution, not make a live request to esm.sh (flaky in CI, cryptic offline).
+    const out = await bundle({ esbuild: es, fs, entry: "/src/main.ts", fetch: stubFetch });
     expect(out.errors).toEqual([]);
     expect(out.js).toContain("btn");
   });
@@ -65,15 +68,57 @@ describe("bundle", () => {
     fs.writeFile("/src/components/ui/index.ts", 'export { Button } from "./Button";');
     fs.writeFile("/src/components/index.ts", 'export { Button } from "./ui";');
     fs.writeFile("/src/main.ts", 'import { Button } from "./components";\nconsole.log(Button);');
-    const out = await bundle({ esbuild: es, fs, entry: "/src/main.ts" });
+    const out = await bundle({ esbuild: es, fs, entry: "/src/main.ts", fetch: stubFetch });
     expect(out.errors).toEqual([]);
     expect(out.js).toContain("nested-btn");
+  });
+
+  it("resolves a barrel's '../' import out of its own directory", async () => {
+    const fs = new Vfs({ clock: () => 0 });
+    fs.mkdir("/src/components", { recursive: true });
+    fs.writeFile("/src/shared.ts", "export const S = 'shared-val';");
+    fs.writeFile("/src/components/index.ts", 'export { S } from "../shared";');
+    fs.writeFile("/src/main.ts", 'import { S } from "./components";\nconsole.log(S);');
+    const out = await bundle({ esbuild: es, fs, entry: "/src/main.ts", fetch: stubFetch });
+    // Used to fail "cannot resolve module '/shared'": the barrel's importer was the
+    // pre-resolution "/src/components", so ".." climbed one directory too far.
+    expect(out.errors).toEqual([]);
+    expect(out.js).toContain("shared-val");
+  });
+
+  it("gives a module one identity whether or not the import spells its extension", async () => {
+    const fs = new Vfs({ clock: () => 0 });
+    fs.mkdir("/src", { recursive: true });
+    fs.writeFile("/src/App.tsx", "export const APP = 'app-body-marker';");
+    fs.writeFile(
+      "/src/main.ts",
+      'import { APP } from "./App";\nimport { APP as APP2 } from "./App.tsx";\nconsole.log(APP, APP2);',
+    );
+    const out = await bundle({ esbuild: es, fs, entry: "/src/main.ts", fetch: stubFetch });
+    expect(out.errors).toEqual([]);
+    // Exactly one copy. When "./App" and "./App.tsx" resolved to two identities the
+    // module was bundled twice, silently duplicating module-level state and React
+    // contexts — the app still "worked", just with two of everything.
+    expect(out.js.split("app-body-marker").length - 1).toBe(1);
+  });
+
+  it("extracts CSS imported from a JS/TS module into out.css", async () => {
+    const fs = new Vfs({ clock: () => 0 });
+    fs.mkdir("/src", { recursive: true });
+    fs.writeFile("/src/app.css", ".card { color: rebeccapurple; }");
+    fs.writeFile("/src/main.ts", 'import "./app.css";\nconsole.log("styled");');
+    const out = await bundle({ esbuild: es, fs, entry: "/src/main.ts", fetch: stubFetch });
+    expect(out.errors).toEqual([]);
+    expect(out.css).toContain("rebeccapurple");
+    expect(out.js).toContain("styled");
+    // The stylesheet must not be inlined back into the JS — /dist/app.css is what the shell links.
+    expect(out.js).not.toContain("rebeccapurple");
   });
 
   it("reports an error for a missing local import", async () => {
     const fs = new Vfs({ clock: () => 0 });
     fs.writeFile("/main.ts", 'import "./nope";');
-    const out = await bundle({ esbuild: es, fs, entry: "/main.ts" });
+    const out = await bundle({ esbuild: es, fs, entry: "/main.ts", fetch: stubFetch });
     expect(out.errors.length).toBeGreaterThan(0);
     // The unresolved specifier must still reach onLoad by name, not be silently dropped.
     expect(out.errors.join("\n")).toContain("cannot resolve module '/nope'");
