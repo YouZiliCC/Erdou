@@ -10,6 +10,7 @@ import { detectRunCommand, staticServeCommand } from "../lib/run-detect.js";
 import { killTrackedServe } from "../lib/run-serve.js";
 import { bundleProject, hasBundleEntry } from "../lib/bundle-project.js";
 import { isBundleRun, reducePreviewSelection } from "../lib/preview-select.js";
+import { previewUrl } from "../lib/preview-bridge.js";
 
 /** Preview: agent-primary. The panel follows the AGENT's serving decisions —
  *  its `open_preview` tool (Studio.previewRequest) focuses a port, and a port
@@ -90,6 +91,15 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
   // falls back to nothing selected instead of needing an effect to reconcile.
   const openPorts = studio.openPorts;
   const viewedPort = selectedPort !== null && openPorts.some((p) => p.port === selectedPort) ? selectedPort : null;
+  /** This tab's preview OWNER id (its Service Worker client id, from the boot
+   *  handshake). Every preview URL names it so the worker dispatches back into
+   *  THIS tab's runtime — with two Studio tabs open there is otherwise nothing
+   *  in a request that says which one owns it. Null while the handshake is
+   *  still in flight AND after it failed — `studio.previewTransport` is what
+   *  tells those two apart; no URL can be built in either, so the panel says
+   *  which one it is instead of mounting a frame nobody could serve. */
+  const owner = studio.previewClientId;
+  const transport = studio.previewTransport;
   // Recomputed every render (cheap VFS walks) so they track live agent edits,
   // unlike `cmd`'s one-time initializer.
   const bundleEntry = hasBundleEntry(studio.fs);
@@ -282,7 +292,24 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
               <button onClick={() => view(p.port)} title="View">
                 view
               </button>
-              <button onClick={() => window.open(`/__preview__/${p.port}/`, "_blank", "noopener")} title="Open in new tab">
+              {/* `noopener` makes this popup a top-level window with NO handle
+                  back to Studio — its requests are routed solely by the owner
+                  id in this URL. It therefore dies with this document: reload
+                  Studio and the popup 503s (a reload mints a new client id),
+                  which is what the SW's 503 text tells the user. */}
+              <button
+                onClick={() => {
+                  if (owner !== null) window.open(previewUrl(owner, p.port), "_blank", "noopener");
+                }}
+                title={
+                  owner !== null
+                    ? "Open in new tab"
+                    : transport === "pending"
+                      ? "Starting the preview transport — available in a moment"
+                      : "Unavailable: this tab has no preview transport"
+                }
+                disabled={owner === null}
+              >
                 ↗
               </button>
               <button className="x" onClick={() => void stop(p.port)} title="Stop">
@@ -305,27 +332,7 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
           <div className="preview-output">{output}</div>
         ) : null}
 
-        {viewedPort !== null ? (
-          // The service worker only controls same-origin clients, so the SW-served
-          // preview needs allow-same-origin. In production, serve it from a separate
-          // origin to fully isolate it from the app — BUT note the coupling: the
-          // agent's preview tools (lib/preview-tools.ts) read/click this frame via
-          // contentDocument/contentWindow, which same-origin serving alone makes
-          // possible; a separate-origin hardening severs those tools with it — the
-          // two decisions travel together. Keyed on port+nonce so a (re-)run
-          // remounts the iframe and the preview actually reloads. The ref hands the
-          // live element to Studio for the preview tools (null on unmount, so a
-          // closed preview fails their "no preview is open" check instead of
-          // pointing at a dead frame).
-          <iframe
-            key={`${viewedPort}:${nonce}`}
-            ref={(el) => studio.registerPreviewFrame(el)}
-            className="preview-frame"
-            title="preview"
-            sandbox="allow-scripts allow-same-origin"
-            src={`/__preview__/${viewedPort}/`}
-          />
-        ) : (
+        {viewedPort === null ? (
           errors.length === 0 && (
             <div className="hint">
               {bundleIntent ? (
@@ -342,6 +349,8 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
               )}
             </div>
           )
+        ) : (
+          <PreviewStage studio={studio} viewedPort={viewedPort} nonce={nonce} />
         )}
       </div>
 
@@ -379,5 +388,75 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
         </button>
       </div>
     </div>
+  );
+}
+
+/** What fills the panel once a port is selected — one of exactly three states,
+ *  decided by this page's preview transport. Split out as its own component so
+ *  those three are renderable in isolation: PreviewPanel's port selection is set
+ *  from an effect, and static-markup rendering (the repo's component-test
+ *  pattern, node env, no jsdom) never runs effects, so `viewedPort` there is
+ *  always null and this branch would be untestable inside the panel. Stateless
+ *  by construction — every input is a prop. */
+export function PreviewStage({
+  studio,
+  viewedPort,
+  nonce,
+}: {
+  studio: Studio;
+  viewedPort: number;
+  nonce: number;
+}) {
+  const owner = studio.previewClientId;
+  if (owner === null) {
+    // Two different nulls. PENDING is not a failure: the boot handshake waits
+    // for the Service Worker to activate and then for its whoami reply — long
+    // enough that a port opened by `erdou serve` (milliseconds) routinely lands
+    // inside the window, on a first-ever load or the first load after a deploy.
+    // Telling the user to reload there restarts the very wait they are in.
+    if (studio.previewTransport === "pending") {
+      return (
+        <div className="hint">
+          Starting the preview transport — this tab is getting its preview identity from the Service Worker (a
+          few seconds on a first load). Port {viewedPort} appears here as soon as it answers.
+        </div>
+      );
+    }
+    // Settled without an id: fail loud, serve nothing. There is no preview URL
+    // the Service Worker could route back to THIS tab, and the alternative —
+    // let the worker pick a page — is the cross-tab misroute this scheme
+    // removes. The console carries the precise handshake failure.
+    return (
+      <div className="build-errors">
+        <pre>
+          {"Preview transport unavailable: this Erdou tab could not get a preview identity from the " +
+            "Service Worker, so nothing can address a preview back to it (see the console for why). " +
+            "Reload the page."}
+        </pre>
+      </div>
+    );
+  }
+  // The service worker only controls same-origin clients, so the SW-served
+  // preview needs allow-same-origin. In production, serve it from a separate
+  // origin to fully isolate it from the app — BUT note the coupling: the
+  // agent's preview tools (lib/preview-tools.ts) read/click this frame via
+  // contentDocument/contentWindow, which same-origin serving alone makes
+  // possible; a separate-origin hardening severs those tools with it — the
+  // two decisions travel together. Keyed on port+nonce so a (re-)run
+  // remounts the iframe and the preview actually reloads. The ref hands the
+  // live element to Studio for the preview tools (null on unmount, so a
+  // closed preview fails their "no preview is open" check instead of
+  // pointing at a dead frame). `src` goes through previewUrl() — the one
+  // place the `/__preview__/<owner>/<port>/` shape is built, so this and
+  // the ↗ popup in the ports bar cannot drift apart or from the SW's parser.
+  return (
+    <iframe
+      key={`${viewedPort}:${nonce}`}
+      ref={(el) => studio.registerPreviewFrame(el)}
+      className="preview-frame"
+      title="preview"
+      sandbox="allow-scripts allow-same-origin"
+      src={previewUrl(owner, viewedPort)}
+    />
   );
 }

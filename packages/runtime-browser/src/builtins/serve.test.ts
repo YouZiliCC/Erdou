@@ -131,9 +131,11 @@ describe("erdou serve", () => {
   });
 
   // The redirect Location must be RELATIVE. The production caller
-  // (apps/web/public/preview-sw.js) strips `/__preview__/<primary>` and any
-  // `/__port__/<n>` before dispatch, so an origin-absolute `/docs/` would
-  // resolve against the Studio origin and walk out of the preview scope.
+  // (apps/web/public/preview-sw.js) strips `/__preview__/<owner>/<primary>` and
+  // any `/__port__/<n>` before dispatch, so an origin-absolute `/docs/` would
+  // resolve against the Studio origin and walk out of the preview scope. The
+  // `<owner>` segment (the Studio page that owns the preview) is why this can
+  // never be rebuilt runtime-side: only the browser knows it.
   it("302s a directory URL to a relative trailing-slash form", async () => {
     const rt = new BrowserRuntime();
     await rt.boot();
@@ -142,12 +144,13 @@ describe("erdou serve", () => {
     rt.fs.writeFile("/site/docs/index.html", "DOCS");
     await (await rt.exec("erdou serve /site 8080")).wait();
 
-    // What the SW dispatches for a browser request to `/__preview__/8080/docs`.
+    // What the SW dispatches for a browser request to
+    // `/__preview__/<owner>/8080/docs`.
     const redirect = await rt.dispatch(8080, { method: "GET", url: "/docs", headers: {}, body: new Uint8Array() });
     expect(redirect.status).toBe(302);
     expect(redirect.headers.location).toBe("./docs/");
     // Resolved by the browser against the URL it actually requested.
-    expect(new URL("./docs/", "https://studio.test/__preview__/8080/docs").pathname).toBe("/__preview__/8080/docs/");
+    expect(new URL("./docs/", "https://studio.test/__preview__/tab-a/8080/docs").pathname).toBe("/__preview__/tab-a/8080/docs/");
 
     const followed = await rt.dispatch(8080, { method: "GET", url: "/docs/", headers: {}, body: new Uint8Array() });
     expect(followed.status).toBe(200);
@@ -164,7 +167,7 @@ describe("erdou serve", () => {
     const res = await rt.dispatch(8080, { method: "GET", url: "/a/b", headers: {}, body: new Uint8Array() });
     expect(res.status).toBe(302);
     expect(res.headers.location).toBe("./b/");
-    expect(new URL("./b/", "https://studio.test/__preview__/8080/a/b").pathname).toBe("/__preview__/8080/a/b/");
+    expect(new URL("./b/", "https://studio.test/__preview__/tab-a/8080/a/b").pathname).toBe("/__preview__/tab-a/8080/a/b/");
   });
 
   it("--spa redirects a directory URL instead of serving the root index", async () => {

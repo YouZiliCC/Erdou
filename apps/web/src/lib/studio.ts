@@ -43,7 +43,7 @@ import {
 import { pullDiskToWorkspace, pushWorkspaceToDisk, reselectFolder as reselectFolderOp } from "./folder-sync-controls.js";
 import { buildProjectZip } from "./project-zip.js";
 import { createDelegateTool, type SubagentDetail } from "./delegate.js";
-import { createPreviewTools } from "./preview-tools.js";
+import { createPreviewTools, type PreviewTransport } from "./preview-tools.js";
 
 const SNAPSHOT_ID = "erdou:default";
 /** Cap on `Studio.systemLog` entries so a noisy source (e.g. failing rescans) can't grow it unbounded. */
@@ -291,6 +291,28 @@ export class Studio {
    *  preview is mounted). NOT render state — mutated without notify(); read
    *  lazily by the preview_read/preview_click/preview_logs tools. */
   previewFrame: HTMLIFrameElement | null = null;
+  /** THIS page's preview owner id — its own Service Worker Client id, learned
+   *  once at boot (`startPreviewProxy` → `erdou:whoami`). Every preview URL this
+   *  tab builds names it, so the worker dispatches the request back into THIS
+   *  runtime instead of guessing among open tabs. Unlike `previewFrame` this IS
+   *  render state (the panel can only mount an iframe once it exists), so boot
+   *  notifies when it lands. Null = the preview transport is unavailable in this
+   *  tab; the panel says so rather than showing a frame nobody can serve. */
+  previewClientId: string | null = null;
+  /** Has the boot handshake SETTLED (either way)? `previewClientId === null`
+   *  alone cannot tell "still asking" from "asked and failed", and asking is
+   *  slow — the bridge waits for the worker to ACTIVATE and only then for the
+   *  whoami reply, seconds on a first load or the first load after a deploy,
+   *  while `erdou serve` opens a port in milliseconds. Reading null as failure
+   *  in that window told the user to reload, which just restarts the same wait. */
+  previewProxySettled = false;
+  /** The two fields above as ONE value, so the panel and the agent's preview
+   *  tools cannot derive it differently. Not stored: a stored copy is a third
+   *  thing to keep in sync. */
+  get previewTransport(): PreviewTransport {
+    if (!this.previewProxySettled) return "pending";
+    return this.previewClientId === null ? "failed" : "ready";
+  }
   /** Session-only registry of built project zips, keyed by exportId (the key an
    *  artifact trace line carries). Deliberately NOT persisted: the values hold
    *  object URLs onto in-memory blobs, which die with the page — after a reload
@@ -377,12 +399,32 @@ export class Studio {
       // WHY the workspace is unusable rather than an app that just does nothing.
       this.logSystem("error", "Could not start the runtime — the workspace is unavailable.", asMessage(err));
     }
-    // Preview reverse-proxy: SW intercepts /__preview__/<port>/ iframe requests
-    // and forwards them here to `runtime.dispatch`. Fire-and-forget: SW
+    // Preview reverse-proxy: SW intercepts /__preview__/<owner>/<port>/ iframe
+    // requests and forwards them here to `runtime.dispatch`. Fire-and-forget: SW
     // registration must not block boot, and it self-guards for no-SW envs.
     // Installs the listener + seeds the preview-runtime holder; a later kernel
     // switch re-aims it via `setPreviewRuntime` instead of re-registering.
-    void startPreviewProxy(this.runtime);
+    // It resolves with THIS page's owner id (the id the SW dispatches by), which
+    // the panel needs to build any preview URL — so record it and notify. It
+    // belongs to the PAGE, not the kernel: a kernel switch must not clear it.
+    // Until it settles the panel shows "starting", not the reload-the-page
+    // failure — the wait is long enough (SW activation + whoami) for a port to
+    // open inside it. The rejection arm is not decoration: an unhandled throw
+    // would leave `previewProxySettled` false forever, i.e. a preview stuck
+    // "starting" with no error anywhere — the exact silent degradation the
+    // settled flag exists to prevent.
+    void startPreviewProxy(this.runtime).then(
+      (clientId) => {
+        this.previewClientId = clientId;
+        this.previewProxySettled = true;
+        this.notify();
+      },
+      (err: unknown) => {
+        console.error("[erdou] preview proxy failed to start", err);
+        this.previewProxySettled = true;
+        this.notify();
+      },
+    );
     // The run-history load is guarded like the restore below it: use-studio.ts
     // fires boot() and DISCARDS the promise (`void singleton.boot()`), and the
     // app installs no unhandledrejection handler and no error boundary — so a
@@ -1852,7 +1894,11 @@ export class Studio {
           // sandboxed preview iframe on code the agent itself served (serving
           // was the gated step); gating would break click→read→logs in Confirm
           // mode. Reversal is one string in agent-core's GATED_TOOLS.
-          ...createPreviewTools(() => this.previewFrame),
+          // The transport getter rides along so a MISSING frame gets the right
+          // diagnosis: "still handshaking, retry" / "no transport, tell the
+          // user" / "nothing served yet, call open_preview" are three different
+          // instructions, and only the last one is open_preview's job.
+          ...createPreviewTools(() => this.previewFrame, () => this.previewTransport),
           // Multi-agent fan-out (spike 4): ONE batch delegate call runs 1..3
           // sub-agents concurrently in throwaway browser-kernel sandboxes seeded
           // from a snapshot of the CURRENT workspace, then merges their diffs

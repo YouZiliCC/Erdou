@@ -7,7 +7,7 @@ import { PreviewCookieJar } from "./preview-cookies.js";
  * The preview reverse-proxy bridge (page side).
  *
  * The preview Service Worker (`public/preview-sw.js`) intercepts an iframe's
- * requests under `/__preview__/<port>/…`, marshals each to a plain
+ * requests under `/__preview__/<owner>/<port>/…`, marshals each to a plain
  * `{method,url,headers,body}`, and posts it to this page over a per-request
  * `MessageChannel`. Here we `dispatch` it into the in-browser runtime and post
  * the `HttpResponse` back down the same channel. The SW turns that into a real
@@ -33,17 +33,48 @@ import { PreviewCookieJar } from "./preview-cookies.js";
  * decline. Live tunnels are torn down when the bridge is re-aimed at a new
  * runtime (kernel switch), so no pump outlives its kernel.
  *
+ * OWNERSHIP. One Service Worker instance serves EVERY tab of the origin, so
+ * "which page do I dispatch into" is a real question with a wrong answer: the
+ * worker used to pick the first window client that was not itself a preview
+ * iframe — a focus-ordered guess, with no relation to the tab that issued the
+ * request. Two Studio tabs on two projects both serving 8080 meant tab B's
+ * preview could render tab A's files, silently. So a preview URL now NAMES its
+ * owner: `/__preview__/<owner>/<port>/…`, where `<owner>` is the owning Studio
+ * page's own Service Worker Client id — which the page learns at boot by asking
+ * the worker (`erdou:whoami`; a page cannot read its own client id any other
+ * way) and which the worker resolves back to that exact client. There is no
+ * candidate-picking code path left, and a miss (owner tab closed, or reloaded —
+ * a reload mints a NEW client id) is a precise 503, never a hand-off.
+ *
  * `fetchToHttpRequest` / `httpResponseToResponse` are the pure marshalling
  * helpers (unit-tested here). The SW mirrors the same marshalling inline
  * because it is served as static JS and cannot import this module; the two must
- * stay in sync.
+ * stay in sync — `preview-sw-parity.test.ts` runs one shared case table against
+ * both copies of the routing core so the duplication cannot drift unnoticed.
  */
 
-/** The path-prefix that marks a previewed iframe; an app on port N is viewed at
- *  `/__preview__/<N>/…`. The SW itself registers at ROOT `/` (see
- *  `startPreviewProxy`) so it can also intercept a guest's ABSOLUTE-path
- *  resources, which resolve against the app origin and escape this prefix. */
+/** The path-prefix that marks a previewed iframe; an app on port N owned by
+ *  Studio page `<owner>` is viewed at `/__preview__/<owner>/<N>/…`. The SW
+ *  itself registers at ROOT `/` (see `startPreviewProxy`) so it can also
+ *  intercept a guest's ABSOLUTE-path resources, which resolve against the app
+ *  origin and escape this prefix. */
 export const PREVIEW_SCOPE = "/__preview__/";
+
+/** What an owner segment may contain. A Client id is a UUID in every browser
+ *  that ships one, but the spec only promises an opaque string — so the boot
+ *  handshake VALIDATES rather than percent-encodes it: an exotic id fails loudly
+ *  once, instead of being encoded and decoded through three separate parsers
+ *  (SW, bridge, WS shim) that would each have to agree.
+ *
+ *  The `(?=.*[^.])` lookahead rejects an id made of NOTHING but dots. `.` and
+ *  `..` are path segments the URL parser REMOVES before a request is ever made:
+ *  `previewUrl("..", 8080)` = `/__preview__/../8080/`, which the browser
+ *  normalizes to `/8080/` — an out-of-scope URL that reaches the SW with the
+ *  STUDIO page as its context, routes to null, and is `fetch()`ed, so the SPA
+ *  server answers with Studio's own index.html rendered inside the preview
+ *  iframe. Silent wrong content is the exact class the owner segment exists to
+ *  remove, so such an id must fail at the handshake, loudly, not in the frame. */
+const OWNER_TOKEN = /^(?=.*[^.])[A-Za-z0-9._~-]{1,128}$/;
 
 const BODYLESS_METHODS = new Set(["GET", "HEAD"]);
 // Statuses whose `Response` must have a null body — passing any body (even an
@@ -53,12 +84,32 @@ const NULL_BODY_STATUS = new Set([101, 204, 205, 304]);
 // The nested segment that lets a previewed app reach a SIBLING port instead of
 // its own (the "primary" port it is viewed at).
 const PORT_OVERRIDE = /^\/__port__\/(\d+)(\/.*)?$/;
-// A preview-scope path: `/__preview__/<primary>/…`. Group 1 is the primary port.
-const PREVIEW_PATH = /^\/__preview__\/([^/]+)(\/.*)?$/;
+// A preview-scope path: `/__preview__/<owner>/<primary>/…`.
+// 1 = owner (the owning Studio page's SW client id), 2 = primary port, 3 = rest.
+const PREVIEW_PATH = /^\/__preview__\/([^/]+)\/(\d+)(\/.*)?$/;
+// An ALL-DIGIT owner segment is refused. The pre-owner two-segment shape
+// (`/__preview__/8080/…`, from a stale bookmark or a popup left open across this
+// upgrade) is otherwise indistinguishable from an owner named "8080": the `\d+`
+// port group alone does NOT reject it — `/__preview__/8080/2024/report` parses
+// happily as owner="8080", primary=2024, so the stale URL skips the SW's 400
+// branch and the user is told a tab was closed/reloaded (503) for what is a
+// stale SHAPE. Client ids are UUIDs in every shipping browser, but OWNER_TOKEN
+// deliberately accepts all-digit ids, so this code does not assume otherwise.
+const LEGACY_OWNER = /^\d+$/;
 
 // Apply the `/__port__/<n>/` sibling-override to a guest path (a `/`-rooted path
 // already stripped of the preview scope, or a guest's own absolute path). An
 // empty path normalizes to `/`; an explicit override redirects to port `<n>`.
+//
+// The scheme: an app is viewed at `/__preview__/<owner>/<primary>/…` and routes
+// to `primary` by default — a relative `fetch('api')` resolves to
+// `/__preview__/<owner>/8080/api`, i.e. it inherits BOTH segments for free,
+// which is why identity lives in the path. To reach a SIBLING server the app
+// prefixes its path with `/__port__/<n>/…` right after the scope:
+// `fetch('__port__/8000/api')` resolves to
+// `/__preview__/<owner>/8080/__port__/8000/api`; that segment is stripped here
+// and overrides the target PORT — never the owner, which stays whatever the
+// URL's own scope (or the escape's context) said.
 function applyOverride(guestPath: string, primary: number): { port: number; rest: string } {
   const rest = guestPath === "" ? "/" : guestPath;
   const override = PORT_OVERRIDE.exec(rest);
@@ -69,77 +120,100 @@ function applyOverride(guestPath: string, primary: number): { port: number; rest
   return { port: primary, rest };
 }
 
-// Parse the primary port from a `/__preview__/<primary>/…` pathname, or null
-// when the pathname is not a well-formed preview-scope path.
-function previewPrimary(pathname: string): number | null {
-  const match = PREVIEW_PATH.exec(pathname);
-  if (!match) return null;
-  const primary = Number(match[1]);
-  return Number.isInteger(primary) ? primary : null;
+/** A parsed preview-scope path. `rest` is the raw remainder — NOT yet through
+ *  `applyOverride`, so `primary` is the port the guest is VIEWED at (what an
+ *  escaped absolute path must be attributed to) and a `/__port__/<n>/` prefix is
+ *  still sitting in `rest` for the router to strip. */
+export interface PreviewPath {
+  /** The owning Studio page's Service Worker Client id. */
+  owner: string;
+  /** The port the guest is viewed at, before any sibling-port override. */
+  primary: number;
+  /** The remainder after `/__preview__/<owner>/<primary>` — `""` for a bare
+   *  scope URL, which `applyOverride` normalizes to `/`. */
+  rest: string;
 }
 
 /**
- * Resolve which port an intercepted IN-SCOPE preview request routes to, and the
- * (query-less) path to forward.
- *
- * Scheme: an app is viewed at `/__preview__/<primary>/…`; `primary` is parsed
- * from that scope by the caller (the SW) and passed in here. A request under
- * the scope routes to `primary` by default — e.g. a relative `fetch('api')`
- * from the app resolves to `/__preview__/8080/api`, routing to 8080. To reach
- * a SIBLING server, the app prefixes its request path with `/__port__/<n>/…`
- * right after the scope: `fetch('__port__/8000/api')` resolves (relative to
- * the app's own scope directory) to `/__preview__/8080/__port__/8000/api`;
- * that segment is stripped and overrides the target port. `pathname` is
- * `url.pathname` (no query string — the caller appends `url.search` to
- * `rest` itself); `rest` always starts with `/` (an empty remainder
- * normalizes to `/`).
+ * Parse `/__preview__/<owner>/<primary>/…`, or null when the pathname is not a
+ * well-formed preview-scope path (including every pre-owner two-segment URL —
+ * see `PREVIEW_PATH` and `LEGACY_OWNER`, which together reject that shape even
+ * when the stale guest path starts with a numeric segment). Null under the
+ * `/__preview__/` prefix is NOT a licence to guess: the SW answers such a
+ * request with an explicit 400.
  *
  * PURE. The SW (`public/preview-sw.js`) duplicates this verbatim — it cannot
- * import TS. Keep the two in sync.
+ * import TS. Keep the two in sync (`preview-sw-parity.test.ts` enforces it).
  */
-export function resolvePort(pathname: string, primary: number): { port: number; rest: string } {
-  const afterScope = pathname.slice(PREVIEW_SCOPE.length + String(primary).length);
-  return applyOverride(afterScope, primary);
+export function parsePreviewPath(pathname: string): PreviewPath | null {
+  const match = PREVIEW_PATH.exec(pathname);
+  if (!match) return null;
+  const owner = match[1];
+  const primary = match[2];
+  if (owner === undefined || primary === undefined) return null;
+  if (LEGACY_OWNER.test(owner)) return null;
+  return { owner, primary: Number(primary), rest: match[3] ?? "" };
+}
+
+/**
+ * Build a preview URL. The ONE place the shape is constructed — the panel's
+ * iframe `src` and its ↗ `window.open` both come through here, so the two
+ * cannot drift from each other or from `parsePreviewPath`.
+ *
+ * `owner` must be this page's own client id (`getPreviewClientId()`); a URL
+ * naming any other page routes to that page, which is the entire point.
+ */
+export function previewUrl(owner: string, port: number): string {
+  return `${PREVIEW_SCOPE}${owner}/${port}/`;
 }
 
 /**
  * Decide whether an intercepted request belongs to a previewed guest and, if so,
- * which guest `port` and `guestPath` to forward it to. Returns `null` for a
- * PASSTHROUGH — a request the SW must NOT touch (the Studio app's own traffic).
- * This is the single gate that makes root-scoped interception safe: only the two
- * cases below are proxied; every other request is left to the browser untouched.
+ * which Studio page (`owner`), guest `port` and `guestPath` to forward it to.
+ * Returns `null` for a PASSTHROUGH — a request the SW must NOT touch (the Studio
+ * app's own traffic). This is the single gate that makes root-scoped
+ * interception safe: only the two cases below are proxied; every other request
+ * is left to the browser untouched.
  *
- *  1. In-scope — the request URL is itself under `/__preview__/<primary>/…` (the
- *     iframe's main document, or a RELATIVE subresource that resolved under the
- *     scope). Routed from the URL by `resolvePort`; `previewContextUrl` is ignored.
+ *  1. In-scope — the request URL is itself under `/__preview__/<owner>/<primary>/…`
+ *     (the iframe's main document, or a RELATIVE subresource that resolved under
+ *     the scope). Routed from the URL alone; `previewContextUrl` is ignored.
+ *     This is why the owner rides in the PATH: a relative subresource inherits
+ *     it for free, and the iframe's own navigation — which reaches the SW with
+ *     an EMPTY `clientId`, so nothing else identifies its opener — carries it too.
  *  2. Absolute-path escape — the request URL is OUT of scope (e.g. `/style.css`
  *     from `<link href="/style.css">`), but the `previewContextUrl` is a
  *     SAME-ORIGIN preview iframe. The browser resolved the guest's absolute path
- *     against the app origin, escaping the scope; we recover `primary` from the
- *     context and forward the request's own absolute pathname to that guest.
+ *     against the app origin, escaping the scope; we recover `owner` + `primary`
+ *     from the context and forward the request's own absolute pathname there.
  *
  * `previewContextUrl` is the URL that identifies WHICH guest an out-of-scope
  * request escaped from. The SW sources it from the INITIATING CLIENT's document
  * URL (`client.url`, robust to the guest's Referrer-Policy) and falls back to the
  * request REFERRER when the client is unavailable — i.e. `client.url ?? referrer`.
- * Either way it must be a path-bearing, same-origin `/__preview__/<port>/…` URL;
- * the same-origin check means a foreign page can never steer interception.
+ * Either way it must be a path-bearing, same-origin `/__preview__/<owner>/<port>/…`
+ * URL; the same-origin check means a foreign page can never steer interception.
+ * The escape is attributed to the context's `primary` port — the port the guest
+ * is VIEWED at — never to a port the context itself had overridden.
  *
  * Either case honors a `/__port__/<n>/` sibling-override in the resolved path.
+ * The override moves the PORT only: `owner` always comes from the request's own
+ * scope or from the context, so a sibling-port request can never cross into
+ * another Studio page's runtime.
  * `guestPath` carries no query string — the caller appends `url.search`.
  *
  * PURE. The SW (`public/preview-sw.js`) duplicates this verbatim — it cannot
- * import TS. Keep the two in sync.
+ * import TS. Keep the two in sync (`preview-sw-parity.test.ts` enforces it).
  */
 export function routePreviewRequest(
   requestUrl: string,
   previewContextUrl: string,
-): { port: number; guestPath: string } | null {
+): { owner: string; port: number; guestPath: string } | null {
   const req = new URL(requestUrl);
-  const scopePrimary = previewPrimary(req.pathname);
-  if (scopePrimary !== null) {
-    const { port, rest } = resolvePort(req.pathname, scopePrimary);
-    return { port, guestPath: rest };
+  const inScope = parsePreviewPath(req.pathname);
+  if (inScope) {
+    const { port, rest } = applyOverride(inScope.rest, inScope.primary);
+    return { owner: inScope.owner, port, guestPath: rest };
   }
   if (!previewContextUrl) return null;
   let ctx: URL;
@@ -149,15 +223,16 @@ export function routePreviewRequest(
     return null;
   }
   if (ctx.origin !== req.origin) return null;
-  const ctxPrimary = previewPrimary(ctx.pathname);
-  if (ctxPrimary === null) return null;
-  const { port, rest } = applyOverride(req.pathname, ctxPrimary);
-  return { port, guestPath: rest };
+  const owner = parsePreviewPath(ctx.pathname);
+  if (!owner) return null;
+  const { port, rest } = applyOverride(req.pathname, owner.primary);
+  return { owner: owner.owner, port, guestPath: rest };
 }
 
 /** Marshal an intercepted `Request` into a runtime `HttpRequest`.
- *  `urlRest` is the path+query already stripped of the `/__preview__/<port>`
- *  scope (e.g. `/api?q=1`). GET/HEAD carry no body. */
+ *  `urlRest` is the path+query already stripped of the
+ *  `/__preview__/<owner>/<port>` scope (e.g. `/api?q=1`). GET/HEAD carry no
+ *  body. */
 export async function fetchToHttpRequest(request: Request, urlRest: string): Promise<HttpRequest> {
   const headers: Record<string, string> = {};
   request.headers.forEach((value, key) => {
@@ -177,14 +252,18 @@ export function httpResponseToResponse(res: HttpResponse): Response {
 
 /** The SW → page request envelope (also declared inline in the SW). `dest` is
  *  the intercepted `Request.destination` — the injection policy's document
- *  gate (see preview-inject.ts). Optional: a not-yet-updated SW omits it, and
- *  the bridge then injects nothing (fail-safe for version skew). */
+ *  gate (see preview-inject.ts). `owner` is the client id the preview URL named,
+ *  echoed back so the receiving page can verify the request was addressed to IT.
+ *  Both optional: a not-yet-updated SW omits them, and the bridge then injects
+ *  nothing / enforces nothing (fail-safe for version skew — and a pre-owner SW
+ *  cannot have misrouted by owner, since its URLs carry no owner at all). */
 interface ProxyRequestMessage {
   type: "erdou:req";
   id: number;
   port: number;
   req: HttpRequest;
   dest?: string;
+  owner?: string;
 }
 
 function isProxyRequest(data: unknown): data is ProxyRequestMessage {
@@ -279,16 +358,122 @@ export function installPreviewBridge(runtime: DispatchRuntime): void {
   });
 }
 
-/** Wait until the registration has an active worker (Round-7 pattern):
- *  `navigator.serviceWorker.ready` never resolves for our out-of-page scope. */
-function activeWorker(reg: ServiceWorkerRegistration): Promise<ServiceWorker | null> {
-  if (reg.active) return Promise.resolve(reg.active);
-  const sw = reg.installing ?? reg.waiting;
-  if (!sw) return Promise.resolve(null);
+/** Bound the boot-time `erdou:whoami` round trip. A worker that never answers
+ *  must not leave `boot()` waiting on a promise forever — the panel says
+ *  "preview transport unavailable" instead. */
+const WHOAMI_TIMEOUT_MS = 5000;
+
+/** This page's own Service Worker Client id, learned once at boot. `null` until
+ *  the handshake completes, and permanently null if it fails — there is no
+ *  fallback owner, because inventing one is exactly the guess this scheme
+ *  removes. */
+let previewClientId: string | null = null;
+
+/** This page's preview owner id (see `previewUrl`), or null when the boot
+ *  handshake has not completed / failed. Read by PreviewPanel to build the
+ *  iframe `src` and the ↗ popup URL, and by `answer()` to verify that an
+ *  arriving request was addressed to this page. */
+export function getPreviewClientId(): string | null {
+  return previewClientId;
+}
+
+/**
+ * Ask the worker for this page's Service Worker Client id and REMEMBER it: this
+ * is the single writer of `previewClientId`, which `getPreviewClientId()` serves
+ * to PreviewPanel (iframe `src`, ↗ popup) and which `answer()` defaults its
+ * cross-tab guard to. Exported so tests drive the real wiring — the guard's
+ * default is the only thing production ever passes, so a test that supplies its
+ * own `expectedOwner` proves nothing about it.
+ *
+ * A page cannot read its own client id: no DOM API exposes it. The worker can —
+ * `event.source.id` on a message from this page IS it — so we ask, once, over a
+ * dedicated `MessageChannel` (same isolation discipline as `exchange()` in the
+ * SW). We post to the registration's ACTIVE worker rather than
+ * `navigator.serviceWorker.controller`: on a first-ever load this page is not
+ * controlled until `clients.claim()` lands, and the answer does not depend on
+ * control — but every preview URL we build does depend on having the answer.
+ *
+ * Stores and returns null (loudly) rather than guessing: a timeout, a worker
+ * that replies with nothing, or an id outside `OWNER_TOKEN` (which would not
+ * survive being put in a path and re-parsed by the SW, the bridge and the WS
+ * shim). Null is terminal for this document — there is no fallback owner.
+ */
+export async function learnPreviewClientId(worker: ServiceWorker): Promise<string | null> {
+  previewClientId = await askClientId(worker);
+  return previewClientId;
+}
+
+async function askClientId(worker: ServiceWorker): Promise<string | null> {
+  const reply = await new Promise<unknown>((resolve) => {
+    const channel = new MessageChannel();
+    const timer = setTimeout(() => {
+      channel.port1.close();
+      resolve(null);
+    }, WHOAMI_TIMEOUT_MS);
+    channel.port1.onmessage = (event: MessageEvent) => {
+      clearTimeout(timer);
+      channel.port1.close();
+      resolve(event.data);
+    };
+    worker.postMessage({ type: "erdou:whoami" }, [channel.port2]);
+  });
+  if (reply === null) {
+    console.error(
+      `[erdou] preview: the Service Worker did not answer erdou:whoami within ${WHOAMI_TIMEOUT_MS}ms` +
+        " — this tab has no preview identity, so no preview can be addressed back to it. Reload the page.",
+    );
+    return null;
+  }
+  const id = (reply as { clientId?: unknown }).clientId;
+  if (typeof id !== "string" || !OWNER_TOKEN.test(id)) {
+    console.error(
+      "[erdou] preview: the Service Worker reported an unusable client id for this page" +
+        ` (${JSON.stringify(id)}) — previews cannot be addressed to this tab and will not be shown.`,
+    );
+    return null;
+  }
+  return id;
+}
+
+/**
+ * The worker that will actually serve this page's previews (Round-7 pattern:
+ * `navigator.serviceWorker.ready` never resolves for our out-of-page scope).
+ * Exported for unit tests: it is pure over the registration object, and the
+ * choice it makes decides whether this tab gets a preview identity at all.
+ *
+ * An UPDATE in flight wins over `reg.active`: on the first load after a deploy
+ * `reg.active` is still the OUTGOING worker while the new one installs, and the
+ * outgoing one predates `erdou:whoami` — asking it would time out and leave this
+ * tab with no preview identity until a manual reload. The new worker calls
+ * `skipWaiting()` on install and `clients.claim()` on activate, so waiting for
+ * it is bounded in practice; bounded here too, so a worker that never activates
+ * reports itself instead of hanging boot's fire-and-forget promise forever.
+ *
+ * That preference holds only while the update is ALIVE. A worker whose install
+ * failed (bad deploy, parse error, fetch failure) goes `redundant` and will
+ * never reach `activated`, so waiting the timer out would discard `reg.active`
+ * and return null — "Preview transport unavailable" for the WHOLE session, after
+ * a gratuitous 5s boot stall, on a page that an older-but-working worker is
+ * controlling right now. Resolving `reg.active` there is not a guess: it is the
+ * worker that actually controls this page. (If it predates `erdou:whoami` the
+ * handshake still fails — but loudly, in `askClientId`, naming that.)
+ */
+export function activeWorker(reg: ServiceWorkerRegistration): Promise<ServiceWorker | null> {
+  const updating = reg.installing ?? reg.waiting;
+  if (!updating) return Promise.resolve(reg.active);
   return new Promise((resolve) => {
-    if (sw.state === "activated") return resolve(sw);
-    sw.addEventListener("statechange", () => {
-      if (sw.state === "activated") resolve(sw);
+    if (updating.state === "activated") return resolve(updating);
+    if (updating.state === "redundant") return resolve(reg.active);
+    const timer = setTimeout(() => resolve(null), WHOAMI_TIMEOUT_MS);
+    updating.addEventListener("statechange", () => {
+      if (updating.state === "activated") {
+        clearTimeout(timer);
+        resolve(updating);
+        return;
+      }
+      if (updating.state !== "redundant") return;
+      clearTimeout(timer);
+      resolve(reg.active);
     });
   });
 }
@@ -301,21 +486,33 @@ function activeWorker(reg: ServiceWorkerRegistration): Promise<ServiceWorker | n
  * keeps this safe: app-origin traffic that is neither in-scope nor referred by a
  * preview iframe passes straight through untouched. Guarded so a no-SW
  * environment just logs and skips (the app still runs, sans preview).
+ *
+ * Returns this page's OWNER id — the client id every preview URL it builds must
+ * name (see `previewUrl`) — or null when there is no worker to serve previews
+ * or the `erdou:whoami` handshake failed. Null is terminal for this document:
+ * the panel reports it instead of mounting an iframe that could only ever be
+ * served by guessing which tab owns it.
  */
-export async function startPreviewProxy(runtime: DispatchRuntime): Promise<void> {
+export async function startPreviewProxy(runtime: DispatchRuntime): Promise<string | null> {
   // Register the message listener before the SW activates, so no early proxied
   // request is dropped.
   installPreviewBridge(runtime);
   if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) {
     console.info("[erdou] preview proxy disabled: no Service Worker support");
-    return;
+    return null;
   }
   try {
     await unregisterStalePreviewWorkers();
     const reg = await navigator.serviceWorker.register("/preview-sw.js", { scope: "/" });
-    await activeWorker(reg);
+    const worker = await activeWorker(reg);
+    if (!worker) {
+      console.error("[erdou] preview: the Service Worker never activated — previews are unavailable.");
+      return null;
+    }
+    return await learnPreviewClientId(worker);
   } catch (err) {
     console.warn("[erdou] preview SW registration failed", err);
+    return null;
   }
 }
 
@@ -360,12 +557,28 @@ export interface ProxyReplyPort {
  * `injectPreviewScripts` first, which injects the console/error hook and the
  * WebSocket shim into HTML (preview-inject.ts — streams and non-HTML pass
  * through unchanged).
+ *
+ * `expectedOwner` is this page's own client id: a request whose envelope names a
+ * DIFFERENT page is refused outright (the SW renders the error as a 502). That
+ * is a second, independent check on the routing this scheme fixes — the page
+ * never selects a target, it only declines one addressed elsewhere.
  */
 export async function answer(
   runtime: DispatchRuntime,
   msg: ProxyRequestMessage,
   replyPort: ProxyReplyPort,
+  expectedOwner: string | null = getPreviewClientId(),
 ): Promise<void> {
+  if (msg.owner !== undefined && expectedOwner !== null && msg.owner !== expectedOwner) {
+    replyPort.postMessage({
+      type: "erdou:res",
+      id: msg.id,
+      error:
+        `preview request was addressed to Erdou tab ${msg.owner} but reached tab ${expectedOwner}` +
+        " — refusing to serve another tab's project (this is the cross-tab misroute the owner segment prevents).",
+    });
+    return;
+  }
   try {
     // Inject the previewed guest's stored cookies for this port + path (the
     // browser can't for an SW-proxied app — see preview-cookies.ts). `Cookie`

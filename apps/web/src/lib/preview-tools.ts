@@ -277,6 +277,36 @@ const DEFAULT_TIMING: PreviewTiming = { pollMs: 150, timeoutMs: 5000 };
 
 export const NO_PREVIEW_MESSAGE = "No preview is open — serve your app and call open_preview first.";
 
+/** The page's preview transport, as the panel sees it: `pending` while the boot
+ *  `erdou:whoami` handshake is still in flight (it waits for the Service Worker
+ *  to ACTIVATE and then for its reply — seconds on a first load or the first
+ *  load after a deploy), `failed` once that settled with no owner id, `ready`
+ *  once this page can address previews to itself. Only consulted when NO frame
+ *  is mounted: a mounted frame already proves `ready`. */
+export type PreviewTransport = "pending" | "ready" | "failed";
+
+/** No frame yet + a transport still settling. Distinct from NO_PREVIEW_MESSAGE
+ *  because the correct action is the opposite: nothing is wrong, so RETRY —
+ *  calling open_preview again changes nothing (the request is already recorded;
+ *  the panel mounts the frame the instant the handshake lands). Without this the
+ *  agent is told to "call open_preview first" during a window where open_preview
+ *  is exactly the call that cannot help, and it loops. */
+export const PREVIEW_TRANSPORT_PENDING_MESSAGE =
+  "The preview transport is still starting: this Studio page has not finished the Service Worker handshake " +
+  "that gives it a preview identity, so no preview frame is mounted yet. Wait a second and retry THIS tool — " +
+  "open_preview will not speed it up (an already-requested port mounts as soon as the handshake lands).";
+
+/** No frame + a transport that settled empty. Terminal for this document: no
+ *  preview URL can name this page, so every open_preview is a no-op. Says so,
+ *  and names the one action that fixes it — a reload, which only the user can
+ *  do — because the precise cause is in the browser console, which the agent
+ *  cannot read. */
+export const PREVIEW_TRANSPORT_FAILED_MESSAGE =
+  "The preview transport is unavailable in this Studio page: the Service Worker never gave it a preview " +
+  "identity, so no preview request can be routed back to this tab and no preview frame will ever mount. " +
+  "open_preview cannot fix this — stop retrying it and tell the user to reload the Erdou page (the browser " +
+  "console names the exact handshake failure).";
+
 // Output caps (spike-designed): a DOM dump must never flood the transcript —
 // the failure mode is "narrow with a selector", stated in the output itself.
 const SNAPSHOT_TEXT_CAP = 4000; // no-selector body text
@@ -307,9 +337,11 @@ function computedSummary(win: PreviewWindowLike | null, el: PreviewElementLike):
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-/** Parse the inspected port from the frame's src (`…/__preview__/<port>/…`). */
+/** Parse the inspected port from the frame's src
+ *  (`…/__preview__/<owner>/<port>/…` — the owner segment names the Studio page
+ *  that serves the preview; only the port is reported to the agent). */
 export function previewFramePort(src: string): number | null {
-  const m = /\/__preview__\/(\d+)\//.exec(src);
+  const m = /\/__preview__\/[^/]+\/(\d+)\//.exec(src);
   const port = m?.[1];
   return port !== undefined ? Number(port) : null;
 }
@@ -324,10 +356,25 @@ function portLabel(frame: PreviewFrameLike): string {
  *  the execute() wrappers turn them into `{ok:false}` results. */
 async function resolveDoc(
   getFrame: () => PreviewFrameLike | null,
+  getTransport: () => PreviewTransport,
   timing: PreviewTiming,
 ): Promise<{ frame: PreviewFrameLike; doc: PreviewDocumentLike }> {
   const frame = getFrame();
-  if (!frame) throw new Error(NO_PREVIEW_MESSAGE);
+  if (!frame) {
+    // "No frame" has three causes with three OPPOSITE actions, and the agent
+    // can only see the one we name here (the transport's real failure is in the
+    // browser console). Reporting the plain no-preview message for all three
+    // told the agent to call open_preview during the very windows where
+    // open_preview cannot mount anything — an infinite retry loop.
+    const transport = getTransport();
+    throw new Error(
+      transport === "pending"
+        ? PREVIEW_TRANSPORT_PENDING_MESSAGE
+        : transport === "failed"
+          ? PREVIEW_TRANSPORT_FAILED_MESSAGE
+          : NO_PREVIEW_MESSAGE,
+    );
+  }
   const deadline = Date.now() + timing.timeoutMs;
   for (;;) {
     // Re-read contentDocument every turn: a navigation swaps the document.
@@ -407,6 +454,11 @@ function fail(output: string): ToolResult {
  */
 export function createPreviewTools(
   getFrame: () => PreviewFrameLike | null,
+  // Required, not defaulted: when no frame is mounted the transport is the ONLY
+  // thing that says whether the agent should retry, stop, or serve something —
+  // a call site that silently defaulted to "ready" would reintroduce the
+  // misleading no-preview message it exists to prevent.
+  getTransport: () => PreviewTransport,
   timing: PreviewTiming = DEFAULT_TIMING,
 ): ToolDef[] {
   const read: ToolDef = {
@@ -430,7 +482,7 @@ export function createPreviewTools(
     },
     execute: async (_ctx, args) => {
       try {
-        const { frame, doc } = await resolveDoc(getFrame, timing);
+        const { frame, doc } = await resolveDoc(getFrame, getTransport, timing);
         const label = portLabel(frame);
         const selector = typeof args.selector === "string" && args.selector.trim() !== "" ? args.selector : null;
         if (selector === null) {
@@ -486,7 +538,7 @@ export function createPreviewTools(
       const selector = typeof args.selector === "string" ? args.selector.trim() : "";
       if (selector === "") return fail("preview_click requires `selector` — the CSS selector of the element to click.");
       try {
-        const { frame, doc } = await resolveDoc(getFrame, timing);
+        const { frame, doc } = await resolveDoc(getFrame, getTransport, timing);
         const label = portLabel(frame);
         const matches = querySelectorAllChecked(doc, selector);
         if (matches.length === 0) {
@@ -501,7 +553,7 @@ export function createPreviewTools(
         // where the document ended up (re-resolved: navigation swaps it).
         await sleep(timing.pollMs);
         try {
-          const after = await resolveDoc(getFrame, timing);
+          const after = await resolveDoc(getFrame, getTransport, timing);
           return {
             ok: true,
             output: `${label} clicked ${JSON.stringify(selector)} — now at ${after.doc.URL} (title: ${JSON.stringify(after.doc.title)})`,
@@ -529,7 +581,7 @@ export function createPreviewTools(
     parameters: { type: "object", properties: {} },
     execute: async () => {
       try {
-        const { frame } = await resolveDoc(getFrame, timing);
+        const { frame } = await resolveDoc(getFrame, getTransport, timing);
         const label = portLabel(frame);
         const win = frame.contentWindow;
         const buffer = win?.__erdouLogs;

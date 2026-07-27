@@ -113,9 +113,11 @@ function makeHandler(fs: FileSystemApi, dir: string, spa: boolean): HttpHandler 
     //
     // The location is RELATIVE (RFC 7231 §7.1.2 allows it), never origin-
     // absolute: the production caller (apps/web/public/preview-sw.js) strips
-    // BOTH `/__preview__/<primary>` and `/__port__/<n>` before dispatch, so this
-    // handler never sees the scope it has to stay inside — an absolute `/docs/`
-    // would resolve against the Studio origin and leave the preview entirely.
+    // BOTH `/__preview__/<owner>/<primary>` and `/__port__/<n>` before dispatch,
+    // so this handler never sees the scope it has to stay inside — an absolute
+    // `/docs/` would resolve against the Studio origin and leave the preview
+    // entirely (and could not be rebuilt here: the `<owner>` segment names the
+    // Studio page that owns the preview and is unknown to the runtime).
     // A relative reference resolves against the URL the browser actually
     // requested, so it lands correctly under any scope (including a direct
     // `/__port__/<n>/…` dispatch, which bypasses the SW). The leading `./`

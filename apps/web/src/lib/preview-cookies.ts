@@ -13,8 +13,8 @@
  * no cross-app cookie leakage, and no interference with the Studio app's own
  * origin cookies, which the SW never sees anyway). Cookie paths are matched
  * against the GUEST path (the request URL the runtime sees, already stripped of
- * the `/__preview__/<port>/` scope). In-memory for the session — a page reload
- * restarts the preview and its servers, so the jar starts fresh with them.
+ * the `/__preview__/<owner>/<port>/` scope). In-memory for the session — a page
+ * reload restarts the preview and its servers, so the jar starts fresh with them.
  *
  * Supported (RFC 6265, the parts a real app relies on): name=value, Path (with
  * the default-path rule), Expires + Max-Age (Max-Age wins), deletion via an

@@ -240,4 +240,36 @@ describe("WS_SHIM_SOURCE", () => {
     expect(win.WebSocket).not.toBe(FakeNativeWS);
     expect((win.WebSocket as { __erdouShim?: boolean }).__erdouShim).toBe(true);
   });
+
+  it("parses the PORT out of a preview-scoped location (past the owner segment) and tunnels to it", () => {
+    // The only automated guard on the shim's inlined SCOPE regex. It must skip
+    // the `/__preview__/<owner>/` segment and still read the primary port — get
+    // that wrong and every guest WebSocket silently falls through to the native
+    // one (a visible failure in the guest, but nothing else here would catch it).
+    const posted: { msg: Record<string, unknown>; origin: string }[] = [];
+    const top = { postMessage: (msg: unknown, origin: string) => posted.push({ msg: msg as Record<string, unknown>, origin }) };
+    const win: Record<string, unknown> = { WebSocket: class {}, top: undefined, MessageChannel };
+    win.top = top;
+    const location = {
+      pathname: "/__preview__/9f1c2d3e-aaaa-4bbb-8ccc-000000000001/8080/",
+      href: "http://x/__preview__/9f1c2d3e-aaaa-4bbb-8ccc-000000000001/8080/",
+      origin: "http://x",
+      host: "x",
+    };
+    const run = new Function(
+      "window", "location", "URL", "MessageChannel",
+      `const self=window; ${WS_SHIM_SOURCE}; return window.WebSocket;`,
+    ) as (w: unknown, l: unknown, u: unknown, m: unknown) => new (url: string) => unknown;
+    const Shim = run(win, location, URL, MessageChannel);
+    new Shim("ws://x/socket");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]!.origin).toBe("http://x");
+    expect(posted[0]!.msg.type).toBe("erdou:ws-open");
+    expect(posted[0]!.msg.port).toBe(8080);
+    expect(posted[0]!.msg.path).toBe("/socket");
+    // A /__port__/<n>/ target still overrides the port, past the owner segment.
+    new Shim("ws://x/__port__/8000/live");
+    expect(posted[1]!.msg.port).toBe(8000);
+    expect(posted[1]!.msg.path).toBe("/live");
+  });
 });

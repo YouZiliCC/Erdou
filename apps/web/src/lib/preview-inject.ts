@@ -168,6 +168,13 @@ export const PREVIEW_HOOK_SOURCE = `(() => {
  * embedding Studio window (the ↗ open-in-new-tab view) — fall through to the
  * NATIVE WebSocket, which fails visibly rather than hanging.
  *
+ * The tunnel needs no owner id even though preview URLs carry one
+ * (`/__preview__/<owner>/<port>/…`): it posts to `window.top`, a direct handle
+ * to the embedding Studio page, so it is per-tab-correct by construction and
+ * never had the cross-tab misroute the HTTP path did. The shim's `SCOPE` regex
+ * therefore just SKIPS the owner segment (`[^/]+`, deliberately not a capture
+ * group, so `scope[1]`/`sc[1]`/`sc[2]` keep meaning port/rest below).
+ *
  * Message protocol (append-only — a compatibility surface with the injected
  * shim, same discipline as the SW's `erdou:req` envelope):
  *   page → shim  {type:"open", protocol} | {type:"frame", data} |
@@ -179,7 +186,7 @@ export const WS_SHIM_SOURCE = `(() => {
   if (window.__erdouWsShim) return;
   window.__erdouWsShim = true;
   const NativeWS = window.WebSocket;
-  const SCOPE = /^\\/__preview__\\/(\\d+)(\\/.*)?$/;
+  const SCOPE = /^\\/__preview__\\/[^/]+\\/(\\d+)(\\/.*)?$/;
   const OVERRIDE = /^\\/__port__\\/(\\d+)(\\/.*)?$/;
   const scope = SCOPE.exec(location.pathname);
   const primary = scope ? Number(scope[1]) : null;

@@ -4,6 +4,7 @@ import type { ToolContext } from "@erdou/agent-tools";
 import {
   isWsOpenMessage, wsUpgradeRequest, openWsTunnel, WS_UNSUPPORTED_MESSAGE,
   createPreviewTools, previewFramePort, NO_PREVIEW_MESSAGE,
+  PREVIEW_TRANSPORT_PENDING_MESSAGE, PREVIEW_TRANSPORT_FAILED_MESSAGE, type PreviewTransport,
   type WsOpenMessage, type TunnelPort,
   type PreviewFrameLike, type PreviewDocumentLike, type PreviewElementLike, type PreviewLogBuffer,
 } from "./preview-tools.js";
@@ -267,7 +268,7 @@ function fakeDoc(opts: FakeDocOpts = {}): PreviewDocumentLike {
   return {
     readyState: opts.readyState ?? "complete",
     title: opts.title ?? "Fake Page",
-    URL: opts.url ?? "http://localhost/__preview__/8080/",
+    URL: opts.url ?? "http://localhost/__preview__/tab-9f1c2d3e/8080/",
     body,
     querySelectorAll: (sel: string) => {
       const m = opts.matches?.[sel];
@@ -284,7 +285,7 @@ function fakeFrame(
 ): PreviewFrameLike & { swap: (d: PreviewDocumentLike) => void } {
   let current = doc;
   return {
-    src: "/__preview__/8080/",
+    src: "/__preview__/tab-9f1c2d3e/8080/",
     get contentDocument() {
       return current;
     },
@@ -306,7 +307,7 @@ function styledEl(outerHTML: string, computed: Record<string, string>): StyledEl
  *  `_computed` map (what a real Window does over real Elements). */
 function styledFrame(doc: PreviewDocumentLike): PreviewFrameLike {
   return {
-    src: "/__preview__/8080/",
+    src: "/__preview__/tab-9f1c2d3e/8080/",
     get contentDocument() {
       return doc;
     },
@@ -328,8 +329,10 @@ function styledFrame(doc: PreviewDocumentLike): PreviewFrameLike {
 const domFrameIsPreviewFrame: (el: HTMLIFrameElement | null) => PreviewFrameLike | null = (el) => el;
 void domFrameIsPreviewFrame;
 
-function tools(getFrame: () => PreviewFrameLike | null) {
-  const byName = new Map(createPreviewTools(getFrame, FAST).map((t) => [t.name, t]));
+// A frame is only ever mounted once the transport is READY, so that is the
+// default here; the no-frame tests pass the other two explicitly.
+function tools(getFrame: () => PreviewFrameLike | null, transport: PreviewTransport = "ready") {
+  const byName = new Map(createPreviewTools(getFrame, () => transport, FAST).map((t) => [t.name, t]));
   return {
     read: (args: Record<string, unknown> = {}) => byName.get("preview_read")!.execute(CTX, args),
     click: (args: Record<string, unknown> = {}) => byName.get("preview_click")!.execute(CTX, args),
@@ -339,18 +342,50 @@ function tools(getFrame: () => PreviewFrameLike | null) {
 
 describe("previewFramePort", () => {
   it("parses the port from relative and absolute preview srcs", () => {
-    expect(previewFramePort("/__preview__/8080/")).toBe(8080);
-    expect(previewFramePort("http://localhost:5173/__preview__/3000/index.html")).toBe(3000);
+    expect(previewFramePort("/__preview__/tab-9f1c2d3e/8080/")).toBe(8080);
+    expect(previewFramePort("http://localhost:5173/__preview__/tab-9f1c2d3e/3000/index.html")).toBe(3000);
     expect(previewFramePort("http://localhost:5173/somewhere/")).toBeNull();
+  });
+
+  it("reports no port for a pre-owner preview src (the shape a stale frame would carry)", () => {
+    // `/__preview__/<port>/` no longer names a port — the first segment is the
+    // OWNER now. Reporting 8080 here would label a dead frame as a live preview.
+    expect(previewFramePort("/__preview__/8080/")).toBeNull();
   });
 });
 
 describe("createPreviewTools", () => {
   it("every tool fails fast with the no-preview message when no frame is mounted", async () => {
-    const t = tools(() => null);
+    const t = tools(() => null, "ready");
     for (const r of [await t.read(), await t.click({ selector: "#x" }), await t.logs()]) {
       expect(r.ok).toBe(false);
       expect(r.output).toBe(NO_PREVIEW_MESSAGE);
+    }
+  });
+
+  // The three no-frame causes need three different agent actions, and the two
+  // transport ones are invisible to the agent otherwise (the real cause is a
+  // console line it cannot read). Answering "call open_preview first" while the
+  // transport is the problem sends it into a retry loop on the one call that
+  // cannot mount anything.
+  it("a still-handshaking transport says RETRY THIS TOOL, not call open_preview", async () => {
+    const t = tools(() => null, "pending");
+    for (const r of [await t.read(), await t.click({ selector: "#x" }), await t.logs()]) {
+      expect(r.ok).toBe(false);
+      expect(r.output).toBe(PREVIEW_TRANSPORT_PENDING_MESSAGE);
+      expect(r.output).not.toBe(NO_PREVIEW_MESSAGE);
+      expect(r.output).toContain("retry");
+    }
+  });
+
+  it("a failed transport says STOP RETRYING and tell the user to reload", async () => {
+    const t = tools(() => null, "failed");
+    for (const r of [await t.read(), await t.click({ selector: "#x" }), await t.logs()]) {
+      expect(r.ok).toBe(false);
+      expect(r.output).toBe(PREVIEW_TRANSPORT_FAILED_MESSAGE);
+      expect(r.output).not.toBe(NO_PREVIEW_MESSAGE);
+      expect(r.output).toContain("open_preview cannot fix this");
+      expect(r.output).toContain("reload");
     }
   });
 
@@ -394,7 +429,7 @@ describe("createPreviewTools", () => {
       const r = await tools(() => fakeFrame(doc)).read();
       expect(r.ok).toBe(true);
       expect(r.output).toBe(
-        "[preview port 8080] http://localhost/__preview__/8080/\ntitle: My App\nbody text: Hello world !",
+        "[preview port 8080] http://localhost/__preview__/tab-9f1c2d3e/8080/\ntitle: My App\nbody text: Hello world !",
       );
       expect(removed).toEqual(["script", "style"]); // the clone's script/style nodes were removed
     });
@@ -482,19 +517,19 @@ describe("createPreviewTools", () => {
       const clicked: string[] = [];
       const doc = fakeDoc({
         title: "After",
-        url: "http://localhost/__preview__/8080/page",
+        url: "http://localhost/__preview__/tab-9f1c2d3e/8080/page",
         matches: { "#btn": [el("<button id=btn>", () => clicked.push("first")), el("<button>", () => clicked.push("second"))] },
       });
       const r = await tools(() => fakeFrame(doc)).click({ selector: "#btn" });
       expect(clicked).toEqual(["first"]); // first match only
       expect(r.ok).toBe(true);
       expect(r.output).toBe(
-        '[preview port 8080] clicked "#btn" — now at http://localhost/__preview__/8080/page (title: "After")',
+        '[preview port 8080] clicked "#btn" — now at http://localhost/__preview__/tab-9f1c2d3e/8080/page (title: "After")',
       );
     });
 
     it("a click that triggers a NAVIGATION waits out the load and reports the new document's URL/title", async () => {
-      const target = fakeDoc({ title: "Page Two", url: "http://localhost/__preview__/8080/two" });
+      const target = fakeDoc({ title: "Page Two", url: "http://localhost/__preview__/tab-9f1c2d3e/8080/two" });
       const loading = fakeDoc({ readyState: "loading" });
       const frame = fakeFrame(
         fakeDoc({
@@ -510,7 +545,7 @@ describe("createPreviewTools", () => {
       );
       const r = await tools(() => frame).click({ selector: "a" });
       expect(r.ok).toBe(true);
-      expect(r.output).toContain("now at http://localhost/__preview__/8080/two");
+      expect(r.output).toContain("now at http://localhost/__preview__/tab-9f1c2d3e/8080/two");
       expect(r.output).toContain('"Page Two"');
     });
 
