@@ -76,6 +76,8 @@ Either way the working directory and environment persist across commands.
 
 The Preview is **agent-primary**: when the agent starts a server or calls its `open_preview` tool, the pane switches to Preview and shows it. Every open port appears as a chip in the **ports bar** — **view** it, open it in a browser tab (↗), or stop it (×). The previewed app may use relative or absolute URLs (both are proxied), and can reach a *sibling* open port via `/__port__/<n>/…`.
 
+A preview URL belongs to the Erdou tab that opened it: it carries that tab's id, so that with two Erdou tabs open each preview is served by its own project rather than by whichever tab the browser happened to pick. The ↗ popup is bound the same way, and it does not follow the tab it came from — if you **close** that Erdou tab, or **reload** it (a reload starts a new runtime and a new id), the popup stops working and says so with "the Erdou tab that owns this preview is gone". Nothing is broken and nothing is lost: re-serve if needed and click ↗ again. Old preview URLs — a bookmark, or a tab left open from before this behaviour existed — answer "unrecognized preview URL" for the same reason.
+
 The agent can also *look inside* the frame, and is instructed to do so after every `open_preview` rather than assume its app works:
 
 - **`preview_read`** — the rendered DOM: the page's title, URL and visible text, or, with a CSS selector, the `outerHTML` of the matches plus their key computed styles (so it can tell "my stylesheet applied" from "a `<style>` tag exists").

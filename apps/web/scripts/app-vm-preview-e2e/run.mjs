@@ -4,7 +4,8 @@
 // `python3 -m http.server --bind 0.0.0.0` from the Preview panel, and asserts
 // the preview iframe (SW reverse-proxy -> VmRuntime.dispatch -> v86 NAT ->
 // guest server -> response) renders the marker. A second scenario then writes
-// a bundle entry (/src/main.ts) via the PTY and clicks Bundle & Run, asserting
+// a bundle entry (/src/main.ts) via the PTY and clicks Run with an empty
+// command field — the panel's bundle path (`isBundleRun`) — asserting
 // the panel constructs a GUEST-runnable serve command (staticServeCommand's
 // python3 http.server on 8080 — the `erdou` builtin does not exist in the
 // guest) and the bundled output renders. Signal-safe cleanup + dev-server
@@ -300,12 +301,17 @@ async function main() {
     // `runtime.exec` (detached) on the VM and settles on the real `port.opened`
     // event the guestd /proc/net/tcp watcher emits once python binds 0.0.0.0.
     await page.locator("button.tab", { hasText: "Preview" }).click();
-    await page.fill(".run-input", `python3 -m http.server ${PORT} --bind 0.0.0.0`);
-    // Scope to the Preview panel's toolbar: `button.btn.primary` alone also
-    // matches the Composer's "Run ⌘⏎" send button. Within `.preview-bar` the
-    // only `.btn.primary` is the Run button (Bundle & Run is `.btn.ghost`
-    // whenever a command is typed).
-    await page.locator(".preview-bar button.btn.primary").click();
+    // `.run-input` alone also matches the port field (`.run-input.port-input`).
+    // The page-level `page.fill(sel)` this used to call is NOT strict — it takes
+    // the FIRST match, so it typed the command into the right box only because
+    // the command input happens to come first in the DOM; reordering the row
+    // would have silently typed a serve command into the port field. A strict
+    // locator names the field instead of trusting that order.
+    await page.locator(".preview-run-row input.run-input:not(.port-input)").fill(`python3 -m http.server ${PORT} --bind 0.0.0.0`);
+    // Scope to the Preview panel's run row: a bare `button.btn` also matches the
+    // Composer's "Run ⌘⏎" send button. `.preview-run-row` holds exactly one
+    // button — Run — which is why no variant class is named here.
+    await page.locator(".preview-run-row button.btn").click();
 
     // python's http.server cold-start (~16s) + bind + the guestd watcher poll.
     try {
@@ -316,7 +322,9 @@ async function main() {
     }
 
     // The panel auto-selects the first opened port; the iframe mounts at
-    // /__preview__/<port>/. Click View defensively in case selection lagged.
+    // /__preview__/<owner>/<port>/ (the owner segment is this Studio page's
+    // Service Worker client id — see preview-bridge.previewUrl). Click View
+    // defensively in case selection lagged.
     await page
       .locator(".port-chip", { hasText: `port ${PORT}` })
       .locator("button", { hasText: "view" })
@@ -327,7 +335,12 @@ async function main() {
     // 5) Assert the preview iframe renders the guest-served content — the full
     // path: SW reverse-proxy → dispatch → v86 NAT → guest server → response.
     const previewText = async (port) => {
-      const frame = page.frames().find((f) => f.url().includes(`__preview__/${port}`));
+      // Match the OWNER-bearing shape, not `__preview__/<port>`: the owner is an
+      // opaque per-page id, so a substring match on the port finds no frame at
+      // all — and this check would then fail as "empty body" (a preview that
+      // rendered nothing) instead of "the matcher is out of date".
+      const previewFrame = new RegExp(`/__preview__/[^/]+/${port}/`);
+      const frame = page.frames().find((f) => previewFrame.test(f.url()));
       if (!frame) return "";
       return await frame.evaluate(() => document.body?.textContent ?? "").catch(() => "");
     };
@@ -346,15 +359,18 @@ async function main() {
     const text = await waitForPreviewText(PORT, MARKER, 50_000); // SW → dispatch → guest round-trip
     pass("preview-renders-guest-content", text.includes(MARKER), `body=${JSON.stringify(text.slice(0, 160))}`);
 
-    // ---- Scenario 2 (R12 follow-up): Bundle & Run must construct a
+    // ---- Scenario 2 (R12 follow-up): the bundle path must construct a
     // KERNEL-AWARE serve command. Regression anchor: reverting PreviewPanel's
     // staticServeCommand(kernelKind, "/dist") to the old hard-coded
     // `erdou serve dist --spa` fails this scenario ("erdou: not found" in the
     // guest — port 8080 never opens) while every hermetic gate stays green.
 
-    // 6) Back to the Terminal. Tab switches unmount panels, so this remounts
-    // PtyTerminal → a NEW pty session + fresh xterm buffer (the helpers read
-    // the live DOM, so they carry over; re-wait for focus + prompt). Write a
+    // 6) Back to the Terminal. Terminal and Preview stay MOUNTED across tab
+    // switches (ReviewPane hides them with `display:none` rather than
+    // unmounting, so the pty session and the running iframe survive) — so this
+    // is the SAME xterm with the SAME scrollback, which is why every helper
+    // below scopes its match to the delta after a freshly measured offset. Only
+    // focus needs re-establishing after the switch. Write a
     // dependency-free bundle entry: /src/main.ts is in the bundler's
     // ENTRY_CANDIDATES, and scenario 1's marker index.html has no module
     // <script>, so findEntry falls through to it. The regex-literal `.source`
@@ -381,16 +397,22 @@ async function main() {
       pass("bundle-entry-written", false, String(e?.message ?? e));
     }
 
-    // 7) Bundle & Run from a freshly mounted Preview panel. It bundles /dist
-    // host-side (esbuild-wasm reads the guest-written entry back through the
-    // same 9p filer) and must pick the guest-runnable python3 serve command.
-    // The button enables once hasBundleEntry sees /src/main.ts (computed at
-    // mount); Playwright's click auto-waits for it. Selector is variant-blind
-    // (`button.btn` matches .primary and .ghost): on the VM kernel the run
-    // input has NO prefill (run-detect returns null pre-bundle), so the
-    // button renders `.btn.primary` here.
+    // 7) The bundle path. It bundles /dist host-side (esbuild-wasm reads the
+    // guest-written entry back through the same 9p filer) and must pick the
+    // guest-runnable python3 serve command. There is no separate "Bundle & Run"
+    // button: the ONE Run button carries both capabilities and takes the bundle
+    // path only when the command field is empty (or still holds the
+    // auto-detected command) on a project with a bundle entry — `isBundleRun`.
+    // The panel was never unmounted, so it still holds scenario 1's typed
+    // http.server command; clearing the field is what selects the bundle path
+    // (leave it and this scenario would just re-serve port 8000 and pass
+    // nothing). The button then stays disabled until hasBundleEntry sees
+    // /src/main.ts — recomputed on every render off the live VFS (both the tab
+    // click and the field clear re-render), so the guest-written entry is seen
+    // without a remount; Playwright's click auto-waits for the enable.
     await page.locator("button.tab", { hasText: "Preview" }).click();
-    await page.locator(".preview-bar button.btn", { hasText: "Bundle & Run" }).click({ timeout: 20_000 });
+    await page.locator(".preview-run-row input.run-input:not(.port-input)").fill("");
+    await page.locator(".preview-run-row button.btn").click({ timeout: 20_000 });
 
     // esbuild-wasm cold init + guest python cold start (~16s) + watcher poll.
     try {
@@ -416,7 +438,7 @@ async function main() {
       .click({ timeout: 2_000 })
       .catch(() => {});
 
-    // 8) The iframe at /__preview__/8080/ loads the bundled shell
+    // 8) The iframe at /__preview__/<owner>/8080/ loads the bundled shell
     // (/dist/index.html), whose module script (/dist/app.js) sets
     // body.textContent to the marker — proving esbuild-wasm → 9p /dist →
     // guest python3 → NAT → SW proxy in one pass.
