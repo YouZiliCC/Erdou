@@ -120,9 +120,12 @@ Three properties of the shell's redirection worth knowing before you use it:
   the buffer only doubles the peak. Redirecting a very chatty command (`npm install &> log`) is
   bounded by the tab's heap, not by disk.
 
-One known gap, predating the above: the `cd` / `export` / `jobs` builtins are dispatched before the
-redirect machinery, so a redirect on one of them is discarded — `jobs > jobs.log` prints to the
-terminal and writes no file. Redirect a builtin's output and it goes nowhere you asked.
+This includes the in-process builtins. `cd` / `export` / `jobs` are handled inside the shell because
+they touch its own cwd/env/job-list, but they go through the same redirect resolution as any other
+command, so `jobs > jobs.log` writes the file instead of printing to the terminal. Their redirects
+are set up first, as in bash — so `cd /sub > /nodir/f` fails the line and does NOT move the cwd, and
+`cd /sub > rel.log` writes the log next to where the shell was, not where it lands. Piping a builtin
+(`jobs | grep`) is still unsupported and fails loudly with ENOENT.
 
 **`@erdou/runtime-vm`** — a real 32-bit Alpine Linux guest in a [v86](https://github.com/copy/v86)
 WebAssembly emulator. The Erdou VFS backs the guest's `/workspace` over 9p (the contract `/`);

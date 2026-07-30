@@ -300,6 +300,78 @@ describe("Shell interpreter", () => {
     expect(await r.stderr.text()).toMatch(/EINVAL.*conflicting/);
   });
 
+  // ---- redirects on the in-process builtins (cd / export / jobs) -----------
+
+  it("sends a builtin's output to its redirect target, not to the terminal", async () => {
+    const { shell, vfs, table } = makeShell();
+    expect(await shell.run("true &")).toBe(0);
+    const job = table.list().find((p) => p.cmd === "true");
+    await table.wait(job!.pid);
+    const r = shell.execute("jobs > /jobs.log");
+    expect(await r.wait()).toBe(0);
+    expect(await r.stdout.text()).toBe("");
+    expect(vfs.readFileText("/jobs.log")).toContain("true");
+  });
+
+  it("sends cd's error to its redirect target and leaves the cwd alone", async () => {
+    const { shell, vfs } = makeShell();
+    const r = shell.execute("cd /nope 2> /e");
+    expect(await r.wait()).toBe(1);
+    expect(await r.stderr.text()).toBe("");
+    expect(vfs.readFileText("/e")).toMatch(/ENOENT/);
+    expect(shell.cwd).toBe("/");
+  });
+
+  it("creates a silent builtin's redirect target and still applies its effect", async () => {
+    const { shell, vfs } = makeShell();
+    expect(await shell.run("export X=1 > /f")).toBe(0);
+    expect(vfs.readFileText("/f")).toBe("");
+    const r = shell.execute("echo $X");
+    await r.wait();
+    expect(await r.stdout.text()).toBe("1\n");
+  });
+
+  it("does not run a builtin whose redirect target cannot be opened", async () => {
+    // bash sets the redirect up BEFORE the builtin, so the side effect — the
+    // cwd move, the assignment — never happens.
+    const { shell, vfs } = makeShell();
+    vfs.mkdir("/sub");
+    const r = shell.execute("cd /sub > /nodir/f");
+    expect(await r.wait()).toBe(2);
+    expect(await r.stderr.text()).toMatch(/ENOENT/);
+    expect(shell.cwd).toBe("/");
+
+    expect(await shell.run("export Y=9 > /nodir/f")).toBe(2);
+    const y = shell.execute("echo $Y");
+    await y.wait();
+    expect(await y.stdout.text()).toBe("\n"); // never assigned
+  });
+
+  it("opens a builtin's `<` too, so a missing one fails the builtin", async () => {
+    const { shell, vfs } = makeShell();
+    vfs.mkdir("/sub");
+    const r = shell.execute("cd /sub < /nope");
+    expect(await r.wait()).toBe(2);
+    expect(shell.cwd).toBe("/");
+  });
+
+  it("resolves a builtin's relative target against the cwd BEFORE cd moves it", async () => {
+    const { shell, vfs } = makeShell();
+    vfs.mkdir("/sub");
+    expect(await shell.run("cd /sub > rel.log")).toBe(0);
+    expect(shell.cwd).toBe("/sub");
+    expect(vfs.exists("/rel.log")).toBe(true); // NOT /sub/rel.log
+  });
+
+  it("merges a builtin's streams for &>", async () => {
+    const { shell, vfs } = makeShell();
+    const r = shell.execute("cd /nope &> /log");
+    expect(await r.wait()).toBe(1);
+    expect(await r.stdout.text()).toBe("");
+    expect(await r.stderr.text()).toBe("");
+    expect(vfs.readFileText("/log")).toMatch(/ENOENT/);
+  });
+
   it("rejects a < on a later pipeline stage instead of silently ignoring it", async () => {
     const { shell, vfs } = makeShell();
     vfs.writeFile("/in.txt", "beta\n");

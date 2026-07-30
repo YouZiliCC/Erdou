@@ -40,6 +40,25 @@ interface StageSinks {
   err: Sink;
 }
 
+/** Both fds ended up in the same place, so the command should get ONE stream
+ *  for them (a real dup2) rather than two that are merged afterwards. */
+function sameSink(a: Sink, b: Sink): boolean {
+  if (a.to !== b.to) return false;
+  return a.to !== "file" || (b.to === "file" && a.file === b.file);
+}
+
+/** Two fds aimed at ONE file in different modes has no honest answer (`> f`
+ *  truncates, `>> f` appends, and whichever write lands last decides). The
+ *  realistic pairs — `&> f`, `> f 2>&1` — always agree, and share a stream. */
+function assertNoModeConflict({ out, err }: StageSinks): void {
+  if (out.to === "file" && err.to === "file" && out.file === err.file && out.append !== err.append) {
+    throw new ErrnoError("EINVAL", {
+      syscall: "redirect",
+      path: `conflicting > and >> redirects to ${out.file}`,
+    });
+  }
+}
+
 /** Fold a command's redirects left to right into a final destination per output
  *  fd. `<` is handled separately (it is the stage's stdin, not a sink). */
 function resolveSinks(redirects: ExpandedRedirect[]): StageSinks {
@@ -289,6 +308,91 @@ export class Shell {
     return 0;
   }
 
+  /**
+   * Open every `<` of a command, in order, and return the LAST one's bytes as
+   * stdin (bash opens them all; the last wins). Opening all of them is what
+   * makes `cat < b < missing` fail instead of quietly printing b.
+   */
+  private openInputs(spec: ExpandedCommand): Uint8Array | undefined {
+    let stdin: Uint8Array | undefined;
+    for (const r of spec.redirects) {
+      if (r.op === "<") stdin = this.vfs.readFile(r.file);
+    }
+    return stdin;
+  }
+
+  /**
+   * Open every output target, in source order, BEFORE the command runs — where
+   * bash opens them. Three behaviours depend on it: a target a later redirect
+   * overrides is still created and truncated (`> a > b` leaves `a` empty); a
+   * target that cannot be opened fails the command INSTEAD of letting it run
+   * and discarding its output; and a command that never starts still truncates
+   * its log, so a re-run cannot leave the previous run's output there to be
+   * read as this one's.
+   */
+  private openTargets(specs: ExpandedCommand[]): void {
+    for (const spec of specs) {
+      for (const r of spec.redirects) {
+        if (r.op === ">") this.vfs.writeFile(r.file, new Uint8Array());
+        else if (r.op === ">>" && !this.vfs.exists(r.file)) {
+          this.vfs.writeFile(r.file, new Uint8Array());
+        }
+      }
+    }
+  }
+
+  /** Drain one of a command's output streams to wherever its fd resolved. */
+  private drainSink(
+    sink: Sink,
+    stream: PipeStream,
+    shellStdout: PipeStream,
+    shellStderr: PipeStream,
+  ): Promise<void> {
+    if (sink.to === "file") return this.drainToFile(stream, sink.file, sink.append);
+    return this.drainToStream(stream, sink.to === "stderr" ? shellStderr : shellStdout);
+  }
+
+  /**
+   * Run an in-process builtin (`cd`/`export`/`jobs`) with its redirects
+   * honoured. These three are handled in-process because they touch the shell's
+   * own cwd/env/job-list, but that is no reason for `jobs > jobs.log` to print
+   * to the terminal and write no file — which is what dispatching them before
+   * the redirect machinery used to do.
+   *
+   * Order matters and matches bash: the redirects are set up FIRST, so a target
+   * that cannot be opened fails the line and the builtin's side effect (the cwd
+   * move, the assignment) never happens. Targets were resolved against the cwd
+   * back in `expandCommand`, so `cd /sub > rel.log` writes the log next to
+   * where the shell was, not where it lands. Draining after the builtin returns
+   * cannot deadlock: PipeStream is unbounded, so writing with no reader is free.
+   */
+  private async runBuiltin(
+    spec: ExpandedCommand,
+    run: (stdout: PipeStream, stderr: PipeStream) => number | Promise<number>,
+    shellStdout: PipeStream,
+    shellStderr: PipeStream,
+  ): Promise<number> {
+    const sinks = resolveSinks(spec.redirects);
+    assertNoModeConflict(sinks);
+    this.openInputs(spec); // opened for its errors only — no builtin reads stdin
+    this.openTargets([spec]);
+
+    const merged = sameSink(sinks.out, sinks.err);
+    const out = new PipeStream();
+    const err = merged ? out : new PipeStream();
+    try {
+      return await run(out, err);
+    } finally {
+      out.end();
+      err.end();
+      const drains = [this.drainSink(sinks.out, out, shellStdout, shellStderr)];
+      // A merged builtin has ONE stream; draining it twice would split its
+      // output between the two consumers.
+      if (!merged) drains.push(this.drainSink(sinks.err, err, shellStdout, shellStderr));
+      await Promise.all(drains);
+    }
+  }
+
   private async execPipeline(
     pipeline: Pipeline,
     shellStdout: PipeStream,
@@ -299,10 +403,19 @@ export class Shell {
     const specs = pipeline.commands.map((c) => this.expandCommand(c, lastStatus));
 
     if (specs.length === 1) {
-      const argv = specs[0]!.argv;
-      if (argv[0] === "cd") return this.builtinCd(argv, shellStderr);
-      if (argv[0] === "export") return this.builtinExport(argv);
-      if (argv[0] === "jobs") return this.builtinJobs(argv, shellStdout, shellStderr);
+      const spec = specs[0]!;
+      const argv = spec.argv;
+      // Bound to the streams the redirects resolve to, not to the shell's own:
+      // a builtin's output is redirectable like any other command's.
+      if (argv[0] === "cd") {
+        return this.runBuiltin(spec, (_out, err) => this.builtinCd(argv, err), shellStdout, shellStderr);
+      }
+      if (argv[0] === "export") {
+        return this.runBuiltin(spec, () => this.builtinExport(argv), shellStdout, shellStderr);
+      }
+      if (argv[0] === "jobs") {
+        return this.runBuiltin(spec, (out, err) => this.builtinJobs(argv, out, err), shellStdout, shellStderr);
+      }
     }
 
     // Only the first stage's stdin is ours to set — every later stage's stdin is
@@ -318,49 +431,13 @@ export class Shell {
       });
     }
 
-    // Every `<` is opened, in order — so a target that cannot be read fails the
-    // command even when a later one would have worked — but only the LAST one
-    // becomes stdin, as in bash. Taking the first instead made `cat < a < b`
-    // print a's contents and `cat < b < missing` succeed silently.
-    let firstStdin: Uint8Array | undefined;
-    for (const r of specs[0]!.redirects) {
-      if (r.op === "<") firstStdin = this.vfs.readFile(r.file);
-    }
+    const firstStdin = this.openInputs(specs[0]!);
     const sinks = specs.map((s) => resolveSinks(s.redirects));
-    // Before anything spawns: two fds aimed at ONE file in different modes has
-    // no honest answer (`> f` truncates, `>> f` appends, and whichever write
-    // lands last decides). The realistic pairs — `&> f`, `> f 2>&1` — always
-    // agree, and share one stream via `mergeOutput` below.
-    for (const { out, err } of sinks) {
-      if (out.to === "file" && err.to === "file" && out.file === err.file && out.append !== err.append) {
-        throw new ErrnoError("EINVAL", {
-          syscall: "redirect",
-          path: `conflicting > and >> redirects to ${out.file}`,
-        });
-      }
-    }
-    // Open every output target now, in source order, BEFORE anything spawns —
-    // where bash opens them. Three behaviours depend on it: a target a later
-    // redirect overrides is still created and truncated (`> a > b` leaves `a`
-    // empty); a target that cannot be opened fails the command INSTEAD of
-    // running it and discarding its output; and a command that never starts
-    // still truncates its log, so a re-run cannot leave the previous run's
-    // output there to be read as this one's.
-    for (const spec of specs) {
-      for (const r of spec.redirects) {
-        if (r.op === ">") this.vfs.writeFile(r.file, new Uint8Array());
-        else if (r.op === ">>" && !this.vfs.exists(r.file)) {
-          this.vfs.writeFile(r.file, new Uint8Array());
-        }
-      }
-    }
+    for (const s of sinks) assertNoModeConflict(s);
+    this.openTargets(specs);
     const lastIdx = specs.length - 1;
     /** Both fds end up in the same place — so the process gets ONE stream. */
-    const merged = sinks.map(({ out, err }) =>
-      out.to !== err.to
-        ? false
-        : out.to !== "file" || (err.to === "file" && out.file === err.file),
-    );
+    const merged = sinks.map(({ out, err }) => sameSink(out, err));
     // A stage feeds the next one only while fd 1 still points at its own stdout;
     // `> f` takes it off the pipe. When the fds are merged, that one stream
     // carries both.
@@ -407,10 +484,9 @@ export class Shell {
       const stage = stages[idx]!;
       const isLast = idx === lastIdx;
       const drain = (sink: Sink, stream: PipeStream): void => {
-        if (sink.to === "file") drains.push(this.drainToFile(stream, sink.file, sink.append));
-        else if (sink.to === "stderr") drains.push(this.drainToStream(stream, shellStderr));
-        else if (isLast) drains.push(this.drainToStream(stream, shellStdout));
-        // else: `stdout` on a non-last stage — the pipe already consumed it.
+        // `stdout` on a non-last stage needs no drain — the pipe consumed it.
+        if (sink.to === "stdout" && !isLast) return;
+        drains.push(this.drainSink(sink, stream, shellStdout, shellStderr));
       };
       drain(sinks[idx]!.out, stage.stdout);
       // A merged stage has ONE stream; draining `stage.stderr` too would put a
