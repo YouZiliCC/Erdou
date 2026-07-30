@@ -36,7 +36,14 @@
 html, body, #root { height: 100%; }
 body { margin:0; background:var(--bg); color:var(--ink); font-family:var(--sans); font-size:13px; }
 ::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
-button { font-family: var(--sans); cursor: pointer; }
+/* `background: none` clears the UA's `background-color: buttonface`. No button
+   in the app relies on it today — every one carries its own background — so
+   this is a backstop, not a repair: without it, the NEXT button added without a
+   background would inherit buttonface (#efefef light, a mid-grey under
+   color-scheme:dark). That grey reads brighter than most of our selected-state
+   fills, which is how an unstyled segmented control ends up looking inverted.
+   Element specificity on purpose: every component rule below outranks it. */
+button { font-family: var(--sans); cursor: pointer; background: none; }
 input, textarea { font-family: var(--mono); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
