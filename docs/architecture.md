@@ -124,8 +124,12 @@ This includes the in-process builtins. `cd` / `export` / `jobs` are handled insi
 they touch its own cwd/env/job-list, but they go through the same redirect resolution as any other
 command, so `jobs > jobs.log` writes the file instead of printing to the terminal. Their redirects
 are set up first, as in bash — so `cd /sub > /nodir/f` fails the line and does NOT move the cwd, and
-`cd /sub > rel.log` writes the log next to where the shell was, not where it lands. Piping a builtin
-(`jobs | grep`) is still unsupported and fails loudly with ENOENT.
+`cd /sub > rel.log` writes the log next to where the shell was, not where it lands.
+
+Piping a builtin is a remaining gap, and a silent one: only a SINGLE-command line reaches the
+in-process handler, and `cd`/`export`/`jobs` are also registered in the program registry as no-ops
+(so `which cd` answers), so `jobs | cat` spawns the no-op and yields exit 0 with no output — as if
+there were no jobs — and `cd /nope | cat` reports success without attempting the cd.
 
 **`@erdou/runtime-vm`** — a real 32-bit Alpine Linux guest in a [v86](https://github.com/copy/v86)
 WebAssembly emulator. The Erdou VFS backs the guest's `/workspace` over 9p (the contract `/`);
