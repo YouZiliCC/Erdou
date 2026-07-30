@@ -241,7 +241,7 @@ function simulatedPrompt(env: EnvironmentInfo, caps: RuntimeCapabilities): strin
     "",
     "ENVIRONMENT",
     "- A virtual OS inside a web browser tab: an in-memory POSIX-ish filesystem, processes, and a shell. Paths are absolute and start with '/'. Your project is rooted at `/`; the filesystem starts empty.",
-    `- Shell: pipes (|), redirection (> >> <), && || ; and trailing-& background jobs (see \`jobs\`). Built-in commands: ${SHELL_BUILTINS}. cd and export change the shell state. sed/awk/grep are honest busybox-style subsets that ERROR on anything unsupported (JS RegExp semantics, and grep takes only -i/-n/-v) — prefer simple invocations.`,
+    `- Shell: pipes (|), redirection (> >> <), fd duplication (2>&1, 1>&2, &>file, &>>file — so \`cmd 2>&1 | tail\` and \`cmd > log 2>&1\` both work, and redirects apply left to right), && || ; and trailing-& background jobs (see \`jobs\`). Only fds 0/1/2 exist — 3>file, 2>&3 and 2>&- are syntax errors, not silent no-ops. Built-in commands: ${SHELL_BUILTINS}. cd and export change the shell state. sed/awk/grep are honest busybox-style subsets that ERROR on anything unsupported (JS RegExp semantics, and grep takes only -i/-n/-v) — prefer simple invocations.`,
     // The shell parses a SUBSET of sh and rejects the rest loudly. Spelling out
     // which expansions raise a syntax error is what stops the agent from
     // writing `PORT=$(cat port.txt)` — a line that used to expand to empty and

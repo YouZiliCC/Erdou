@@ -308,6 +308,17 @@ describe("buildSystemPrompt (browser shell brief is accurate)", () => {
     expect(p).toMatch(/\$VAR/);
   });
 
+  // `cmd 2>&1 | tail` and `cmd > log 2>&1` are the two most common logging
+  // idioms there are. They used to die at the parse stage, so the brief had to
+  // stay silent about them; now they work and the brief must SAY so, or the
+  // agent keeps routing around a capability it has.
+  it("names fd duplication as supported, and the fds that do not exist as an error", () => {
+    const p = buildSystemPrompt({ languages: ["python"] }, caps);
+    expect(p).toMatch(/2>&1/);
+    expect(p).toMatch(/&>/);
+    expect(p).toMatch(/Only fds 0\/1\/2 exist/);
+  });
+
   it("describes grep as a regex matcher limited to -i/-n/-v (unknown flags error)", () => {
     const p = buildSystemPrompt({ languages: ["python"] }, caps);
     expect(p).toMatch(/sed\/awk\/grep/);

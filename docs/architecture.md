@@ -94,6 +94,36 @@ false`, plus `erdou serve` — a static file server on a virtual port), and a po
 `serve`/`dispatch`. Instant boot, `realOs: false`; languages arrive via `registerProgram` (see
 "How to add" below).
 
+Three properties of the shell's redirection worth knowing before you use it:
+
+- **Redirects fold left to right, per fd.** `>`/`>>`/`<` plus fd duplication — `2>&1`, `1>&2`,
+  `>&2`, `&>file`, `&>>file` — resolve to one final sink per fd, in source order, so
+  `cmd > log 2>&1` (both streams to the file) and `cmd 2>&1 > log` (stderr to the terminal) differ
+  as POSIX says they must. Every target is opened before the command runs, as in bash: an
+  overridden one is still created and truncated (`> a > b` leaves `a` empty), an unopenable one
+  fails the command instead of letting it run, and a command that never starts still truncates its
+  log rather than leaving the previous run's output to be read as this one's. Only fds 0/1/2 exist;
+  anything else (`3> f`, `2>&3`, `2>&-`, csh `>&file`) is a loud `EINVAL` rather than a silently
+  dropped redirect. Everything the shell does NOT implement — `$(...)`, backticks, `${X:-d}`,
+  positional parameters, `$((…))` — likewise raises a syntax error instead of degrading to empty
+  text. The behaviour is pinned against real bash: see the redirect cases in
+  `packages/runtime-browser/src/shell/interpreter.test.ts`.
+- **When two fds share a destination they share a stream.** `2>&1`, `&>f` and `1>&2` are a real
+  `dup2`: the process is spawned with one `PipeStream` serving both fds (`mergeOutput`), so the
+  writes land in the order the program made them. Merging two separate streams afterwards cannot
+  do this — they carry no common ordering, so a pump on each consumes them round-robin and a
+  program that printed three lines then a two-line stack trace comes back interleaved.
+- **A `>` buffers the whole stream before it lands.** `drainToFile` collects the output and writes
+  once, so `cmd > big.log` peaks at the size of what `cmd` printed. This is deliberate: `Vfs`
+  files are single `Uint8Array`s and `appendFile` reallocates the entire file per call, so a
+  chunk-by-chunk write would make one linear write quadratic. The file is in memory either way;
+  the buffer only doubles the peak. Redirecting a very chatty command (`npm install &> log`) is
+  bounded by the tab's heap, not by disk.
+
+One known gap, predating the above: the `cd` / `export` / `jobs` builtins are dispatched before the
+redirect machinery, so a redirect on one of them is discarded — `jobs > jobs.log` prints to the
+terminal and writes no file. Redirect a builtin's output and it goes nowhere you asked.
+
 **`@erdou/runtime-vm`** — a real 32-bit Alpine Linux guest in a [v86](https://github.com/copy/v86)
 WebAssembly emulator. The Erdou VFS backs the guest's `/workspace` over 9p (the contract `/`);
 the Alpine system lives outside the workspace, so snapshots stay workspace-scoped. A resident
@@ -152,6 +182,25 @@ are the other repo-wide gates.
 suites that depend on the contract alone. Each kernel has a glue test that imports the concrete
 class: `browser-runtime.conformance.test.ts` (always on; `pnpm conformance`) and runtime-vm's
 `vm-runtime.conformance.test.ts` (gated — boots a real VM per test).
+
+**Writing a browser-driven test: the preview Service Worker sees everything.** `startPreviewProxy`
+registers `public/preview-sw.js` at ROOT scope `/`, not at `/__preview__/` — it has to, because a
+previewed guest's absolute-path resources (`/assets/app.js`) resolve against the app origin and
+escape the preview prefix. `routePreviewRequest` is the gate that keeps this safe (app-origin
+traffic that is neither in-scope nor referred by a preview iframe passes through untouched), so
+this is correct, not a bug. But it has one consequence that costs real debugging time: **the worker
+intercepts before any page-level network mock**, so Playwright's `page.route` / `context.route`
+never sees a request the worker handles, and the response comes from the worker (or, for
+out-of-scope app traffic, from the real dev server it passes through to) no matter what the route
+handler was told to return. Any driver that mocks the network at the page level must opt out at
+context creation:
+
+```js
+const context = await browser.newContext({ serviceWorkers: "block" });
+```
+
+The drivers in `apps/web/scripts/*/run.mjs` do NOT block it — they exercise the worker on purpose.
+Block it only when the worker is not what you are testing.
 
 Gated suites and their env vars (all also require their assets/keys to be present):
 
