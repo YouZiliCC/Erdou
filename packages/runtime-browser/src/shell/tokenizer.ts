@@ -4,7 +4,17 @@ import type { WordPart } from "./ast.js";
 export type Token =
   | { type: "word"; parts: WordPart[] }
   | { type: "op"; value: "|" | "||" | "&&" | ";" | "&" }
-  | { type: "redirect"; fd: 0 | 1 | 2; op: ">" | ">>" | "<" };
+  /** A redirect whose target is the word that follows. `both` marks the
+   *  `&>`/`&>>` form: fd 1 goes to that file AND fd 2 is duplicated onto it
+   *  (the parser emits the duplication, so the order stays `>file` then dup —
+   *  which is what makes both fds land there). */
+  | { type: "redirect"; fd: 0 | 1 | 2; op: ">" | ">>" | "<"; both?: true }
+  /** `2>&1`, `1>&2`, `>&2`: fd `fd` becomes a copy of whatever fd `from` points
+   *  at. Unlike a redirect it consumes NO target word — the number is part of
+   *  the operator, which is exactly what the old tokenizer missed (it cut `2>`
+   *  as a redirect and `&` as the background operator, so every `2>&1` died in
+   *  the parser with "redirect without a target"). */
+  | { type: "dup"; fd: 1 | 2; from: 1 | 2 };
 
 const isWhitespace = (ch: string): boolean => ch === " " || ch === "\t" || ch === "\n";
 const isOperatorChar = (ch: string): boolean =>
@@ -199,17 +209,69 @@ export function tokenize(src: string): Token[] {
     return parts;
   }
 
-  function readRedirect(fd: 0 | 1 | 2): Token {
-    if (at(i) === ">") {
-      if (at(i + 1) === ">") {
-        i += 2;
-        return { type: "redirect", fd, op: ">>" };
-      }
-      i++;
-      return { type: "redirect", fd, op: ">" };
+  /** The tail of a `>&…` duplication: `i` sits just past the `&`, and what
+   *  follows must be a bare fd number. `label` is the source text of the fd
+   *  prefix (`""` for `>&2`), so the errors quote the operator as written. */
+  function readDup(fd: 1 | 2, label: string): Token {
+    if (at(i) === "-") {
+      // Closing an fd has no meaning here: a program's stdout/stderr are
+      // in-memory streams the shell always drains, so there is nothing to
+      // return EBADF from. Say so rather than emulate it wrong.
+      throw unsupported(`closing a file descriptor is not supported: ${label}>&-`);
     }
-    i++; // '<'
-    return { type: "redirect", fd, op: "<" };
+    let digits = "";
+    while (i < len && isDigit(at(i)!)) digits += src[i++];
+    if (digits === "") {
+      // bash's csh-compatible `>&file`. Supporting it would make `>&2`
+      // ambiguous (fd or a file named `2`), so name the spelling that works.
+      throw unsupported(
+        `\`${label}>&\` needs a file descriptor; to send both streams to a file use \`&>file\``,
+      );
+    }
+    const from = Number(digits);
+    if (from !== 1 && from !== 2) {
+      throw unsupported(
+        from > 2
+          ? `only fds 0, 1 and 2 exist in this shell: ${label}>&${digits}`
+          : `only fds 1 and 2 can be duplicated: ${label}>&${digits}`,
+      );
+    }
+    // `2>&1x` is a syntax error in bash. Left alone it would tokenize as a dup
+    // plus the word `x` — a silently different command.
+    const next = at(i);
+    if (next !== undefined && !isWhitespace(next) && !isOperatorChar(next)) {
+      throw unsupported(
+        `fd duplication must be followed by a delimiter: ${label}>&${digits}${next}`,
+      );
+    }
+    return { type: "dup", fd, from };
+  }
+
+  /** Read the redirect operator at `i` for file descriptor `fd`. `label` is the
+   *  fd prefix as written (`"2"`, `"&"`, or `""`), used in the errors. */
+  function readRedirect(fd: 0 | 1 | 2, label: string): Token {
+    if (at(i) === "<") {
+      // The interpreter's stdin lookup matches on the operator alone, so a
+      // `2< f` that reached it fed the command's STDIN from that file.
+      if (fd !== 0) throw unsupported(`input redirect is only supported on fd 0: ${label}<`);
+      i++;
+      return { type: "redirect", fd: 0, op: "<" };
+    }
+    // '>' from here on: fd 0 has no output side in this shell.
+    if (fd === 0) throw unsupported(`output redirect is not supported on fd 0: ${label}>`);
+    if (at(i + 1) === ">") {
+      if (at(i + 2) === "&") {
+        throw unsupported(`appending duplication is not supported: ${label}>>&`);
+      }
+      i += 2;
+      return { type: "redirect", fd, op: ">>" };
+    }
+    if (at(i + 1) === "&") {
+      i += 2; // consume '>&'
+      return readDup(fd, label);
+    }
+    i++;
+    return { type: "redirect", fd, op: ">" };
   }
 
   while (i < len) {
@@ -224,11 +286,26 @@ export function tokenize(src: string): Token[] {
       i += 2;
       continue;
     }
-    if (isDigit(c) && (at(i + 1) === ">" || at(i + 1) === "<")) {
-      const fd = Number(c) as 0 | 1 | 2;
-      i++;
-      tokens.push(readRedirect(fd));
-      continue;
+    // An fd prefix is a DIGIT RUN that a redirect operator follows — read whole
+    // so `33>` is rejected as fd 33 rather than tokenized as the word `33` plus
+    // a plain `>`. A run with no operator after it is just a word (`echo 12`).
+    // The old single-char test also cast `Number(c)` straight to `0|1|2`, so
+    // `3> f` reached the interpreter as fd 3, matched neither its fd-1 nor its
+    // fd-2 lookup, and vanished: no file written, exit 0.
+    if (isDigit(c)) {
+      let k = i;
+      while (k < len && isDigit(at(k)!)) k++;
+      const after = at(k);
+      if (after === ">" || after === "<") {
+        const digits = src.slice(i, k);
+        const fd = Number(digits);
+        if (fd > 2) {
+          throw unsupported(`only fds 0, 1 and 2 exist in this shell: ${digits}${after}`);
+        }
+        i = k;
+        tokens.push(readRedirect(fd as 0 | 1 | 2, digits));
+        continue;
+      }
     }
     if (c === "|") {
       if (at(i + 1) === "|") {
@@ -244,6 +321,15 @@ export function tokenize(src: string): Token[] {
       if (at(i + 1) === "&") {
         tokens.push({ type: "op", value: "&&" });
         i += 2;
+      } else if (at(i + 1) === ">") {
+        // `&>` / `&>>` — bash lexes this as ONE operator, so `cmd&>log` needs
+        // no space. It means `>log 2>&1`; the parser does the desugaring.
+        i++; // consume '&', leaving i on the '>'
+        const redirect = readRedirect(1, "&");
+        if (redirect.type !== "redirect") {
+          throw unsupported("`&>&` is not a redirect operator");
+        }
+        tokens.push({ ...redirect, both: true });
       } else {
         tokens.push({ type: "op", value: "&" });
         i++;
@@ -256,7 +342,7 @@ export function tokenize(src: string): Token[] {
       continue;
     }
     if (c === ">" || c === "<") {
-      tokens.push(readRedirect(c === ">" ? 1 : 0));
+      tokens.push(readRedirect(c === ">" ? 1 : 0, ""));
       continue;
     }
     tokens.push({ type: "word", parts: readWord() });

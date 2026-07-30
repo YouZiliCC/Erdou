@@ -42,6 +42,15 @@ export interface InternalSpawnOptions extends SpawnOptions {
   ppid?: number;
   /** Leave stdin open so the caller can pipe into it (used by pipelines). */
   pipeStdin?: boolean;
+  /**
+   * Hand the process ONE stream for both stdout and stderr — what `2>&1` (and
+   * `&>`, `1>&2`) actually means. Merging afterwards is not equivalent: two
+   * PipeStreams carry no shared ordering, so draining them with a pump each
+   * consumes them round-robin and a program that printed `1 2 3` then `E1 E2`
+   * comes out `1 E1 2 E2 3`. Sharing the stream is a real dup2 — the writes
+   * land in the order they were made, because there is only one queue.
+   */
+  mergeOutput?: boolean;
 }
 
 /** Controls for an externally-driven table entry (see {@link ProcessTable.adopt}). */
@@ -92,7 +101,8 @@ export class ProcessTable {
     const now = this.deps.clock();
     const stdin = new PipeStream();
     const stdout = new PipeStream();
-    const stderr = new PipeStream();
+    // Same object, not a copy: `record.stdout === record.stderr` is the point.
+    const stderr = opts.mergeOutput === true ? stdout : new PipeStream();
 
     if (opts.pipeStdin) {
       // left open — a pipeline stage will write into it and end it

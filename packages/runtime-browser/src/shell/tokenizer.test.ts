@@ -23,6 +23,83 @@ describe("tokenize", () => {
     ]);
   });
 
+  it("recognizes fd duplication, so `2>&1` is not a redirect plus a background &", () => {
+    // `2>&1` used to tokenize as redirect(fd2,'>') + op('&') + word('1'), which
+    // the parser rejected with "redirect without a target" — the most common
+    // logging idiom there is, dead at the parse stage.
+    expect(tokenize("cmd 2>&1")).toEqual([
+      { type: "word", parts: [{ t: "lit", v: "cmd" }] },
+      { type: "dup", fd: 2, from: 1 },
+    ]);
+    expect(tokenize("cmd 1>&2")[1]).toEqual({ type: "dup", fd: 1, from: 2 });
+    expect(tokenize("cmd >&2")[1]).toEqual({ type: "dup", fd: 1, from: 2 });
+  });
+
+  it("keeps the pipe after a `2>&1` a pipe", () => {
+    expect(tokenize("cmd 2>&1 | tail")).toEqual([
+      { type: "word", parts: [{ t: "lit", v: "cmd" }] },
+      { type: "dup", fd: 2, from: 1 },
+      { type: "op", value: "|" },
+      { type: "word", parts: [{ t: "lit", v: "tail" }] },
+    ]);
+  });
+
+  it("preserves redirect order, which is what makes `> log 2>&1` differ from `2>&1 > log`", () => {
+    expect(tokenize("cmd > log 2>&1").slice(1)).toEqual([
+      { type: "redirect", fd: 1, op: ">" },
+      { type: "word", parts: [{ t: "lit", v: "log" }] },
+      { type: "dup", fd: 2, from: 1 },
+    ]);
+    expect(tokenize("cmd 2>&1 > log").slice(1)).toEqual([
+      { type: "dup", fd: 2, from: 1 },
+      { type: "redirect", fd: 1, op: ">" },
+      { type: "word", parts: [{ t: "lit", v: "log" }] },
+    ]);
+  });
+
+  it("marks `&>` / `&>>` as a redirect that also duplicates stderr", () => {
+    expect(tokenize("cmd &> log").slice(1)).toEqual([
+      { type: "redirect", fd: 1, op: ">", both: true },
+      { type: "word", parts: [{ t: "lit", v: "log" }] },
+    ]);
+    expect(tokenize("cmd &>> log")[1]).toEqual({ type: "redirect", fd: 1, op: ">>", both: true });
+    // No space needed — bash lexes `&>` as one operator.
+    expect(tokenize("cmd&>log")[1]).toEqual({ type: "redirect", fd: 1, op: ">", both: true });
+  });
+
+  it("still reads a bare & as the background operator and && as the list operator", () => {
+    expect(tokenize("cmd &")[1]).toEqual({ type: "op", value: "&" });
+    expect(tokenize("a && b")[1]).toEqual({ type: "op", value: "&&" });
+  });
+
+  it("rejects fds above 2 instead of silently dropping the redirect", () => {
+    // `Number(c) as 0|1|2` used to let `3> f` through as fd 3, which then
+    // matched neither the fd-1 nor the fd-2 lookup in the interpreter: the file
+    // was never written and the command still exited 0.
+    expect(() => tokenize("cmd 3> f")).toThrow("only fds 0, 1 and 2 exist in this shell: 3>");
+    expect(() => tokenize("cmd 33> f")).toThrow("only fds 0, 1 and 2 exist in this shell: 33>");
+    expect(() => tokenize("cmd 2>&3")).toThrow("only fds 0, 1 and 2 exist in this shell: 2>&3");
+  });
+
+  it("rejects a redirect pointed the wrong way at a fd instead of ignoring it", () => {
+    // `2< f` used to be found by the interpreter's `op === "<"` lookup, which
+    // ignores the fd — it fed the command's STDIN.
+    expect(() => tokenize("cmd 2< f")).toThrow("input redirect is only supported on fd 0: 2<");
+    expect(() => tokenize("cmd 0> f")).toThrow("output redirect is not supported on fd 0: 0>");
+  });
+
+  it("rejects fd-closing and csh-style `>&file` by name", () => {
+    expect(() => tokenize("cmd 2>&-")).toThrow("closing a file descriptor is not supported: 2>&-");
+    expect(() => tokenize("cmd >& log")).toThrow("use `&>file`");
+    expect(() => tokenize("cmd 2>>&1")).toThrow("appending duplication is not supported: 2>>&");
+    expect(() => tokenize("cmd 2>&1x")).toThrow("fd duplication must be followed by a delimiter");
+  });
+
+  it("still tokenizes a word that merely starts with digits", () => {
+    expect(tokenize("echo 12")[1]).toEqual({ type: "word", parts: [{ t: "lit", v: "12" }] });
+    expect(tokenize("echo 2x> f")[1]).toEqual({ type: "word", parts: [{ t: "lit", v: "2x" }] });
+  });
+
   it("parses $VAR and ${VAR}", () => {
     expect(tokenize("$HOME")[0]).toEqual({ type: "word", parts: [{ t: "var", name: "HOME" }] });
     expect(tokenize("${X}")[0]).toEqual({ type: "word", parts: [{ t: "var", name: "X" }] });

@@ -12,14 +12,52 @@ import { pipeProcesses } from "../process/pipe.js";
 const resolveAbs = (cwd: string, p: string): string =>
   p.startsWith("/") ? normalize(p) : join(cwd, p);
 
-interface ExpandedRedirect {
-  fd: 0 | 1 | 2;
-  op: ">" | ">>" | "<";
-  file: string;
-}
+type ExpandedRedirect =
+  | { fd: 0 | 1 | 2; op: ">" | ">>" | "<"; file: string }
+  | { fd: 1 | 2; op: ">&"; from: 1 | 2 };
 interface ExpandedCommand {
   argv: string[];
   redirects: ExpandedRedirect[];
+}
+
+/**
+ * Where one of a stage's output fds ends up.
+ *
+ * `stdout`/`stderr` name the fd's DEFAULT destination — the stage's own stdout
+ * (the pipe to the next stage, or the shell's stdout on the last stage) and the
+ * shell's stderr. Keeping them SYMBOLIC rather than resolving them up front is
+ * what lets `2>&1` copy fd 1's target *as it stands at that point in the line*,
+ * so `> log 2>&1` (both to the file) and `2>&1 > log` (stderr to the terminal,
+ * stdout to the file) come out different, as POSIX says they must.
+ */
+type Sink =
+  | { to: "stdout" }
+  | { to: "stderr" }
+  | { to: "file"; file: string; append: boolean };
+
+interface StageSinks {
+  out: Sink;
+  err: Sink;
+}
+
+/** Fold a command's redirects left to right into a final destination per output
+ *  fd. `<` is handled separately (it is the stage's stdin, not a sink). */
+function resolveSinks(redirects: ExpandedRedirect[]): StageSinks {
+  let out: Sink = { to: "stdout" };
+  let err: Sink = { to: "stderr" };
+  for (const r of redirects) {
+    if (r.op === "<") continue;
+    if (r.op === ">&") {
+      // Copy the OTHER fd's current sink. `2>&2` / `1>&1` are no-ops, as in bash.
+      if (r.fd === 1) out = r.from === 1 ? out : err;
+      else err = r.from === 1 ? out : err;
+      continue;
+    }
+    const sink: Sink = { to: "file", file: r.file, append: r.op === ">>" };
+    if (r.fd === 1) out = sink;
+    else err = sink;
+  }
+  return { out, err };
 }
 
 export interface ShellResult {
@@ -280,16 +318,58 @@ export class Shell {
       });
     }
 
-    const firstInput = specs[0]!.redirects.find((r) => r.op === "<");
-    const firstStdin = firstInput ? this.vfs.readFile(firstInput.file) : undefined;
-    const outRedirects = specs.map((s) =>
-      s.redirects.find((r) => r.fd === 1 && (r.op === ">" || r.op === ">>")),
+    // Every `<` is opened, in order — so a target that cannot be read fails the
+    // command even when a later one would have worked — but only the LAST one
+    // becomes stdin, as in bash. Taking the first instead made `cat < a < b`
+    // print a's contents and `cat < b < missing` succeed silently.
+    let firstStdin: Uint8Array | undefined;
+    for (const r of specs[0]!.redirects) {
+      if (r.op === "<") firstStdin = this.vfs.readFile(r.file);
+    }
+    const sinks = specs.map((s) => resolveSinks(s.redirects));
+    // Before anything spawns: two fds aimed at ONE file in different modes has
+    // no honest answer (`> f` truncates, `>> f` appends, and whichever write
+    // lands last decides). The realistic pairs — `&> f`, `> f 2>&1` — always
+    // agree, and share one stream via `mergeOutput` below.
+    for (const { out, err } of sinks) {
+      if (out.to === "file" && err.to === "file" && out.file === err.file && out.append !== err.append) {
+        throw new ErrnoError("EINVAL", {
+          syscall: "redirect",
+          path: `conflicting > and >> redirects to ${out.file}`,
+        });
+      }
+    }
+    // Open every output target now, in source order, BEFORE anything spawns —
+    // where bash opens them. Three behaviours depend on it: a target a later
+    // redirect overrides is still created and truncated (`> a > b` leaves `a`
+    // empty); a target that cannot be opened fails the command INSTEAD of
+    // running it and discarding its output; and a command that never starts
+    // still truncates its log, so a re-run cannot leave the previous run's
+    // output there to be read as this one's.
+    for (const spec of specs) {
+      for (const r of spec.redirects) {
+        if (r.op === ">") this.vfs.writeFile(r.file, new Uint8Array());
+        else if (r.op === ">>" && !this.vfs.exists(r.file)) {
+          this.vfs.writeFile(r.file, new Uint8Array());
+        }
+      }
+    }
+    const lastIdx = specs.length - 1;
+    /** Both fds end up in the same place — so the process gets ONE stream. */
+    const merged = sinks.map(({ out, err }) =>
+      out.to !== err.to
+        ? false
+        : out.to !== "file" || (err.to === "file" && out.file === err.file),
     );
+    // A stage feeds the next one only while fd 1 still points at its own stdout;
+    // `> f` takes it off the pipe. When the fds are merged, that one stream
+    // carries both.
+    const feedsNext = (idx: number): boolean => idx < lastIdx && sinks[idx]!.out.to === "stdout";
 
     // Spawned here rather than via table.spawnPiped so that a stage whose
     // stdout is redirected is NOT also piped onward. A PipeStream is
     // single-consumer (read() shifts chunks off one shared array), so leaving
-    // both pipeProcesses and drainToFile reading it round-robins the output
+    // both the pipe pump and drainToFile reading it round-robins the output
     // between the file and the next stage. POSIX gives the redirect the
     // stdout and the next stage an empty stdin — which is exactly what
     // spawning that stage without `pipeStdin` produces.
@@ -297,8 +377,7 @@ export class Shell {
     try {
       for (let idx = 0; idx < specs.length; idx++) {
         const spec = specs[idx]!;
-        const upstream =
-          idx > 0 && outRedirects[idx - 1] === undefined ? stages[idx - 1] : undefined;
+        const upstream = idx > 0 && feedsNext(idx - 1);
         const opts: InternalSpawnOptions = {
           cmd: spec.argv[0] ?? "",
           args: spec.argv.slice(1),
@@ -306,6 +385,7 @@ export class Shell {
           env: this.env,
           ...(idx === 0 && firstStdin !== undefined ? { stdin: firstStdin } : {}),
           ...(upstream ? { pipeStdin: true } : {}),
+          ...(merged[idx] ? { mergeOutput: true } : {}),
         };
         const record = this.table.spawn(opts);
         // Record before wiring: a later stage failing to spawn (ENOENT) must
@@ -313,7 +393,7 @@ export class Shell {
         // ShellResult, not orphaned in the process table forever.
         stages.push(record);
         records.push(record);
-        if (upstream) pipeProcesses(upstream, record);
+        if (upstream) pipeProcesses(stages[idx - 1]!, record);
       }
     } catch (err) {
       // The pipeline will never run, so tear down the stages that did start
@@ -325,18 +405,27 @@ export class Shell {
     const drains: Promise<void>[] = [];
     for (let idx = 0; idx < stages.length; idx++) {
       const stage = stages[idx]!;
-      const isLast = idx === stages.length - 1;
-      const out = outRedirects[idx];
-      const err = specs[idx]!.redirects.find((r) => r.fd === 2 && (r.op === ">" || r.op === ">>"));
-      if (out) drains.push(this.drainToFile(stage.stdout, out.file, out.op === ">>"));
-      else if (isLast) drains.push(this.drainToStream(stage.stdout, shellStdout));
-      if (err) drains.push(this.drainToFile(stage.stderr, err.file, err.op === ">>"));
-      else drains.push(this.drainToStream(stage.stderr, shellStderr));
+      const isLast = idx === lastIdx;
+      const drain = (sink: Sink, stream: PipeStream): void => {
+        if (sink.to === "file") drains.push(this.drainToFile(stream, sink.file, sink.append));
+        else if (sink.to === "stderr") drains.push(this.drainToStream(stream, shellStderr));
+        else if (isLast) drains.push(this.drainToStream(stream, shellStdout));
+        // else: `stdout` on a non-last stage — the pipe already consumed it.
+      };
+      drain(sinks[idx]!.out, stage.stdout);
+      // A merged stage has ONE stream; draining `stage.stderr` too would put a
+      // second consumer on it and split the output between them.
+      if (!merged[idx]) drain(sinks[idx]!.err, stage.stderr);
     }
 
-    const status = await stages[stages.length - 1]!.wait();
+    // Wait for EVERY stage, not just the last: POSIX says the shell waits for
+    // all of a pipeline's commands and reports the last one's status. This used
+    // to happen by accident, because each stage's stderr was unconditionally
+    // drained; a `2>&1` that put stderr on the pipe removed that drain and let
+    // the pipeline settle with an upstream process still running.
+    const statuses = await Promise.all(stages.map((s) => s.wait()));
     await Promise.all(drains);
-    return status.code;
+    return statuses[lastIdx]!.code;
   }
 
   /** `$?` is a shell parameter, not an environment variable: it is injected into
@@ -348,6 +437,8 @@ export class Shell {
     const env = { ...this.env, "?": String(lastStatus) };
     const argv = command.words.flatMap((w) => expandWord(w, env, this.vfs, this.cwd));
     const redirects: ExpandedRedirect[] = command.redirects.map((r) => {
+      // A duplication names an fd, not a path — nothing to expand.
+      if (r.op === ">&") return { fd: r.fd, op: r.op, from: r.from };
       const targets = expandWord(r.target, env, this.vfs, this.cwd);
       if (targets.length !== 1) {
         throw new ErrnoError("EINVAL", { syscall: "redirect", path: "ambiguous redirect" });
@@ -357,6 +448,18 @@ export class Shell {
     return { argv, redirects };
   }
 
+  /**
+   * Drain one stream into `file`. `&> f` / `> f 2>&1` need no special case
+   * here: those stages are spawned with `mergeOutput`, so both fds already
+   * write into this single stream, in the order the program wrote them.
+   *
+   * MEMORY: the whole output is buffered before it reaches the file, so
+   * `cmd > big.log` peaks at the size of what `cmd` printed. Deliberate, not an
+   * oversight — `Vfs.appendFile` reallocates and copies the entire file on
+   * every call, so streaming chunk-by-chunk would turn one linear write into a
+   * quadratic one. The file itself is in memory either way; the buffer only
+   * doubles the peak.
+   */
   private async drainToFile(stream: PipeStream, file: string, append: boolean): Promise<void> {
     const parts: Uint8Array[] = [];
     for await (const chunk of stream.read()) parts.push(chunk);

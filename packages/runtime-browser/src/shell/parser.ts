@@ -17,6 +17,11 @@ export function parse(src: string): List {
       if (t.type === "word") {
         command.words.push({ parts: t.parts });
         pos++;
+      } else if (t.type === "dup") {
+        // The source fd is part of the operator, so — unlike a file redirect —
+        // no target word follows.
+        command.redirects.push({ fd: t.fd, op: ">&", from: t.from });
+        pos++;
       } else if (t.type === "redirect") {
         pos++;
         const target = tokens[pos];
@@ -24,6 +29,9 @@ export function parse(src: string): List {
           throw new ErrnoError("EINVAL", { syscall: "parse", path: "redirect without a target" });
         }
         command.redirects.push({ fd: t.fd, op: t.op, target: { parts: target.parts } });
+        // `&>file` IS `>file 2>&1`: the dup has to land after the file redirect,
+        // because it copies fd 1's target as it stands at that point.
+        if (t.both) command.redirects.push({ fd: 2, op: ">&", from: 1 });
         pos++;
       } else {
         break; // an operator ends the command

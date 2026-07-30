@@ -10,11 +10,14 @@ export interface Word {
   parts: WordPart[];
 }
 
-export interface Redirect {
-  fd: 0 | 1 | 2;
-  op: ">" | ">>" | "<";
-  target: Word;
-}
+/** A redirect, discriminated by `op`: a file redirect names a target word, a
+ *  duplication (`2>&1`) names another fd instead. `redirects` is ORDERED and
+ *  the interpreter folds it left to right — that order is the whole difference
+ *  between `> log 2>&1` (both streams to the file) and `2>&1 > log` (stderr to
+ *  the terminal, stdout to the file). */
+export type Redirect =
+  | { fd: 0 | 1 | 2; op: ">" | ">>" | "<"; target: Word }
+  | { fd: 1 | 2; op: ">&"; from: 1 | 2 };
 
 export interface Command {
   kind: "command";

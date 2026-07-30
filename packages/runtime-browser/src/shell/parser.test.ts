@@ -22,6 +22,28 @@ describe("parse", () => {
     ]);
   });
 
+  it("attaches a fd duplication as a redirect that consumes no word", () => {
+    const cmd = parse("cmd 2>&1 arg").items[0]!.pipeline.commands[0]!;
+    expect(cmd.redirects).toEqual([{ fd: 2, op: ">&", from: 1 }]);
+    // The `1` is part of the operator, so `arg` is still the command's argument.
+    expect(cmd.words).toHaveLength(2);
+  });
+
+  it("desugars `&> f` into `> f` followed by `2>&1`", () => {
+    // Order matters: the dup must come AFTER the file redirect, because it
+    // copies fd 1's target as it stands at that point.
+    const cmd = parse("cmd &> log").items[0]!.pipeline.commands[0]!;
+    expect(cmd.redirects).toEqual([
+      { fd: 1, op: ">", target: { parts: [{ t: "lit", v: "log" }] } },
+      { fd: 2, op: ">&", from: 1 },
+    ]);
+    expect(parse("cmd &>> log").items[0]!.pipeline.commands[0]!.redirects[0]).toEqual({
+      fd: 1,
+      op: ">>",
+      target: { parts: [{ t: "lit", v: "log" }] },
+    });
+  });
+
   it("detects a trailing background &", () => {
     const list = parse("sleep 1 &");
     expect(list.background).toBe(true);
