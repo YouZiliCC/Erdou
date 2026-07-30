@@ -271,9 +271,19 @@ export interface PreviewTiming {
   pollMs: number;
   /** Give-up bound for a document that never becomes ready. */
   timeoutMs: number;
+  /**
+   * Give-up bound for a preview frame that is not mounted YET — deliberately
+   * much shorter than `timeoutMs`, because the two waits are different scales.
+   * A panel mounts its iframe within a render frame or two of open_preview, so
+   * a second covers every real mount race; a document, by contrast, can
+   * legitimately take seconds to load. Spending the document bound here would
+   * make the honest "you never opened a preview" answer arrive five seconds
+   * late, every time.
+   */
+  mountMs: number;
 }
 
-const DEFAULT_TIMING: PreviewTiming = { pollMs: 150, timeoutMs: 5000 };
+const DEFAULT_TIMING: PreviewTiming = { pollMs: 150, timeoutMs: 5000, mountMs: 1000 };
 
 export const NO_PREVIEW_MESSAGE = "No preview is open — serve your app and call open_preview first.";
 
@@ -351,45 +361,58 @@ function portLabel(frame: PreviewFrameLike): string {
   return port !== null ? `[preview port ${port}]` : `[preview ${frame.src}]`;
 }
 
-/** Resolve the live preview document, waiting (poll `pollMs`, bound
- *  `timeoutMs`) through a still-loading navigation. Throws precise errors —
- *  the execute() wrappers turn them into `{ok:false}` results. */
+/**
+ * Resolve the live preview document, polling (`pollMs`) through BOTH of the
+ * waits that stand between open_preview and a readable page: a frame that is
+ * still MOUNTING (bound `mountMs`) and a document that is still LOADING (bound
+ * `timeoutMs`). Throws precise errors — the execute() wrappers turn them into
+ * `{ok:false}` results.
+ *
+ * The frame used to be read ONCE, before the loop, so the tools waited out a
+ * loading page but fast-failed a mounting window: an open_preview immediately
+ * followed by preview_read could answer "No preview is open" while the panel
+ * was a render frame away from mounting the iframe. The two waits keep separate
+ * bounds because they are different scales — see `PreviewTiming.mountMs`.
+ */
 async function resolveDoc(
   getFrame: () => PreviewFrameLike | null,
   getTransport: () => PreviewTransport,
   timing: PreviewTiming,
 ): Promise<{ frame: PreviewFrameLike; doc: PreviewDocumentLike }> {
-  const frame = getFrame();
-  if (!frame) {
-    // "No frame" has three causes with three OPPOSITE actions, and the agent
-    // can only see the one we name here (the transport's real failure is in the
-    // browser console). Reporting the plain no-preview message for all three
-    // told the agent to call open_preview during the very windows where
-    // open_preview cannot mount anything — an infinite retry loop.
-    const transport = getTransport();
-    throw new Error(
-      transport === "pending"
-        ? PREVIEW_TRANSPORT_PENDING_MESSAGE
-        : transport === "failed"
-          ? PREVIEW_TRANSPORT_FAILED_MESSAGE
-          : NO_PREVIEW_MESSAGE,
-    );
-  }
-  const deadline = Date.now() + timing.timeoutMs;
+  const start = Date.now();
   for (;;) {
+    const frame = getFrame();
     // Re-read contentDocument every turn: a navigation swaps the document.
     // The initial `about:blank` a freshly mounted iframe carries reports
     // readyState "complete" BEFORE the real preview document commits — it is
     // "still loading" for our purposes, never a readable snapshot.
-    const doc = frame.contentDocument;
+    const doc = frame?.contentDocument ?? null;
     if (
+      frame &&
       doc &&
       (doc.readyState === "interactive" || doc.readyState === "complete") &&
       doc.URL !== "about:blank"
     ) {
       return { frame, doc };
     }
-    if (Date.now() >= deadline) {
+    const waited = Date.now() - start;
+    if (!frame) {
+      // "No frame" has three causes with three OPPOSITE actions, and the agent
+      // can only see the one we name here (the transport's real failure is in
+      // the browser console). Reporting the plain no-preview message for all
+      // three told the agent to call open_preview during the very windows where
+      // open_preview cannot mount anything — an infinite retry loop.
+      const transport = getTransport();
+      // A transport that settled with no owner id is TERMINAL for this
+      // document: no preview URL can name this page, so no frame will EVER
+      // mount and polling would only delay the same answer.
+      if (transport === "failed") throw new Error(PREVIEW_TRANSPORT_FAILED_MESSAGE);
+      if (waited >= timing.mountMs) {
+        throw new Error(
+          transport === "pending" ? PREVIEW_TRANSPORT_PENDING_MESSAGE : NO_PREVIEW_MESSAGE,
+        );
+      }
+    } else if (waited >= timing.timeoutMs) {
       throw new Error(
         doc
           ? `the preview document is still loading (readyState "${doc.readyState}", url ${doc.URL}, waited ${timing.timeoutMs}ms) — retry in a moment`

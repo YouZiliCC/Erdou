@@ -235,7 +235,7 @@ describe("openWsTunnel", () => {
 const CTX = {} as ToolContext; // the preview tools never touch ctx.runtime
 
 /** Fast poll timings so failure-path tests don't wait wall-clock seconds. */
-const FAST = { pollMs: 2, timeoutMs: 40 };
+const FAST = { pollMs: 2, timeoutMs: 40, mountMs: 40 };
 
 function el(outerHTML: string, onClick?: () => void): PreviewElementLike {
   return onClick ? { outerHTML, click: onClick } : { outerHTML, click: () => {} };
@@ -387,6 +387,42 @@ describe("createPreviewTools", () => {
       expect(r.output).toContain("open_preview cannot fix this");
       expect(r.output).toContain("reload");
     }
+  });
+
+  it("waits for a frame that is still MOUNTING, the way it waits for a loading document", async () => {
+    // The mount race the tools used to lose: `resolveDoc` read getFrame() ONCE,
+    // outside the poll loop, so an open_preview immediately followed by
+    // preview_read hit "No preview is open" while the panel was a render frame
+    // away from mounting the iframe. It would wait out a LOADING page but not a
+    // MOUNTING window.
+    let frame: PreviewFrameLike | null = null;
+    setTimeout(() => {
+      frame = fakeFrame(fakeDoc({ bodyText: "mounted a beat later" }));
+    }, 10);
+    const r = await tools(() => frame).read();
+    expect(r.ok).toBe(true);
+    expect(r.output).toContain("mounted a beat later");
+  });
+
+  it("gives a frame that never mounts the no-preview message, not a document error", async () => {
+    const r = await tools(() => null, "ready").read();
+    expect(r.ok).toBe(false);
+    expect(r.output).toBe(NO_PREVIEW_MESSAGE);
+  });
+
+  it("does NOT wait when the transport failed — no frame can ever mount", async () => {
+    // Terminal for this document: polling would only delay the same answer, so
+    // this one path must still fail fast even with a generous mount bound.
+    const slow = createPreviewTools(() => null, () => "failed" as PreviewTransport, {
+      pollMs: 150,
+      timeoutMs: 5000,
+      mountMs: 5000,
+    });
+    const started = Date.now();
+    const r = await slow[0]!.execute(CTX, {});
+    expect(r.ok).toBe(false);
+    expect(r.output).toBe(PREVIEW_TRANSPORT_FAILED_MESSAGE);
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 
   it("a never-ready document fails with the OBSERVED readyState after the poll bound", async () => {
