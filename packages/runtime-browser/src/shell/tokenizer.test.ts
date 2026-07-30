@@ -202,12 +202,64 @@ describe("tokenize", () => {
     expect(() => tokenize('echo "${X/a/b}"')).toThrow("unsupported parameter expansion: ${X/a/b}");
   });
 
-  it("rejects command substitution instead of emitting it literally", () => {
-    expect(() => tokenize("echo $(pwd)")).toThrow("command substitution is not supported: $(...)");
-    expect(() => tokenize('echo "x $(pwd)"')).toThrow("command substitution is not supported");
+  it("captures $(...) as a command substitution, unquoted and inside double quotes", () => {
+    expect(tokenize("echo $(pwd)")[1]).toEqual({
+      type: "word",
+      parts: [{ t: "cmdsub", src: "pwd" }],
+    });
+    expect(tokenize('echo "x $(pwd)"')[1]).toEqual({
+      type: "word",
+      parts: [
+        { t: "lit", v: "x " },
+        { t: "cmdsub", src: "pwd" },
+      ],
+    });
+  });
+
+  it("scans a substitution's body without being fooled by its contents", () => {
+    // Nested `$(`, bare parens, quoted `)` and escapes all have to be skipped
+    // rather than counted as the terminator.
+    expect(tokenize("echo $(echo $(pwd))")[1]).toEqual({
+      type: "word",
+      parts: [{ t: "cmdsub", src: "echo $(pwd)" }],
+    });
+    expect(tokenize(`echo $(echo "a)b")`)[1]).toEqual({
+      type: "word",
+      parts: [{ t: "cmdsub", src: `echo "a)b"` }],
+    });
+    expect(tokenize("echo $(echo 'a)b')")[1]).toEqual({
+      type: "word",
+      parts: [{ t: "cmdsub", src: "echo 'a)b'" }],
+    });
+    expect(tokenize("echo $(echo a\\)b)")[1]).toEqual({
+      type: "word",
+      parts: [{ t: "cmdsub", src: "echo a\\)b" }],
+    });
+    // A substitution glued to literal text keeps both parts.
+    expect(tokenize("echo pre$(pwd)post")[1]).toEqual({
+      type: "word",
+      parts: [
+        { t: "lit", v: "pre" },
+        { t: "cmdsub", src: "pwd" },
+        { t: "lit", v: "post" },
+      ],
+    });
+  });
+
+  it("still refuses backticks and arithmetic expansion, and an unterminated $(", () => {
+    // One spelling of command substitution is enough; backticks bring their own
+    // nested-escaping rules and buy nothing.
     expect(() => tokenize("echo `pwd`")).toThrow("command substitution is not supported: `...`");
     expect(() => tokenize('echo "`pwd`"')).toThrow("command substitution is not supported: `...`");
     expect(() => tokenize("echo $((1+2))")).toThrow("arithmetic expansion is not supported");
+    expect(() => tokenize("echo $(pwd")).toThrow("unterminated $(");
+  });
+
+  it("keeps $(...) literal inside single quotes", () => {
+    expect(tokenize("echo '$(pwd)'")[1]).toEqual({
+      type: "word",
+      parts: [{ t: "lit", v: "$(pwd)" }],
+    });
   });
 
   it("rejects $'...' ANSI-C quoting", () => {

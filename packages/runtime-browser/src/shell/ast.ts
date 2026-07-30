@@ -1,10 +1,22 @@
 /** A fragment of a word. Quoted text and plain text are `lit`; `$VAR`/`${VAR}`
  *  are `var`; an unquoted run containing `*`/`?` is `glob` (so quoting disables
- *  globbing, as in POSIX). */
+ *  globbing, as in POSIX); `$(...)` is `cmdsub`, holding the raw source of the
+ *  command to run — the interpreter resolves it to a `lit` before expansion, so
+ *  everything downstream of that stays synchronous.
+ *
+ *  `cmdsub` carries no "was it quoted" flag because it needs none: this shell
+ *  never field-splits an expansion (an unquoted `$VAR` is one argument too), so
+ *  quoted and unquoted substitutions expand identically. */
 export type WordPart =
   | { t: "lit"; v: string }
   | { t: "var"; name: string }
-  | { t: "glob"; v: string };
+  | { t: "glob"; v: string }
+  /** `$(...)` as parsed: the raw source of the command to run. */
+  | { t: "cmdsub"; src: string }
+  /** `$(...)` after the interpreter ran it: the captured output. Expanded
+   *  exactly like a `var`, so the rule is one sentence — a substitution behaves
+   *  like a `$VAR` holding its output. */
+  | { t: "sub"; v: string };
 
 export interface Word {
   parts: WordPart[];

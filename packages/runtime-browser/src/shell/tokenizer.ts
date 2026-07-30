@@ -55,13 +55,59 @@ export function tokenize(src: string): Token[] {
 
   const at = (k: number): string | undefined => src[k];
 
+  /**
+   * Scan the body of a `$(...)`, with `i` just past the `(`. The body is kept
+   * as RAW SOURCE and re-tokenized later by the sub-shell that runs it, so all
+   * this has to do is find the matching `)` — which means skipping anything
+   * that could carry a `)` that is not the terminator: nested `$(`/`(`, single
+   * and double quoted runs, and backslash escapes.
+   */
+  function readCmdSub(): WordPart {
+    const start = i;
+    let depth = 1;
+    while (i < len) {
+      const c = src[i]!;
+      if (c === "\\") {
+        i += 2; // the escaped character cannot close anything
+        continue;
+      }
+      if (c === "'") {
+        i++;
+        while (i < len && at(i) !== "'") i++;
+        i++;
+        continue;
+      }
+      if (c === '"') {
+        i++;
+        while (i < len && at(i) !== '"') {
+          if (at(i) === "\\") i++;
+          i++;
+        }
+        i++;
+        continue;
+      }
+      if (c === "(") depth++;
+      else if (c === ")") {
+        depth--;
+        if (depth === 0) {
+          i++; // consume the closing ')'
+          return { t: "cmdsub", src: src.slice(start, i - 1) };
+        }
+      }
+      i++;
+    }
+    throw new ErrnoError("EINVAL", { syscall: "parse", path: "unterminated $(" });
+  }
+
   function readVar(): WordPart {
     const dollar = i;
     i++; // consume '$'
     if (at(i) === "(") {
-      throw at(i + 1) === "("
-        ? unsupported("arithmetic expansion is not supported: $((...))")
-        : unsupported("command substitution is not supported: $(...)");
+      // `$((` is arithmetic, not a substitution wrapping a subshell — bash
+      // resolves the ambiguity the same way.
+      if (at(i + 1) === "(") throw unsupported("arithmetic expansion is not supported: $((...))");
+      i++; // consume '('
+      return readCmdSub();
     }
     const next = at(i);
     if (next !== undefined) {

@@ -372,6 +372,122 @@ describe("Shell interpreter", () => {
     expect(vfs.readFileText("/log")).toMatch(/ENOENT/);
   });
 
+  it("refuses a builtin in a pipeline instead of silently running a no-op", async () => {
+    // cd/export/jobs are ALSO registered in the program registry as no-ops (so
+    // `which cd` answers). Only a single-command line reaches the in-process
+    // handler, so a piped builtin used to spawn that no-op: `jobs | cat` exited
+    // 0 with no output — indistinguishable from "there are no jobs" — and
+    // `cd /nope | cat` reported success without attempting the cd.
+    const { shell, vfs } = makeShell();
+    vfs.mkdir("/sub");
+    for (const line of ["jobs | cat", "cd /nope | cat", "echo x | cd /sub"]) {
+      const r = shell.execute(line);
+      expect(await r.wait()).toBe(2);
+      expect(await r.stderr.text()).toMatch(/EINVAL.*shell builtin/);
+    }
+    expect(shell.cwd).toBe("/");
+  });
+
+  // ---- command substitution -------------------------------------------------
+
+  it("substitutes $(...) with the command's stdout, trailing newlines stripped", async () => {
+    const { shell } = makeShell();
+    const r = shell.execute("echo [$(echo hi)]");
+    expect(await r.wait()).toBe(0);
+    expect(await r.stdout.text()).toBe("[hi]\n");
+  });
+
+  it("substitutes inside double quotes and nests", async () => {
+    const { shell } = makeShell();
+    let r = shell.execute('echo "value: $(echo deep)"');
+    await r.wait();
+    expect(await r.stdout.text()).toBe("value: deep\n");
+
+    r = shell.execute("echo $(echo $(echo nested))");
+    expect(await r.wait()).toBe(0);
+    expect(await r.stdout.text()).toBe("nested\n");
+  });
+
+  it("leaves $(...) alone inside single quotes", async () => {
+    const { shell } = makeShell();
+    const r = shell.execute("echo '$(echo hi)'");
+    await r.wait();
+    expect(await r.stdout.text()).toBe("$(echo hi)\n");
+  });
+
+  it("expands a substitution in a redirect target", async () => {
+    const { shell, vfs } = makeShell();
+    expect(await shell.run("echo written > $(echo /out.txt)")).toBe(0);
+    expect(vfs.readFileText("/out.txt")).toBe("written\n");
+  });
+
+  it("runs the substitution in a SUBSHELL — cd and export do not leak out", async () => {
+    const { shell, vfs } = makeShell();
+    vfs.mkdir("/sub");
+    expect(await shell.run("echo $(cd /sub && pwd)")).toBe(0);
+    expect(shell.cwd).toBe("/"); // the cd happened in the subshell only
+    expect(await shell.run("echo $(export LEAK=1)")).toBe(0);
+    const r = shell.execute("echo [$LEAK]");
+    await r.wait();
+    expect(await r.stdout.text()).toBe("[]\n");
+  });
+
+  it("gives the substitution the shell's env and cwd", async () => {
+    const { shell, vfs } = makeShell();
+    vfs.mkdir("/sub");
+    const r = shell.execute("export A=avalue && cd /sub && echo $(echo $A) $(pwd)");
+    expect(await r.wait()).toBe(0);
+    expect(await r.stdout.text()).toBe("avalue /sub\n");
+  });
+
+  it("passes the substitution's stderr through and does not adopt its exit code", async () => {
+    const { shell } = makeShell();
+    const r = shell.execute("echo [$(nosuchcmd)]");
+    expect(await r.wait()).toBe(0); // echo succeeded; bash does the same
+    expect(await r.stdout.text()).toBe("[]\n");
+    expect(await r.stderr.text()).toMatch(/ENOENT/);
+  });
+
+  it("does NOT word-split a substitution, matching how $VAR already behaves here", async () => {
+    const { shell, table } = makeShell();
+    table.register("argc", async (ctx) => {
+      ctx.stdout.write(`${ctx.argv.length - 1}\n`);
+      return 0;
+    });
+    // One argument, not two — this shell never field-splits an expansion.
+    let r = shell.execute("argc $(echo a b)");
+    await r.wait();
+    expect(await r.stdout.text()).toBe("1\n");
+    // …exactly as it already treats an unquoted $VAR.
+    r = shell.execute("export S=a b && argc $S");
+    await r.wait();
+    expect(await r.stdout.text()).toBe("1\n");
+  });
+
+  it("keeps a multi-line substitution intact apart from the trailing newlines", async () => {
+    const { shell, table } = makeShell();
+    table.register("two", async (ctx) => {
+      ctx.stdout.write("l1\nl2\n\n");
+      return 0;
+    });
+    const r = shell.execute("echo [$(two)]");
+    await r.wait();
+    expect(await r.stdout.text()).toBe("[l1\nl2]\n");
+  });
+
+  it("rejects an unterminated $( and still rejects backticks and $((", async () => {
+    const { shell } = makeShell();
+    let r = shell.execute("echo $(echo hi");
+    expect(await r.wait()).toBe(2);
+    expect(await r.stderr.text()).toMatch(/unterminated \$\(/);
+    r = shell.execute("echo `pwd`");
+    expect(await r.wait()).toBe(2);
+    expect(await r.stderr.text()).toMatch(/command substitution is not supported: `\.\.\.`/);
+    r = shell.execute("echo $((1+2))");
+    expect(await r.wait()).toBe(2);
+    expect(await r.stderr.text()).toMatch(/arithmetic expansion is not supported/);
+  });
+
   it("rejects a < on a later pipeline stage instead of silently ignoring it", async () => {
     const { shell, vfs } = makeShell();
     vfs.writeFile("/in.txt", "beta\n");

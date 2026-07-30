@@ -293,19 +293,37 @@ describe("buildSystemPrompt (browser pip brief is accurate)", () => {
 });
 
 describe("buildSystemPrompt (browser shell brief is accurate)", () => {
-  // The browser shell parses a subset of sh and now raises a syntax error on
-  // the rest instead of expanding it to "" — an agent that does not know this
-  // writes `X=$(cmd)` and gets a hard failure it cannot diagnose from the brief.
+  // The browser shell parses a subset of sh and raises a syntax error on the
+  // rest instead of expanding it to "" — an agent that does not know which is
+  // which gets a hard failure it cannot diagnose from the brief.
   it("names the expansions that raise a syntax error rather than silently expanding", () => {
     const p = buildSystemPrompt({ languages: ["python"] }, caps);
-    expect(p).toMatch(/\$\(\.\.\.\)/); // command substitution
-    expect(p).toMatch(/backticks/);
+    expect(p).toMatch(/backticks/i);
     expect(p).toMatch(/\$'\.\.\.'/); // ANSI-C quoting
     expect(p).toMatch(/\$\{X:-d\}/); // non-trivial parameter expansion
     expect(p).toMatch(/UNSUPPORTED and raise a syntax error/);
     // what DOES work, so the agent still uses the supported forms
     expect(p).toMatch(/backslash escapes/);
     expect(p).toMatch(/\$VAR/);
+  });
+
+  // `$(...)` now WORKS. The brief used to list it as a syntax error, so leaving
+  // that in would talk the agent out of the single most useful thing it just
+  // gained — and the no-field-splitting rule has to be stated with it, because
+  // it is the one place this shell deliberately differs from bash.
+  it("names command substitution as supported, and that its result is never split", () => {
+    const p = buildSystemPrompt({ languages: ["python"] }, caps);
+    expect(p).toMatch(/\$\(\.\.\.\)/);
+    expect(p).toMatch(/subshell/i);
+    expect(p).toMatch(/one argument/);
+    // …and must NOT still be listed among the syntax errors.
+    const unsupported = p.split("\n").find((l) => l.includes("UNSUPPORTED and raise a syntax error"));
+    expect(unsupported).toBeDefined();
+    expect(unsupported).not.toMatch(/\$\(\.\.\.\)/);
+  });
+
+  it("warns that a shell builtin cannot be piped", () => {
+    expect(buildSystemPrompt({ languages: ["python"] }, caps)).toMatch(/cannot be piped/);
   });
 
   // `cmd 2>&1 | tail` and `cmd > log 2>&1` are the two most common logging

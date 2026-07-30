@@ -2,7 +2,7 @@ import { ErrnoError } from "@erdou/runtime-contract";
 import type { Signal } from "@erdou/runtime-contract";
 import { parse } from "./parser.js";
 import { expandWord } from "./expand.js";
-import type { Command, List, ListItem, Pipeline } from "./ast.js";
+import type { Command, List, ListItem, Pipeline, Word, WordPart } from "./ast.js";
 import { PipeStream } from "../core/byte-stream.js";
 import { join, normalize } from "../vfs/path.js";
 import type { Vfs } from "../vfs/vfs.js";
@@ -11,6 +11,27 @@ import { pipeProcesses } from "../process/pipe.js";
 
 const resolveAbs = (cwd: string, p: string): string =>
   p.startsWith("/") ? normalize(p) : join(cwd, p);
+
+/** The commands the shell runs itself rather than spawning, because they touch
+ *  its own cwd / environment / job list. They are also registered in the program
+ *  registry as no-ops so `which cd` answers — which is why a pipeline has to
+ *  reject them explicitly rather than let that no-op run. */
+const IN_PROCESS_BUILTINS = new Set(["cd", "export", "jobs"]);
+
+/** How deep `$( $( … ) )` may nest. Nesting is bounded by the source text — a
+ *  substitution can only run what was literally written inside it, so runaway
+ *  recursion is not reachable — but a pathological line should still fail with
+ *  a message rather than build thousands of async frames. */
+const MAX_SUBSTITUTION_DEPTH = 16;
+
+/** What a `$(...)` needs from the command that contains it: where to report the
+ *  substitution's stderr, and the caller's process list + cancel flag, so a kill
+ *  of the outer command reaches the subshell's processes too. */
+interface SubshellContext {
+  stderr: PipeStream;
+  records: ProcessRecord[];
+  canceled: () => boolean;
+}
 
 type ExpandedRedirect =
   | { fd: 0 | 1 | 2; op: ">" | ">>" | "<"; file: string }
@@ -92,6 +113,9 @@ export interface ShellDeps {
   vfs: Vfs;
   cwd?: string;
   env?: Record<string, string>;
+  /** Internal: how many `$(...)` levels deep this shell already is. Set only by
+   *  {@link Shell.runSubstitution} when it builds the subshell. */
+  substitutionDepth?: number;
 }
 
 /** A background job launched by a trailing `&`. `record` is the job's adopted
@@ -129,8 +153,11 @@ export class Shell {
   private readonly jobs: BackgroundJob[] = [];
   /** Exit status of the last foreground command — what `$?` expands to. */
   private readonly status: StatusCell = { last: 0 };
+  /** `$( )` nesting level of this shell (0 for a user's shell). */
+  private readonly subDepth: number;
 
   constructor(deps: ShellDeps) {
+    this.subDepth = deps.substitutionDepth ?? 0;
     this.table = deps.table;
     this.vfs = deps.vfs;
     this.cwd = deps.cwd ?? "/";
@@ -210,7 +237,7 @@ export class Shell {
             ? code === 0
             : code !== 0; // "||"
       if (!shouldRun) continue;
-      code = await this.execPipeline(item.pipeline, stdout, stderr, records, status.last);
+      code = await this.execPipeline(item.pipeline, stdout, stderr, records, status.last, canceled);
       status.last = code;
     }
     return code;
@@ -399,8 +426,30 @@ export class Shell {
     shellStderr: PipeStream,
     records: ProcessRecord[],
     lastStatus: number,
+    canceled: () => boolean,
   ): Promise<number> {
-    const specs = pipeline.commands.map((c) => this.expandCommand(c, lastStatus));
+    const ctx: SubshellContext = { stderr: shellStderr, records, canceled };
+    const specs: ExpandedCommand[] = [];
+    for (const c of pipeline.commands) specs.push(await this.expandCommand(c, lastStatus, ctx));
+
+    if (specs.length > 1) {
+      // Only a single-command line reaches the in-process handlers below, and
+      // cd/export/jobs are ALSO registered as no-op programs (so `which cd`
+      // answers) — so a piped builtin used to spawn that no-op and exit 0 with
+      // no output. Refuse instead: bash would run it in a subshell, where its
+      // whole purpose (changing THIS shell's cwd/env/job list) cannot happen,
+      // so there is nothing worth emulating and everything to say out loud.
+      const idx = specs.findIndex((s) => IN_PROCESS_BUILTINS.has(s.argv[0] ?? ""));
+      if (idx !== -1) {
+        throw new ErrnoError("EINVAL", {
+          syscall: "spawn",
+          path:
+            `'${specs[idx]!.argv[0]}' is a shell builtin and cannot be used in a pipeline — ` +
+            `it changes this shell's own cwd/environment/job list, which a pipeline stage cannot do. ` +
+            `Run it as its own command (redirect it if you want its output in a file).`,
+        });
+      }
+    }
 
     if (specs.length === 1) {
       const spec = specs[0]!;
@@ -504,23 +553,95 @@ export class Shell {
     return statuses[lastIdx]!.code;
   }
 
+  /**
+   * Run `src` in a SUBSHELL and return its stdout with trailing newlines
+   * stripped — `$(...)`.
+   *
+   * A fresh Shell over the same table and vfs, holding a COPY of the cwd and
+   * environment, is the subshell: `cd` and `export` inside `$( )` mutate that
+   * instance's fields and are dropped with it, which is exactly the isolation
+   * POSIX asks for, for free.
+   *
+   * Two things are deliberately shared rather than copied. The substitution's
+   * processes are recorded in the CALLER's `records`, so killing the outer
+   * command kills the substitution with it instead of orphaning it. And its
+   * stderr goes straight to the shell's, so a diagnostic printed inside `$( )`
+   * is reported rather than captured into the expansion and pasted into an
+   * argument.
+   *
+   * The exit status is NOT adopted: `echo $(false)` succeeds, as in bash.
+   */
+  private async runSubstitution(src: string, ctx: SubshellContext): Promise<string> {
+    if (this.subDepth >= MAX_SUBSTITUTION_DEPTH) {
+      throw new ErrnoError("EINVAL", {
+        syscall: "expand",
+        path: `command substitution nested deeper than ${MAX_SUBSTITUTION_DEPTH}: $(${src})`,
+      });
+    }
+    const out = new PipeStream();
+    const sub = new Shell({
+      table: this.table,
+      vfs: this.vfs,
+      cwd: this.cwd,
+      env: { ...this.env },
+      substitutionDepth: this.subDepth + 1,
+    });
+    try {
+      await sub.process(src, out, ctx.stderr, ctx.records, ctx.canceled);
+    } catch (err) {
+      // A failure inside `$( )` is the SUBSTITUTION's failure, not the outer
+      // command's. bash reports it and lets the outer command run with whatever
+      // was captured — `echo [$(nosuchcmd)]` prints `[]` and exits 0 — so this
+      // is reported on the shell's stderr rather than rethrown.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!ctx.stderr.isClosed) ctx.stderr.write(msg + "\n");
+    } finally {
+      out.end();
+    }
+    return (await out.text()).replace(/\n+$/, "");
+  }
+
+  /** Resolve every `$(...)` in a word to its output, left to right — order
+   *  matters because a substitution can have side effects. */
+  private async substitute(word: Word, ctx: SubshellContext): Promise<Word> {
+    if (!word.parts.some((p) => p.t === "cmdsub")) return word;
+    const parts: WordPart[] = [];
+    for (const p of word.parts) {
+      parts.push(p.t === "cmdsub" ? { t: "sub", v: await this.runSubstitution(p.src, ctx) } : p);
+    }
+    return { parts };
+  }
+
   /** `$?` is a shell parameter, not an environment variable: it is injected into
    *  the expansion environment only, so it can never reach a spawned process's
    *  env (where `env` would print a bogus `?=0`). An env entry actually named
    *  `?` — only reachable via `export '?=x'` — loses to the parameter, as in
    *  bash, where `$?` never reads the environment at all. */
-  private expandCommand(command: Command, lastStatus: number): ExpandedCommand {
+  private async expandCommand(
+    command: Command,
+    lastStatus: number,
+    ctx: SubshellContext,
+  ): Promise<ExpandedCommand> {
     const env = { ...this.env, "?": String(lastStatus) };
-    const argv = command.words.flatMap((w) => expandWord(w, env, this.vfs, this.cwd));
-    const redirects: ExpandedRedirect[] = command.redirects.map((r) => {
+    // Sequential, not `map`: a `$( )` can write files, so the substitutions in
+    // one command line have to run in the order they were written.
+    const argv: string[] = [];
+    for (const w of command.words) {
+      argv.push(...expandWord(await this.substitute(w, ctx), env, this.vfs, this.cwd));
+    }
+    const redirects: ExpandedRedirect[] = [];
+    for (const r of command.redirects) {
       // A duplication names an fd, not a path — nothing to expand.
-      if (r.op === ">&") return { fd: r.fd, op: r.op, from: r.from };
-      const targets = expandWord(r.target, env, this.vfs, this.cwd);
+      if (r.op === ">&") {
+        redirects.push({ fd: r.fd, op: r.op, from: r.from });
+        continue;
+      }
+      const targets = expandWord(await this.substitute(r.target, ctx), env, this.vfs, this.cwd);
       if (targets.length !== 1) {
         throw new ErrnoError("EINVAL", { syscall: "redirect", path: "ambiguous redirect" });
       }
-      return { fd: r.fd, op: r.op, file: resolveAbs(this.cwd, targets[0]!) };
-    });
+      redirects.push({ fd: r.fd, op: r.op, file: resolveAbs(this.cwd, targets[0]!) });
+    }
     return { argv, redirects };
   }
 

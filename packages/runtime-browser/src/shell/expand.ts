@@ -78,10 +78,17 @@ export function expandWord(word: Word, env: Record<string, string>, vfs: Vfs, cw
     if (part.t === "lit") {
       text += part.v;
       pattern += escapeGlobLiteral(part.v);
-    } else if (part.t === "var") {
-      const value = env[part.name] ?? "";
+    } else if (part.t === "var" || part.t === "sub") {
+      // A resolved `$(...)` behaves exactly like a `$VAR`: substituted in, never
+      // field-split, and contributing its text to the glob pattern rather than
+      // being re-parsed as syntax.
+      const value = part.t === "var" ? (env[part.name] ?? "") : part.v;
       text += value;
       pattern += escapeGlobBackslashes(value);
+    } else if (part.t === "cmdsub") {
+      // The interpreter resolves every cmdsub to a `sub` part before expanding,
+      // which is what keeps this function synchronous.
+      throw new Error(`internal: command substitution $(${part.src}) reached expansion unresolved`);
     } else {
       text += part.v;
       pattern += escapeGlobBackslashes(part.v);

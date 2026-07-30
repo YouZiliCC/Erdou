@@ -241,12 +241,15 @@ function simulatedPrompt(env: EnvironmentInfo, caps: RuntimeCapabilities): strin
     "",
     "ENVIRONMENT",
     "- A virtual OS inside a web browser tab: an in-memory POSIX-ish filesystem, processes, and a shell. Paths are absolute and start with '/'. Your project is rooted at `/`; the filesystem starts empty.",
-    `- Shell: pipes (|), redirection (> >> <), fd duplication (2>&1, 1>&2, &>file, &>>file — so \`cmd 2>&1 | tail\` and \`cmd > log 2>&1\` both work, and redirects apply left to right), && || ; and trailing-& background jobs (see \`jobs\`). Only fds 0/1/2 exist — 3>file, 2>&3 and 2>&- are syntax errors, not silent no-ops. Built-in commands: ${SHELL_BUILTINS}. cd and export change the shell state. sed/awk/grep are honest busybox-style subsets that ERROR on anything unsupported (JS RegExp semantics, and grep takes only -i/-n/-v) — prefer simple invocations.`,
+    `- Shell: pipes (|), redirection (> >> <), fd duplication (2>&1, 1>&2, &>file, &>>file — so \`cmd 2>&1 | tail\` and \`cmd > log 2>&1\` both work, and redirects apply left to right), && || ; and trailing-& background jobs (see \`jobs\`). Only fds 0/1/2 exist — 3>file, 2>&3 and 2>&- are syntax errors, not silent no-ops. Built-in commands: ${SHELL_BUILTINS}. cd and export change the shell state; cd/export/jobs cannot be piped (\`jobs | grep x\` is an error — redirect instead: \`jobs > f\`). sed/awk/grep are honest busybox-style subsets that ERROR on anything unsupported (JS RegExp semantics, and grep takes only -i/-n/-v) — prefer simple invocations.`,
     // The shell parses a SUBSET of sh and rejects the rest loudly. Spelling out
     // which expansions raise a syntax error is what stops the agent from
-    // writing `PORT=$(cat port.txt)` — a line that used to expand to empty and
-    // now fails outright — instead of a two-command equivalent that works.
-    "- Shell quoting/expansion is a subset: `$VAR` / `${VAR}`, single and double quotes, and backslash escapes (`\\\"`, `\\$`, `\\ `, trailing-backslash line continuation) work. Command substitution (`$(...)`, backticks), `$'...'` ANSI-C quoting, and non-trivial parameter expansion (`${X:-d}`, `${X#p}`, `${X%%s}`, `${#X}`, `${X/a/b}`) are UNSUPPORTED and raise a syntax error — do that work in python or across separate commands instead.",
+    // reaching for one and getting a hard failure it cannot diagnose.
+    "- Shell quoting/expansion is a subset: `$VAR` / `${VAR}`, single and double quotes, and backslash escapes (`\\\"`, `\\$`, `\\ `, trailing-backslash line continuation) work. Backticks, `$'...'` ANSI-C quoting, positional parameters (`$1`, `$@`), `$((...))` arithmetic, and non-trivial parameter expansion (`${X:-d}`, `${X#p}`, `${X%%s}`, `${#X}`, `${X/a/b}`) are UNSUPPORTED and raise a syntax error — do that work in python or across separate commands instead.",
+    // Field splitting is the one place this shell knowingly differs from sh, so
+    // it is stated rather than left to be discovered: an agent that writes
+    // `pip install $(cat reqs.txt)` needs to know it will get ONE argument.
+    "- `$(...)` command substitution WORKS: it runs in a subshell (a `cd` or `export` inside it does not affect you), its trailing newlines are stripped, and its stderr is passed through. NOTE: the result is never field-split — like `$VAR`, a substitution always expands to exactly one argument, whitespace and all. For a list of arguments, drive it from python or a loop of separate commands instead.",
     extraCommands.length > 0 ? `- Extra commands: ${extraCommands.join(", ")}.` : "",
     `- Languages you can run: ${canRun}.${wasiNote}`,
     caps.virtualPorts

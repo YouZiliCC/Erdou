@@ -104,10 +104,24 @@ Three properties of the shell's redirection worth knowing before you use it:
   fails the command instead of letting it run, and a command that never starts still truncates its
   log rather than leaving the previous run's output to be read as this one's. Only fds 0/1/2 exist;
   anything else (`3> f`, `2>&3`, `2>&-`, csh `>&file`) is a loud `EINVAL` rather than a silently
-  dropped redirect. Everything the shell does NOT implement — `$(...)`, backticks, `${X:-d}`,
-  positional parameters, `$((…))` — likewise raises a syntax error instead of degrading to empty
-  text. The behaviour is pinned against real bash: see the redirect cases in
+  dropped redirect. Everything the shell does NOT implement — backticks, `${X:-d}`, positional
+  parameters, `$((…))` — likewise raises a syntax error instead of degrading to empty text. The
+  behaviour is pinned against real bash: see the redirect cases in
   `packages/runtime-browser/src/shell/interpreter.test.ts`.
+- **`$(...)` runs in a subshell, and its result is never field-split.** The tokenizer captures the
+  body as raw source (counting nested `$(`/`(` and skipping quoted runs), and the interpreter runs
+  it in a fresh `Shell` over the same table and vfs holding a COPY of the cwd and env — so `cd` and
+  `export` inside `$( )` are dropped with it, for free. Its processes are recorded in the caller's
+  list so killing the outer command kills it too; its stderr passes through; its exit status is not
+  adopted (`echo $(false)` succeeds). Trailing newlines are stripped.
+
+  The one deliberate divergence from sh: **no field splitting.** A resolved substitution expands
+  exactly like a `$VAR` holding its output — one argument, whitespace intact — because an unquoted
+  `$VAR` never split here either, and a rule that holds for both is easier to rely on than two.
+  `argc $(echo a b)` therefore passes 1 argument where bash passes 2, and `echo "[$(echo 'x  y')]"`
+  keeps the double space bash's splitting collapses. This shell has no `for`, no `set --` and no
+  `$@`, so the constructs that make splitting worth its surprises do not exist here. It is stated
+  in the agent's environment brief for the same reason it is stated here.
 - **When two fds share a destination they share a stream.** `2>&1`, `&>f` and `1>&2` are a real
   `dup2`: the process is spawned with one `PipeStream` serving both fds (`mergeOutput`), so the
   writes land in the order the program made them. Merging two separate streams afterwards cannot
@@ -126,10 +140,13 @@ command, so `jobs > jobs.log` writes the file instead of printing to the termina
 are set up first, as in bash — so `cd /sub > /nodir/f` fails the line and does NOT move the cwd, and
 `cd /sub > rel.log` writes the log next to where the shell was, not where it lands.
 
-Piping a builtin is a remaining gap, and a silent one: only a SINGLE-command line reaches the
-in-process handler, and `cd`/`export`/`jobs` are also registered in the program registry as no-ops
-(so `which cd` answers), so `jobs | cat` spawns the no-op and yields exit 0 with no output — as if
-there were no jobs — and `cd /nope | cat` reports success without attempting the cd.
+Piping a builtin is refused. Only a single-command line reaches the in-process handler, and
+`cd`/`export`/`jobs` are also registered in the program registry as no-ops (so `which cd` answers),
+so `jobs | cat` used to spawn that no-op and exit 0 with no output — indistinguishable from "there
+are no jobs" — while `cd /nope | cat` reported success without attempting the cd. bash would run
+these in a subshell, where the only thing they exist to do (change THIS shell's cwd/env/job list)
+cannot happen, so there is nothing worth emulating: the pipeline now raises EINVAL naming the
+builtin and pointing at redirection instead.
 
 **`@erdou/runtime-vm`** — a real 32-bit Alpine Linux guest in a [v86](https://github.com/copy/v86)
 WebAssembly emulator. The Erdou VFS backs the guest's `/workspace` over 9p (the contract `/`);
