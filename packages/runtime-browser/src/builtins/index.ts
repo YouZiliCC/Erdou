@@ -32,8 +32,12 @@ const SIGNAL_ALIASES: Record<string, Signal> = {
 /**
  * Populate and return the program registry. `cd`/`export`/`jobs` are
  * intercepted by the shell interpreter (they touch shell-session state: cwd,
- * environment, background-job list) and registered here only as harmless
- * guards so `which cd` works and a stray `cd` in a pipeline is a no-op.
+ * environment, background-job list) and registered here only so `which cd`
+ * works. The no-op bodies are unreachable through the shell: a pipeline
+ * containing one of the three is refused outright before anything spawns (see
+ * IN_PROCESS_BUILTINS in shell/interpreter.ts), because letting the no-op run
+ * made `jobs | cat` exit 0 with no output — indistinguishable from "there are
+ * no jobs".
  */
 export function createBuiltins(deps: BuiltinDeps): ProgramRegistry {
   const reg = deps.registry;

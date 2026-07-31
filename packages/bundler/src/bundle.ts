@@ -105,9 +105,9 @@ function resolveFile(fs: FileSystemApi, path: string): string | null {
 
 /**
  * Bundle a project from the Erdou filesystem with esbuild. Relative/absolute
- * imports load from the VFS; bare (npm) imports are rewritten to a CDN (esm.sh)
- * and kept external — so a real React/Vite-style app builds in the browser with
- * no `npm install`.
+ * imports load from the VFS; bare (npm) imports are fetched from a CDN (esm.sh)
+ * and bundled IN — nothing is marked external, so the output is self-contained
+ * and a real React/Vite-style app builds in the browser with no `npm install`.
  */
 const HTTP = "http";
 

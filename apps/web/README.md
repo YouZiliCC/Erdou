@@ -1,13 +1,14 @@
 # @erdou/web
 
-The Erdou web app — open a page, describe a task, watch an AI agent operate a browser-native OS to accomplish it. Everything (filesystem, processes, shell, snapshots, the agent loop) runs **in your browser**; only the model API call leaves it.
+The Erdou web app — open a page, describe a task, watch an AI agent operate a browser-native OS to accomplish it. Everything (filesystem, processes, shell, snapshots, the agent loop) runs **in your browser**. What leaves it: your model API call, the CDN fetches for the Python runtime (Pyodide, from jsDelivr) and for the preview bundler's npm imports (esm.sh), and — on the Linux VM kernel — guest `pip`/`npm` traffic relayed to the real registries (`networkEgress: "cors-only"`).
 
 ## Run it
 
 ```bash
 pnpm install
 pnpm --filter @erdou/web dev
-# open the printed URL, click "Model", paste your key
+# open the printed URL — the "Model connection" dialog opens by itself on first
+# load (or click "Settings" in the title bar), then paste your key
 ```
 
 - **Model key** is stored only in your browser (localStorage) and sent straight to your provider.
@@ -21,4 +22,4 @@ pnpm --filter @erdou/web dev
 - **Terminal** — an interactive shell into the runtime (`ls`, `cat`, pipes, redirection…).
 - **Processes** — the live process table.
 
-Composes `@erdou/runtime-browser`, `@erdou/agent-core`, `@erdou/agent-tools`, `@erdou/model-gateway`. This is the top (application) layer; it depends on everything below and nothing depends on it.
+Composes every `@erdou/*` package: the two kernels (`runtime-browser`, `runtime-vm`), the agent (`agent-core`, `agent-tools`, `model-gateway`), and the executors/tools (`lang-python`, `runtime-wasi`, `tool-git`, `bundler`) over `runtime-contract`. This is the top (application) layer; it depends on everything below and nothing depends on it.

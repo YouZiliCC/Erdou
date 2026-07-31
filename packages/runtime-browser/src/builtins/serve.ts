@@ -153,7 +153,8 @@ const USAGE = "usage: erdou serve <dir> [port] [--spa]\n";
 /**
  * The `erdou` built-in. Currently just `serve`: registers a static-file
  * handler over the VFS on a virtual port and exits — the handler persists in
- * the port registry after the process is gone (`erdou stop` closes it later).
+ * the port registry after the process is gone. There is no `erdou stop`; the
+ * port is closed through the contract, `Runtime.closePort(port)`.
  */
 export const erdou: Program = async (ctx) => {
   const sub = ctx.argv[1];

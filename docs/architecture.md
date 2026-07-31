@@ -89,12 +89,12 @@ what is real.
 **`@erdou/runtime-browser`** — the in-page simulated kernel. An in-memory VFS (with IndexedDB
 snapshot persistence), a process table running registered `Executor`s in-process, a POSIX-ish
 shell (tokenizer → parser → interpreter: pipes, redirection, `&&`/`||`/`;`, `cd`/`export` state),
-shell built-ins (`ls cat grep find head tail mkdir rm cp mv touch echo pwd env which ps kill true
-false`, plus `erdou serve` — a static file server on a virtual port), and a port registry backing
+shell built-ins (`ls cat grep sed awk find head tail mkdir rm cp mv touch echo pwd env which ps kill
+true false`, plus `erdou serve` — a static file server on a virtual port), and a port registry backing
 `serve`/`dispatch`. Instant boot, `realOs: false`; languages arrive via `registerProgram` (see
 "How to add" below).
 
-Three properties of the shell's redirection worth knowing before you use it:
+Four properties of the shell's redirection and command substitution worth knowing before you use it:
 
 - **Redirects fold left to right, per fd.** `>`/`>>`/`<` plus fd duplication — `2>&1`, `1>&2`,
   `>&2`, `&>file`, `&>>file` — resolve to one final sink per fd, in source order, so
@@ -171,9 +171,11 @@ slow. Details: [`packages/runtime-vm/README.md`](../packages/runtime-vm/README.m
 - **`@erdou/agent-core`** — `CodingAgent`: the plan → act → observe loop. Each step sends the
   transcript plus tool specs through the model gateway, executes returned tool calls against the
   Runtime, and finishes when the model replies without tools (or the step budget / an abort signal
-  ends the run). **Gated tools:** `run_shell`, `remove_path`, `switch_environment`, and
-  `open_preview` go through the optional `approve` callback before executing; a `"deny"` becomes a
-  tool result the model sees. All task-level judgment lives here — the runtime only reports facts.
+  ends the run). **Gated tools:** `run_shell`, `remove_path`, `switch_environment`, `open_preview`
+  and `delegate` go through the optional `approve` callback before executing; a `"deny"` becomes a
+  tool result the model sees. The list is `GATED_TOOLS` in `agent-core/src/agent.ts` and covers the
+  two app-defined tools (`open_preview`, `delegate`) as well, so approval policy has one home. All
+  task-level judgment lives here — the runtime only reports facts.
 - **The capability-aware prompt** (`agent-core/src/prompt.ts`) — `buildSystemPrompt(env, caps)`
   branches on `caps.realOs`: the simulated kernel gets a precise "this is NOT a real Linux; these
   things do not exist" brief, the VM gets a real-but-slow-machine brief; both share the
@@ -198,8 +200,10 @@ slow. Details: [`packages/runtime-vm/README.md`](../packages/runtime-vm/README.m
 Tests are Vitest, one workspace at the root (`vitest.workspace.ts` → `packages/*` + `apps/*`).
 Root `pnpm test` runs everything hermetically — network- or asset-dependent suites are
 `describe.skipIf`-gated and report as **visible skips**, never failures. Scope with
-`pnpm --filter <pkg> test` or `pnpm exec vitest run <file>`; `pnpm typecheck` and `pnpm lint:deps`
-are the other repo-wide gates.
+`pnpm exec vitest run <file-or-dir>` (e.g. `pnpm exec vitest run packages/runtime-browser/src/shell`)
+— **not** `pnpm --filter <pkg> test`: no package defines a `test` script of its own, so that form
+runs zero tests, prints nothing and exits 0, which reads exactly like a green scoped run.
+`pnpm typecheck` and `pnpm lint:deps` are the other repo-wide gates.
 
 **Conformance** (`packages/conformance`) is the compatibility bar for Runtime implementations:
 `runConformance(name, makeRuntime)` runs shared filesystem/process/shell/snapshot/port/capabilities

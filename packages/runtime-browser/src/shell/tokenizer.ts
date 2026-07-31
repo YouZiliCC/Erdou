@@ -26,9 +26,10 @@ const isPlainName = (s: string): boolean => /^[A-Za-z_][A-Za-z0-9_]*$/.test(s);
 
 /** A shell construct we deliberately do not implement. It must fail loudly:
  *  every one of these used to degrade into something that looked like it
- *  worked — `${X:-d}` expanded to the empty string, `$(cmd)` passed through as
- *  the literal text — so a command that wrote a file wrote wrong bytes with
- *  exit 0. */
+ *  worked — `${X:-d}` expanded to the empty string, `` `cmd` `` passed through
+ *  as the literal text — so a command that wrote a file wrote wrong bytes with
+ *  exit 0. (`$(cmd)` was on this list too; it is implemented now — backticks
+ *  are the one substitution spelling still refused.) */
 const unsupported = (construct: string): ErrnoError =>
   new ErrnoError("EINVAL", { syscall: "parse", path: construct });
 

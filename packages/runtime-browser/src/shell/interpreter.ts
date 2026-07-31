@@ -248,11 +248,16 @@ export class Shell {
    * composite (so it shows up in `ps` and `kill <pid>` kills the whole job),
    * buffer its stdout/stderr on that process-table entry, register it in this
    * shell's job list, and announce "[pid] command" on the shell's stdout.
-   * Returns 0 immediately — the caller does not await the job. The first
-   * pipeline spawns synchronously here, so the job sees the cwd/env as of the
-   * `&` line. The shell has no async output channel (sessions are command-at-
-   * a-time), so the buffered output surfaces only when `jobs` reports the job
-   * done — never interleaved into a later prompt.
+   * Returns 0 immediately — the caller does not await the job. The job reads
+   * this shell's LIVE cwd/env, at the moment each stage spawns; that is a
+   * microtask or more after the `&` line, because expansion became async with
+   * `$(...)`. (Before that it spawned synchronously here and the job was
+   * guaranteed the cwd/env as of the `&`. A `cd` cannot realistically land in
+   * the gap — it takes another `execute` call, i.e. a macrotask — but the
+   * guarantee is weaker than it was, so it is stated rather than implied.)
+   * The shell has no async output channel (sessions are command-at-a-time), so
+   * the buffered output surfaces only when `jobs` reports the job done — never
+   * interleaved into a later prompt.
    */
   private launchBackground(src: string, list: List, shellStdout: PipeStream): number {
     // parse() only accepts `&` as the line's final token, so the trimmed

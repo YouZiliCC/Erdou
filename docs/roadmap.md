@@ -22,7 +22,7 @@ What Erdou ships today is in the [README](../README.md) and the [user guide](./u
 - **Deeper multi-agent orchestration** — one level of it ships: `delegate` fans out up to 3 sub-agents in parallel, each on a throwaway runtime restored from one parent snapshot, and merges their byte-exact diffs back with wholesale conflict rejection. Unbuilt: nesting (children get `createTools()` only, so depth is capped at 1 by construction), children on anything but the browser kernel, and per-child approval (the single `pendingApproval` slot would have concurrent prompts overwrite each other, so the fan-out is approved once as a whole).
 - **Streaming tool-use (incl. Anthropic parity)** — both providers' streaming paths yield text deltas only and the agent loop runs non-streaming turns; token-level streaming of tool-calling turns (and Anthropic tool-use event parity) is unbuilt.
 - **Checkpoint branching** — per-run diff + per-file revert exist; named checkpoints, project branches and "open snapshot X in a new tab" don't.
-- **Model capability probing** — the proposal's auto-detection of an endpoint's streaming/tool-call/JSON-schema support; today a misconfigured endpoint just fails loudly on first use.
+- **Model capability probing (streaming / JSON-schema)** — the Settings dialog's Test button already probes an endpoint with `probeModel`: a minimal chat round-trip for reachability and latency, then a ping-tool round-trip that catches a provider silently dropping or 400-ing the `tools` field ("tool calling did not work — the agent cannot act without it"). Auto-detecting an endpoint's *streaming* and *JSON-schema* support is what remains unbuilt.
 
 ## Ecosystem & product
 

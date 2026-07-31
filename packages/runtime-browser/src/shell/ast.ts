@@ -1,8 +1,10 @@
 /** A fragment of a word. Quoted text and plain text are `lit`; `$VAR`/`${VAR}`
  *  are `var`; an unquoted run containing `*`/`?` is `glob` (so quoting disables
  *  globbing, as in POSIX); `$(...)` is `cmdsub`, holding the raw source of the
- *  command to run — the interpreter resolves it to a `lit` before expansion, so
- *  everything downstream of that stays synchronous.
+ *  command to run — the interpreter resolves it to a `sub` before expansion, so
+ *  everything downstream of that stays synchronous. (`sub`, not `lit`: the two
+ *  glob differently — a `lit`'s `*`/`?` are escaped to literals, a `sub`'s are
+ *  left alone like a variable's value.)
  *
  *  `cmdsub` carries no "was it quoted" flag because it needs none: this shell
  *  never field-splits an expansion (an unquoted `$VAR` is one argument too), so

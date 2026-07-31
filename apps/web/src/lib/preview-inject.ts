@@ -42,7 +42,9 @@ const HEAD_TAG = /<head(\s[^>]*)?>/i;
 const DOCTYPE = /^\s*<!doctype[^>]*>/i;
 
 /** True when `res` is an HTML document this module may rewrite (see the
- *  module doc's (b)–(d) guards). Exported for the bridge's CSP warning. */
+ *  module doc's (b)–(d) guards). Exported for the unit tests — the CSP warning
+ *  lives in `injectPreviewScripts` below and detects the rewrite by identity
+ *  (`out !== res`), not through this predicate. */
 export function isRewritableHtml(res: HttpResponse): boolean {
   if (res.stream !== undefined) return false;
   const ct = (findHeader(res.headers, "content-type") ?? "").toLowerCase();

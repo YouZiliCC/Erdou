@@ -16,7 +16,8 @@ pnpm --filter @erdou/runtime-vm bake --all                 # bake the whole prof
 
 As of Round 13 the image is **multi-profile** — `base`, `node`, `sci`, each a separate
 `state-<profile>.zst` + meta + version. See [Profiles & package egress](#profiles--package-egress-round-13)
-below. `bake` defaults to `--profile base`; the conformance suite pins `base`.
+below. `bake` requires an explicit `--profile <base|node|sci>` or `--all` (there is no default — with
+no arguments it prints usage and exits 2); the conformance suite pins `base`.
 
 ## Browser usage
 
@@ -162,8 +163,7 @@ Restore MUST pass both v86 options (both are set in `v86-host.ts`):
 **Re-bake + version bump.** After any change to the bake or `guestd.py`:
 
 ```
-rm -f packages/runtime-vm/assets/state.bin
-pnpm --filter @erdou/runtime-vm bake
+pnpm --filter @erdou/runtime-vm bake --profile base
 ```
 
 Then **bump the profile's `version` in `packages/runtime-vm/src/profiles.data.json`** — that JSON is the single source of truth. `scripts/bake-image.mjs` reads the version straight from it (there is no `STATE_VERSION` constant to touch), and `apps/web/src/lib/vm-assets.ts` picks it up via the typed `PROFILE_META` map (`@erdou/runtime-vm/profiles`), so IndexedDB-cached clients re-fetch the new state. The bake stamps that version into `assets/state-<profile>.meta.json`, and `loadBrowserInputs` verifies it on every cache-miss fetch (`expectedStateVersion`), so a stale on-disk `state.zst` from an older bake fail-fasts with a re-bake instruction instead of being silently cached under the new key. The `state.zst`/kernel/bios binaries stay gitignored — never commit them.
@@ -241,18 +241,20 @@ Guest `/` is the chroot'd 9p **workspace** and `/usr` is read-only, so:
 
 ## Gated test suites
 
-The default `pnpm test` skips four slow suites, keeping CI hermetic: Node conformance, the
-package's own browser e2e, apps/web's in-app PTY e2e, and apps/web's in-app preview e2e are all
-`describe.skipIf`-gated off by default and report as skipped rather than run.
+The default `pnpm test` skips every gated e2e suite, keeping CI hermetic: they are all
+`describe.skipIf`-gated off by default and report as skipped rather than run. The gates are
+`ERDOU_VM_E2E` (Node conformance, this package's browser e2e, apps/web's in-app PTY and preview
+e2e), `ERDOU_NET_E2E` (live registry/git egress), `ERDOU_WHEELS_E2E` and `ERDOU_TWO_TAB_E2E`
+(browser-kernel only), and `ERDOU_LIVE_KEY` (a real model endpoint). Only the `ERDOU_VM_E2E` ones
+need a baked asset.
 
-Run the Node conformance suite (32 tests: contract ops — spawn/kill/ps/chdir — workspace snapshotting,
+Run the Node conformance suite (the shared contract suite plus VM-specific checks: contract ops — spawn/kill/ps/chdir — workspace snapshotting,
 live 9p sync, PTY open/write/close, a `syncFs()`/async-bridge shared-fs9p check, and the Round 12
 networking checks — networked-state restore (`eth0` = 192.168.86.100), a live `networkAdapter()`, the
 `dispatch` reverse-proxy into a real 0.0.0.0 guest server, and `port.opened`/`port.closed` plus the
 loopback-only `resource.warning`) against the real Alpine guest:
 
 ```
-rm -f packages/runtime-vm/assets/state.bin   # drop a stale decompressed-state cache, if one exists
 ERDOU_VM_E2E=1 pnpm vitest run packages/runtime-vm/src/vm-runtime.conformance.test.ts
 ```
 
@@ -283,8 +285,10 @@ Service Worker → `dispatch` reverse-proxy (`RESULT ALL_PASS`):
 ERDOU_VM_E2E=1 pnpm vitest run apps/web/src/app-vm-preview.e2e.test.ts
 ```
 
-All four require the baked asset (`pnpm --filter @erdou/runtime-vm bake`) and are CI-verified by the
-controller before each round; these commands are for local development.
+These `ERDOU_VM_E2E` suites all require the baked asset
+(`pnpm --filter @erdou/runtime-vm bake --profile base`) and are CI-verified by the controller before
+each round; these commands are for local development. The other gated suites
+(`ERDOU_NET_E2E`, `ERDOU_WHEELS_E2E`, `ERDOU_TWO_TAB_E2E`) need no baked VM image.
 
 ## Status (Round 11c)
 
@@ -307,11 +311,11 @@ real PTY).
 server (probe-first, HTTP/1.1 codec, connection released), and a `guestd` port watcher emits
 `port.opened`/`port.closed` (+ a loopback-only `resource.warning` hint); apps/web's serve flow is
 kernel-aware (detached spawn + await `port.opened` for the VM). Verified by the gated Node conformance
-(32/32, incl. dispatch + port-event tests) and the gated app preview e2e (`RESULT ALL_PASS`).
+(all green, incl. dispatch + port-event tests) and the gated app preview e2e (`RESULT ALL_PASS`).
 
 **Round 13 (profiles + package egress) — complete:** three baked profiles (`base`/`node`/`sci`), real
 `pip`/`npm` installs through the fetch-NAT (`networkEgress: "cors-only"`) via a baked pip.conf/npmrc + the
-`egress-shim`, and per-profile capabilities. Verified by the gated Node conformance (32/32 on `base`) and the
+`egress-shim`, and per-profile capabilities. Verified by the gated Node conformance (all green on `base`) and the
 new `ERDOU_NET_E2E` suite (real `pip six` / `npm left-pad` / `pip flask`→`dispatch` preview / `sci` numpy
 import against live registries). Deferred to Round 14: `apk`-over-gateway and arbitrary TCP/git via a WISP
 relay (`dl-cdn` and most hosts are not CORS-open).

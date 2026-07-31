@@ -12,12 +12,12 @@ pnpm --filter @erdou/web dev   # open the printed URL
 ```
 
 1. Click **Settings** in the title bar and set a provider, model and API key. The dialog opens automatically on first load if no key is configured.
-2. Type a task in the composer (e.g. "build a small Flask app and serve it") and press **Run** (or ⌘/Ctrl+Enter). The empty state offers example chips that pre-fill the composer.
+2. Type a task in the composer (e.g. "build a small Flask app and serve it") and press **Run** (or just **Enter** — Shift+Enter inserts a newline). The empty state offers example chips that pre-fill the composer.
 3. Watch the agent's trace stream live; review its changes in the **Diff** tab when the turn ends.
 
 ### Model providers
 
-Settings holds four things: **Provider**, **Base URL**, **Model**, **API key**. The key is stored only in this browser (localStorage) and sent to your provider — never to Erdou.
+Settings holds the four model fields — **Provider**, **Base URL**, **Model**, **API key** — plus the **Command approvals** selector (see below). The key is stored only in this browser (localStorage) and sent to your provider — never to Erdou.
 
 - **OpenAI-compatible** — any endpoint speaking the OpenAI chat-completions dialect. The default Base URL `/llm/v1` is a **dev-server proxy**: the Vite dev server forwards `/llm/*` to `https://yunwu.ai` unless you start it with `VITE_LLM_TARGET=<url>`. This exists because most providers (including `api.openai.com`) block direct browser calls with CORS.
 - **Anthropic** — works **direct from the browser**: the default Base URL is `https://api.anthropic.com`, no proxy needed (the gateway sends Anthropic's browser-access header).
@@ -107,9 +107,9 @@ The system channel's home: mount/restore/sync notices, kernel-switch progress an
 Your code runs in one of four environments, selectable in the title bar (or by the agent via its `switch_environment` tool — approval-gated in Confirm mode):
 
 - **Browser kernel** — instant, in-tab simulated OS. Python via Pyodide, `wasm32-wasi` binaries via the WASI host, JS/TS via the bundler. The default.
-- **Linux VM · Python 3** (`vm:base`) — real 32-bit Alpine Linux (v86/WASM) with python3 + pip.
-- **Linux VM · Python 3 + Node.js** (`vm:node`) — adds Node.js + npm.
-- **Linux VM · Python 3 + NumPy/Pandas** (`vm:sci`) — the scientific stack preinstalled.
+- **Linux VM · Python** (`vm:base`) — real 32-bit Alpine Linux (v86/WASM) with python3 + pip.
+- **Linux VM · Node.js** (`vm:node`) — adds Node.js + npm.
+- **Linux VM · NumPy/Pandas** (`vm:sci`) — the scientific stack preinstalled.
 
 Switching copies your project across — there is one logical project and it follows you (both kernels persist to the same snapshot slot; last writer wins). The first boot of a VM profile downloads its image (roughly 48–84 MB, then cached); a switch is locked while a run is active. The VM is emulated x86 without hardware virtualization — expect roughly 10–100x slower than native. Each guest has 512 MB of RAM.
 
@@ -124,7 +124,7 @@ The bake needs network access to the Alpine CDN plus three boot blobs staged in 
 ### What persists where
 
 - **Project files** — snapshotted to IndexedDB (debounced) and restored on reload, on both kernels. **Reset** in the title bar deletes the workspace and run history from the browser.
-- **VM package installs** — `pip` installs land in the user site (`/root/.local`), `npm` installs in `node_modules`; both live in the project workspace and **persist** across VM reboots, snapshots and kernel switches.
+- **VM package installs** — `pip` installs land in the user site (`/root/.local`), `npm` installs in `node_modules`. Both **persist** across VM reboots and snapshots. `node_modules` also follows a **kernel switch**; `/root/.local` does not — `/root` is image-owned guest state, which the cross-kernel workspace copy skips in both directions (as do the run diff, the .zip export and folder sync).
 - **Browser-kernel pip installs** — live only in the in-page Python session and die with the page. The next session prints a one-line `pip install <names>` restore hint listing what you had installed (no automatic re-download).
 
 ## Installing packages
@@ -155,7 +155,7 @@ The bake needs network access to the Alpine CDN plus three boot blobs staged in 
 
 ## Themes
 
-The swatch button in the title bar opens the theme picker: **Ink** (dark, the default), **Paper** (light), **二豆**, and **Cream**. The choice persists in the browser and is mirrored into a mounted folder's `.erdou/` config; the Help page follows it too.
+The swatch button in the title bar opens the theme picker: **Ink** (dark, the default), **Paper** (light), **二豆**, and **Cream**. The choice persists in the browser and is mirrored into a mounted folder's `.erdou/` config. The Help page defines only Ink and Paper, so **二豆** and **Cream** fall back to Ink there.
 
 ## Troubleshooting
 

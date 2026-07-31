@@ -5,7 +5,7 @@ The reference browser-native Runtime kernel for Erdou. Implements `@erdou/runtim
 Subsystems:
 - **VFS** — a POSIX-ish in-memory filesystem (inodes, symlinks with loop detection, fd-less sync API) that throws typed errno errors.
 - **Process** — a `ProcessTable` with pid/ppid/stdio/exit-codes, backed by an in-process JS executor; pipelines and child spawns.
-- **Shell** — tokenizer + parser + interpreter: pipelines, `&&`/`||`/`;`, redirections, `$VAR` expansion, globbing; built-ins (`ls cat grep find head tail mkdir rm cp mv touch echo pwd env which ps kill true false`), plus `cd`/`export` as shell state.
+- **Shell** — tokenizer + parser + interpreter: pipelines, `&&`/`||`/`;`, trailing-`&` background jobs, redirections (`>` `>>` `<` plus fd duplication `2>&1` / `1>&2` / `&>` / `&>>`, resolved left to right), `$VAR` expansion, `$(...)` command substitution (subshell; result never field-split), globbing; built-ins (`ls cat grep sed awk find head tail mkdir rm cp mv touch echo pwd env which ps kill true false erdou`), plus `cd`/`export`/`jobs` as shell state.
 - **Snapshot** — serialize/restore the whole filesystem; memory + IndexedDB stores.
 - **Port / Net** — virtual port registry and a permission-gated fetch.
 

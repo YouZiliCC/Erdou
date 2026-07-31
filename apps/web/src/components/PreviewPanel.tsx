@@ -1,11 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import type { Studio } from "../lib/studio.js";
 
-/** Studio's preview-frame registration (wired by the studio-side preview-tools
- *  integration: `registerPreviewFrame` keeps the live iframe element so the
- *  agent's preview_read/preview_click/preview_logs tools can reach it). Typed
- *  as an optional structural method so this panel also typechecks/works
- *  against a Studio build without that wiring. */
+/** Studio's preview-frame registration: `registerPreviewFrame` (studio.ts)
+ *  keeps the live iframe element so the agent's preview_read / preview_click /
+ *  preview_logs tools can reach it. It is a REQUIRED method on the concrete
+ *  `Studio` class and is called unconditionally from the iframe ref below. */
 import { detectRunCommand, staticServeCommand } from "../lib/run-detect.js";
 import { killTrackedServe } from "../lib/run-serve.js";
 import { bundleProject, hasBundleEntry } from "../lib/bundle-project.js";
