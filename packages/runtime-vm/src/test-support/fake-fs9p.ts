@@ -1,7 +1,11 @@
 import { WORKSPACE, type Fs9p } from "../fs-bridge.js";
 
 /** A JS-map-backed fake of the v86 FS surface the bridge uses. Inodes are
- *  {mode,size,direntries?,symlink?,mtime,qid}; dirs hold a name→idx map.
+ *  {mode,size,direntries,symlink?,mtime,qid}. EVERY inode gets a direntries
+ *  Map — exactly like real v86's inode constructor — and the Create* methods,
+ *  like link_under_dir, never check that the parent is a directory: linking a
+ *  child under a FILE inode succeeds. The bridge's ENOTDIR guards exist for
+ *  precisely that; a dirs-only fake would mask the phantom-entry bug they pin.
  *  `inodedata` is the ONE store for file bytes (real v86 has this field too) —
  *  both the guest-path methods (CreateBinaryFile/Write/ChangeSize) and the
  *  sync reader (SyncFs9pFs) read/write it directly; no separate mirror.
@@ -10,7 +14,7 @@ export function makeFakeFs9p(): Fs9p & { root: number } {
   const inodes: any[] = [];
   const inodedata: Record<number, Uint8Array | undefined> = {};
   const mkInode = (mode: number): number => {
-    inodes.push({ mode, size: 0, direntries: (mode & 0o170000) === 0o040000 ? new Map() : undefined, mtime: 0, qid: { version: 0 } });
+    inodes.push({ mode, size: 0, direntries: new Map(), mtime: 0, qid: { version: 0 } });
     return inodes.length - 1;
   };
   const root = mkInode(0o040755); // idx 0 = export root

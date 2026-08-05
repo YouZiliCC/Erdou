@@ -116,12 +116,16 @@ def list_procs():
             with open("/proc/%s/cmdline" % pid, "rb") as f:
                 parts = f.read().split(b"\x00")
             with open("/proc/%s/stat" % pid) as f:
-                ppid = int(f.read().split(") ", 1)[1].split()[1])
+                # comm (inside the parens) may itself contain ") " — any guest
+                # process can write /proc/self/comm — so only the LAST ") " is
+                # the true delimiter (after it the line is a state char plus
+                # numeric fields, which can never contain it).
+                ppid = int(f.read().rsplit(") ", 1)[1].split()[1])
             cmd = (parts[0] or b"").decode(errors="replace")
             args = [p.decode(errors="replace") for p in parts[1:] if p]
             out.append({"pid": int(pid), "ppid": ppid, "cmd": cmd, "args": args,
                         "cwd": "/", "state": "running", "startTimeMs": 0, "exitCode": None})
-        except (FileNotFoundError, ProcessLookupError, IndexError, PermissionError):
+        except (FileNotFoundError, ProcessLookupError, IndexError, ValueError, PermissionError):
             continue
     return out
 

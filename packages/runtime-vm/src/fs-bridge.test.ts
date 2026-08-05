@@ -197,6 +197,54 @@ describe("Fs9pBridge", () => {
     expect(fs.SearchPath(WORKSPACE).id).toBe(wsId); // and the workspace root itself survived
   });
 
+  it("writeFile through a FILE path-component throws ENOTDIR instead of creating a phantom entry", async () => {
+    const fs = makeFakeFs9p(); bootWorkspace(fs);
+    const bridge = new Fs9pBridge(fs, () => {}); bridge.attach();
+    await bridge.writeFile("/notes.txt", "data");
+    const notes = fs.SearchPath("workspace/notes.txt").id;
+    // v86 links the child under the file inode without complaint (every inode
+    // has a direntries Map); the guest's 9p never lists children of a regular
+    // file and snapshotWorkspace serializes the parent as a plain file, so the
+    // phantom's bytes would be silently dropped from every snapshot.
+    await expect(bridge.writeFile("/notes.txt/x", "phantom")).rejects.toThrow(/ENOTDIR/);
+    expect(fs.Search(notes, "x")).toBe(-1);
+    expect(new TextDecoder().decode(await bridge.readFile("/notes.txt"))).toBe("data");
+  });
+
+  it("mkdir through or onto a FILE throws ENOTDIR (recursive mkdir over a file must not silently no-op)", async () => {
+    const fs = makeFakeFs9p(); bootWorkspace(fs);
+    const bridge = new Fs9pBridge(fs, () => {}); bridge.attach();
+    await bridge.writeFile("/notes.txt", "data");
+    const notes = fs.SearchPath("workspace/notes.txt").id;
+    await expect(bridge.mkdir("/notes.txt/sub", { recursive: true })).rejects.toThrow(/ENOTDIR/);
+    await expect(bridge.mkdir("/notes.txt/sub")).rejects.toThrow(/ENOTDIR/);
+    await expect(bridge.mkdir("/notes.txt", { recursive: true })).rejects.toThrow(/ENOTDIR/);
+    await expect(bridge.mkdir("/notes.txt")).rejects.toThrow(/EEXIST/); // browser-kernel parity: non-recursive existing entry is EEXIST
+    expect(fs.Search(notes, "sub")).toBe(-1);
+    expect((await bridge.stat("/notes.txt")).type).toBe("file");
+  });
+
+  it("rm with force emits no delete event and keeps the path index when the underlying Unlink fails", async () => {
+    const fs = makeFakeFs9p(); bootWorkspace(fs);
+    const events: RuntimeEvent[] = [];
+    const bridge = new Fs9pBridge(fs, (e) => events.push(e)); bridge.attach();
+    await bridge.mkdir("/d", { recursive: true });
+    const dId = fs.SearchPath("workspace/d").id;
+    events.length = 0;
+    // Real v86's Unlink returns -39 (ENOTEMPTY) when a concurrent host-side
+    // write linked a new child between rm's kid capture and the final Unlink.
+    const realUnlink = fs.Unlink;
+    fs.Unlink = () => -39;
+    await bridge.rm("/d", { recursive: true, force: true }); // force swallows the error but must not lie
+    fs.Unlink = realUnlink;
+    expect(events.filter((e) => e.type === "file.changed")).toEqual([]);
+    // The surviving directory keeps its path-index entry: a later guest create
+    // under it must still map to the right contract path.
+    fs.CreateFile("x", dId);
+    bridge.flush();
+    expect(events.filter((e) => e.type === "file.changed").at(-1)).toMatchObject({ path: "/d/x", kind: "create" });
+  });
+
   it("readFile of an empty (never-written) file returns 0 bytes, not ENOENT", async () => {
     const fs = makeFakeFs9p(); bootWorkspace(fs);
     const bridge = new Fs9pBridge(fs, () => {}); bridge.attach();

@@ -17,7 +17,9 @@ const fromB64 = (s: string): Uint8Array => Uint8Array.from(atob(s), (c) => c.cha
 export async function snapshotWorkspace(fs9p: Fs9p, clock: () => number): Promise<Snapshot> {
   const ws = fs9p.SearchPath(WORKSPACE);
   if (ws.id === -1) throw new Error("snapshotWorkspace: no /workspace");
-  const build = async (id: number, atRoot: boolean): Promise<SnapshotFsNode> => {
+  // `path` accumulates through the DFS — snapshots run on the app's debounced
+  // save path, and rediscovering each file's path from the root is O(n^2).
+  const build = async (id: number, atRoot: boolean, path: string): Promise<SnapshotFsNode> => {
     const inode = fs9p.GetInode(id);
     const m = inode.mode & S_IFMT;
     if (m === S_IFDIR) {
@@ -25,32 +27,15 @@ export async function snapshotWorkspace(fs9p: Fs9p, clock: () => number): Promis
       for (const [name, childId] of inode.direntries ?? []) {
         if (name === "." || name === "..") continue;
         if (atRoot && SKELETON_DIRS.includes(name)) continue; // image-owned mount points
-        children[name] = await build(childId, false);
+        children[name] = await build(childId, false, path + "/" + name);
       }
       return { type: "directory", mode: inode.mode & 0o7777, children };
     }
     if (m === S_IFLNK) return { type: "symlink", mode: inode.mode & 0o7777, target: inode.symlink ?? "" };
-    const path = pathOf(fs9p, id);
     const data = (await fs9p.read_file(path)) ?? new Uint8Array(0);
     return { type: "file", mode: inode.mode & 0o7777, data: toB64(data) };
   };
-  return { version: 1, createdAtMs: clock(), fs: await build(ws.id, true) };
-}
-
-/** Recompute a fs9p path for an inode by walking from the workspace root. */
-function pathOf(fs9p: Fs9p, target: number): string {
-  const ws = fs9p.SearchPath(WORKSPACE).id;
-  let found = "";
-  const walk = (id: number, rel: string): boolean => {
-    if (id === target) { found = rel; return true; }
-    for (const [name, childId] of fs9p.GetInode(id).direntries ?? []) {
-      if (name === "." || name === "..") continue;
-      if (walk(childId, rel + "/" + name)) return true;
-    }
-    return false;
-  };
-  walk(ws, WORKSPACE);
-  return found;
+  return { version: 1, createdAtMs: clock(), fs: await build(ws.id, true, WORKSPACE) };
 }
 
 /** Clear the workspace (except skeleton) and rewrite the snapshot via the bridge. */

@@ -13,7 +13,9 @@ function absPath(cwd: string, p: string): string {
 }
 
 // Runs the user's code in a fresh namespace, capturing sys.exit() and exceptions.
-const RUNNER = `
+// Exported for the CPython-parity test (python.test.ts runs it under a real
+// python3); the mock-Pyodide tests never execute it.
+export const RUNNER = `
 import sys, os
 sys.argv = list(__erdou_argv)
 try:
@@ -25,6 +27,8 @@ try:
     exec(compile(__erdou_code, __erdou_file, "exec"), {"__name__": "__main__", "__file__": __erdou_file})
 except SystemExit as __e:
     __erdou_exit = __e.code if isinstance(__e.code, int) else (0 if __e.code is None else 1)
+    if __e.code is not None and not isinstance(__e.code, int):
+        print(__e.code, file=sys.stderr)  # CPython prints a non-int exit arg — sys.exit("message") is the standard CLI error idiom
 except BaseException:
     import traceback
     traceback.print_exc()

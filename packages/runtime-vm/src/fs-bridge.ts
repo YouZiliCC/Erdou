@@ -245,6 +245,11 @@ export class Fs9pBridge {
       let kind: ChangeKind;
       if (w.id === -1) {
         if (w.parentid === -1) throw new ErrnoError("ENOENT", { path, syscall: "open" });
+        // v86 links a new entry under ANY inode — every inode has a direntries
+        // Map and CreateBinaryFile never checks the parent — so a parent that
+        // is a FILE would take a host-only phantom child the guest's 9p never
+        // lists and snapshotWorkspace never serializes (silent data loss).
+        if ((this.fs.GetInode(w.parentid).mode & S_IFMT) !== S_IFDIR) throw new ErrnoError("ENOTDIR", { path, syscall: "open" });
         idx = await this.fs.CreateBinaryFile(this.base(path), w.parentid, buf);
         kind = "create";
       } else {
@@ -288,6 +293,11 @@ export class Fs9pBridge {
         const existing = this.fs.Search(parentid, parts[i]!);
         if (existing !== -1) {
           if (i === parts.length - 1 && !opts?.recursive) throw new ErrnoError("EEXIST", { path, syscall: "mkdir" });
+          // A FILE on the path: descending into it would let CreateDirectory
+          // link a phantom child under it (v86 never checks), and recursive
+          // mkdir over an existing file would silently no-op. Same answer as
+          // the browser kernel's vfs for both.
+          if ((this.fs.GetInode(existing).mode & S_IFMT) !== S_IFDIR) throw new ErrnoError("ENOTDIR", { path, syscall: "mkdir" });
           parentid = existing;
         } else {
           if (i < parts.length - 1 && !opts?.recursive) throw new ErrnoError("ENOENT", { path, syscall: "mkdir" });
@@ -319,7 +329,11 @@ export class Fs9pBridge {
         for (const k of kids) await this.rm(path.replace(/\/$/, "") + "/" + k, { recursive: true, force: true });
       }
       const ret = this.fs.Unlink(w.parentid, this.base(path));
-      if (ret < 0 && !opts?.force) throw new ErrnoError("ENOENT", { path, syscall: "unlink" });
+      // A failed Unlink (e.g. -39 ENOTEMPTY from a concurrent host-side write
+      // landing a new child mid-rm) left the entry in place: force may swallow
+      // the error, but it must not emit a delete event for a path that still
+      // exists or drop its path-index entry (mirrors SyncFs9pFs.rm).
+      if (ret < 0) { if (opts?.force) return; throw new ErrnoError("ENOENT", { path, syscall: "unlink" }); }
       // Free the bytes only after a SUCCESSFUL unlink (mirrors SyncFs9pFs.rm).
       // v86's Unlink just drops the direntry and flags the inode; the data is
       // released by CloseInode→DeleteData, which only the guest's 9p Tclunk
@@ -327,7 +341,7 @@ export class Fs9pBridge {
       // write→delete cycle (and every restoreSnapshot, which rm's each
       // top-level entry) retains its megabytes for the session AND keeps
       // serialising them into FS.get_state.
-      if (ret === 0) delete this.fs.inodedata[w.id];
+      delete this.fs.inodedata[w.id];
       this.paths.delete(w.id);
       this.emitChange(this.cpath(path), "delete");
     } finally { this.suppress--; }

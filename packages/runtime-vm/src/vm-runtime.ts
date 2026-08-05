@@ -109,6 +109,10 @@ export class VmRuntime implements Runtime {
     // emulator can no longer feed.
     for (const q of [...this.sseStreams]) q.fail(new Error("VmRuntime shutdown while this SSE response was still streaming"));
     this.sseStreams.clear();
+    // PTY sessions die with the emulator; a session whose consumer never
+    // dispose()s must not keep its slot occupied on the next boot() — three
+    // such cycles would otherwise exhaust all 3 hvc ports forever.
+    this.ptyPorts.clear();
     this.guestd?.dispose();   // ends open ChunkStreams + rejects pending (via its own `pending` map)
     this.bridge?.dispose();
     await this.host.destroy().catch(() => {});
@@ -124,7 +128,16 @@ export class VmRuntime implements Runtime {
       rec.state = s.signal ? "killed" : "exited"; // record survives (NOT deleted)
       this.emit({ type: "process.exited", pid: p.pid, code: s.code, signal: s.signal });
     });
-    const stdinEnded = { write() {}, end() {} };
+    // Same refusal as spawn's stdin option: guestd gives every process
+    // /dev/null, so a post-spawn write has nowhere to go — throwing beats a
+    // sink that swallows the bytes the browser kernel would have delivered.
+    // end() stays a no-op: closing a never-connected stdin loses nothing.
+    const stdinEnded = {
+      write() {
+        throw new Error("VmRuntime: process stdin is not connected (guestd runs commands with stdin=/dev/null)");
+      },
+      end() {},
+    };
     return { pid: p.pid, stdout: p.stdout, stderr: p.stderr, stdin: stdinEnded, wait: () => rec.waited, kill: (s?: Signal) => p.kill(SIG(s)) };
   }
 
@@ -132,6 +145,15 @@ export class VmRuntime implements Runtime {
     return this.track(await this.guestd.exec(commandLine, { cwd: options?.cwd, env: options?.env }), commandLine, []);
   }
   async spawn(options: SpawnOptions): Promise<ProcessHandle> {
+    // guestd launches every process with stdin=/dev/null (run_command), while
+    // the browser kernel delivers SpawnOptions.stdin to the process — dropping
+    // the bytes silently would make the same spawn() succeed with different
+    // results per kernel. No caller passes stdin to the VM today; refuse loudly
+    // until the SPAWN frame carries it. (ENOTSUP is not in the contract's Errno
+    // union, so this is a plain Error like VmRuntime's other refusals.)
+    if (options.stdin !== undefined && options.stdin.length > 0) {
+      throw new Error("ENOTSUP: SpawnOptions.stdin is not supported on the VM kernel — guestd runs processes with stdin=/dev/null; write the bytes to a workspace file and redirect instead");
+    }
     return this.track(await this.guestd.spawn(options.cmd, options.args ?? [], { cwd: options.cwd, env: options.env }), options.cmd, options.args ?? []);
   }
   async kill(pid: number, signal?: Signal): Promise<void> {

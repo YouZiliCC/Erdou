@@ -26,6 +26,29 @@ describe("workspace snapshot", () => {
     expect(new TextDecoder().decode(await bridge.readFile("/sub/b.txt"))).toBe("two");
   });
 
+  it("threads each file's path through the DFS instead of a per-file full-tree re-walk", async () => {
+    const fs = makeFakeFs9p(); bootWorkspace(fs);
+    const bridge = new Fs9pBridge(fs, () => {}); bridge.attach();
+    await bridge.mkdir("/sub", { recursive: true });
+    await bridge.writeFile("/a.txt", "one");
+    await bridge.writeFile("/sub/b.txt", "two");
+    await bridge.writeFile("/sub/c.txt", "three");
+
+    // Snapshot runs on the 400ms-debounced save path; recomputing each file's
+    // path with a fresh DFS from the workspace root made a save O(n^2).
+    let searches = 0;
+    const realSearchPath = fs.SearchPath.bind(fs);
+    fs.SearchPath = (p: string) => { searches++; return realSearchPath(p); };
+    const snap = await snapshotWorkspace(fs, () => 0);
+    expect(searches).toBe(1 + 3); // the root lookup + one read_file resolve per file — nothing per-file beyond that
+
+    const root = snap.fs.type === "directory" ? snap.fs.children : {};
+    const sub = root["sub"]?.type === "directory" ? root["sub"].children : {};
+    expect(root["a.txt"]).toMatchObject({ type: "file", data: btoa("one") });
+    expect(sub["b.txt"]).toMatchObject({ type: "file", data: btoa("two") });
+    expect(sub["c.txt"]).toMatchObject({ type: "file", data: btoa("three") });
+  });
+
   it("restores file modes and symlinks", async () => {
     const fs = makeFakeFs9p(); bootWorkspace(fs);
     const bridge = new Fs9pBridge(fs, () => {}); bridge.attach();

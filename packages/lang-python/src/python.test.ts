@@ -1,7 +1,8 @@
+import { spawnSync } from "node:child_process";
 import { describe, it, expect } from "vitest";
 import { Vfs, PipeStream } from "@erdou/runtime-browser";
 import type { ExecContext } from "@erdou/runtime-contract";
-import { createPythonRunners, type PipInstallHooks, type LocalWheelResolver } from "./python.js";
+import { createPythonRunners, RUNNER, type PipInstallHooks, type LocalWheelResolver } from "./python.js";
 import type { EmscriptenFS } from "./pyodide.js";
 
 // A minimal in-memory Emscripten-like FS for the mock.
@@ -333,6 +334,41 @@ describe("python runner (plumbing, mock Pyodide)", () => {
     expect(err).not.toMatch(/can't open file/); // not the cryptic error
     expect(err).toContain("erdou serve"); // the working static-serve path here
     expect(err).toContain("vm:"); // and the VM alternative for a real server
+  });
+});
+
+// RUNNER's SystemExit handling, executed under a REAL CPython (the mock
+// Pyodide tests never run the Python source). Skipped where python3 is absent.
+const HAVE_PY3 = spawnSync("python3", ["--version"]).status === 0;
+describe.skipIf(!HAVE_PY3)("RUNNER SystemExit semantics (real CPython)", () => {
+  const run = (userCode: string) => {
+    // The exact harness pythonExecutor sets up: the __erdou_* globals RUNNER
+    // reads, then RUNNER itself, then the exit code it computed.
+    const harness =
+      "import sys\n" +
+      "__erdou_code = sys.argv[1]\n" +
+      '__erdou_file = "<test>"\n' +
+      '__erdou_argv = ["<test>"]\n' +
+      '__erdou_cwd = "/"\n' +
+      RUNNER +
+      "\nsys.exit(__erdou_exit)\n";
+    const r = spawnSync("python3", ["-c", harness, userCode], { encoding: "utf8" });
+    return { status: r.status, stderr: r.stderr };
+  };
+
+  it("prints a non-int sys.exit argument to stderr and exits 1, like CPython", () => {
+    const r = run("import sys; sys.exit('error: config missing')");
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("error: config missing");
+  });
+
+  it("keeps the int and bare cases: sys.exit(3) is silent exit 3, sys.exit() is silent exit 0", () => {
+    const three = run("import sys; sys.exit(3)");
+    expect(three.status).toBe(3);
+    expect(three.stderr).toBe("");
+    const bare = run("import sys; sys.exit()");
+    expect(bare.status).toBe(0);
+    expect(bare.stderr).toBe("");
   });
 });
 
