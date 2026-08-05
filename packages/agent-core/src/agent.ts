@@ -88,7 +88,17 @@ export class CodingAgent {
         let args: Record<string, unknown> = {};
         let parseError: string | null = null;
         try {
-          args = call.arguments.trim().length > 0 ? (JSON.parse(call.arguments) as Record<string, unknown>) : {};
+          if (call.arguments.trim().length > 0) {
+            // Model output is untrusted: lax backends emit "null" for no-arg
+            // calls. A non-object must become a tool error the model can see,
+            // not a crash of the run.
+            const parsed: unknown = JSON.parse(call.arguments);
+            if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+              parseError = `tool arguments for ${call.name} must be a JSON object, got: ${call.arguments}`;
+            } else {
+              args = parsed as Record<string, unknown>;
+            }
+          }
         } catch {
           parseError = `invalid JSON arguments for ${call.name}: ${call.arguments}`;
         }

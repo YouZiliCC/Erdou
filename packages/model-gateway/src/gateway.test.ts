@@ -52,6 +52,13 @@ describe("ModelGateway", () => {
     expect((captured[0]!.init.headers as Record<string, string>).authorization).toBe("Bearer sk-test");
   });
 
+  it("tolerates a trailing slash on the OpenAI baseUrl", async () => {
+    const { fetch, captured } = jsonFetch(200, { choices: [{ message: { content: "hi" } }] });
+    const gw = new ModelGateway({ fetch });
+    await gw.chat({ ...openaiConfig, baseUrl: "https://api/v1/" }, [{ role: "user", content: "x" }]);
+    expect(captured[0]!.url).toBe("https://api/v1/chat/completions");
+  });
+
   it("posts to the Anthropic endpoint with x-api-key and returns text", async () => {
     const { fetch, captured } = jsonFetch(200, {
       content: [{ type: "text", text: "hey" }],

@@ -91,6 +91,32 @@ describe("CodingAgent", () => {
     expect(result.steps).toBe(3);
   });
 
+  it("turns JSON-null tool arguments into an error tool message instead of crashing the run", async () => {
+    const runtime = await freshRuntime();
+    const events: AgentEvent[] = [];
+    // Lax OpenAI-compatible backends emit arguments: "null" for no-arg calls.
+    const gateway = scriptedGateway([toolCall("write_file", null), final("Recovered.")]);
+    const agent = new CodingAgent({ runtime, gateway, model, onEvent: (e) => events.push(e) });
+    const result = await agent.run("x");
+
+    expect(result.stoppedReason).toBe("done");
+    expect(result.finalMessage).toBe("Recovered.");
+    const toolMsg = result.transcript.find((m) => m.role === "tool");
+    expect(toolMsg?.content).toMatch(/write_file.*JSON object.*null/);
+    expect(events.some((e) => e.type === "tool_result" && e.name === "write_file" && !e.ok)).toBe(true);
+  });
+
+  it("turns non-object (primitive) tool arguments into an error tool message", async () => {
+    const runtime = await freshRuntime();
+    const gateway = scriptedGateway([toolCall("run_shell", 42), final("Recovered.")]);
+    const agent = new CodingAgent({ runtime, gateway, model });
+    const result = await agent.run("x");
+
+    expect(result.stoppedReason).toBe("done");
+    const toolMsg = result.transcript.find((m) => m.role === "tool");
+    expect(toolMsg?.content).toMatch(/run_shell.*JSON object.*42/);
+  });
+
   it("handles a malformed tool call and still terminates", async () => {
     const runtime = await freshRuntime();
     const badCall = {

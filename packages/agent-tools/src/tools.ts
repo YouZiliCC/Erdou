@@ -1,6 +1,7 @@
 import type { ToolContext, ToolDef, ToolResult } from "./types.js";
 
 const decoder = new TextDecoder();
+const encoder = new TextEncoder();
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 const pathParam = {
@@ -41,7 +42,9 @@ const writeFile: ToolDef = {
     }
     try {
       await ctx.runtime.writeFile(args.path, args.content);
-      return { ok: true, output: `wrote ${args.content.length} bytes to ${args.path}` };
+      // The runtime writes UTF-8; String.length counts UTF-16 code units and
+      // would misreport any non-ASCII content to the model.
+      return { ok: true, output: `wrote ${encoder.encode(args.content).length} bytes to ${args.path}` };
     } catch (err) {
       return { ok: false, output: message(err) };
     }

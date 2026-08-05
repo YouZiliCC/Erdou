@@ -47,6 +47,35 @@ describe("bundle", () => {
     expect(html).toContain("const x=1;");
   });
 
+  it("escapes </style in the inlined CSS so the stylesheet cannot break out of its element", () => {
+    const html = previewHtml("const x=1;", '.hint::after{content:"</style>"}');
+    // Rawtext parsing ends the style element at the first literal `</style` —
+    // only the real closing tag may contain that sequence.
+    expect(html.match(/<\/style/gi)).toHaveLength(1);
+    expect(html).toContain('content:"<\\/style>"');
+    expect(html.indexOf("body{margin:0")).toBeLessThan(html.indexOf("</style>"));
+  });
+
+  it("finds the index.html module script regardless of attribute order", () => {
+    const fs = new Vfs({ clock: () => 0 });
+    fs.mkdir("/src", { recursive: true });
+    fs.writeFile("/index.html", '<html><body><script src="/src/game.js" type="module"></script></body></html>');
+    fs.writeFile("/src/game.js", "console.log(1)");
+    expect(findEntry(fs)).toBe("/src/game.js");
+  });
+
+  it("recognizes /src/index.ts and /src/index.js as conventional entries", () => {
+    const tsFs = new Vfs({ clock: () => 0 });
+    tsFs.mkdir("/src", { recursive: true });
+    tsFs.writeFile("/src/index.ts", "console.log(1)");
+    expect(findEntry(tsFs)).toBe("/src/index.ts");
+
+    const jsFs = new Vfs({ clock: () => 0 });
+    jsFs.mkdir("/src", { recursive: true });
+    jsFs.writeFile("/src/index.js", "console.log(1)");
+    expect(findEntry(jsFs)).toBe("/src/index.js");
+  });
+
   it("resolves a directory import through its index barrel, including the barrel's own relative imports", async () => {
     const fs = new Vfs({ clock: () => 0 });
     fs.mkdir("/src/components", { recursive: true });

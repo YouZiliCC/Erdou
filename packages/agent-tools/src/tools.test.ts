@@ -23,6 +23,13 @@ describe("agent tools", () => {
     expect(read).toEqual({ ok: true, output: "hello" });
   });
 
+  it("write_file reports the real UTF-8 byte count, not UTF-16 code units", async () => {
+    const write = await byName("write_file").execute({ runtime }, { path: "/u.txt", content: "héllo 🙂" });
+    expect(write.ok).toBe(true);
+    // "héllo 🙂" = 5 ASCII + é (2) + 🙂 (4) = 11 bytes on disk; .length says 8.
+    expect(write.output).toBe("wrote 11 bytes to /u.txt");
+  });
+
   it("read_file on a missing file returns an error result, not a throw", async () => {
     const read = await byName("read_file").execute({ runtime }, { path: "/nope" });
     expect(read.ok).toBe(false);

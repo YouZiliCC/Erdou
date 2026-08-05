@@ -1,8 +1,9 @@
 import type { ChatMessage, ChatResult, ChatOptions, ModelConfig, ToolCall } from "./types.js";
 import { parseSSE } from "./sse.js";
 
+// baseUrl is user-typed; tolerate a trailing slash like the Anthropic path does.
 function endpoint(config: ModelConfig): string {
-  return `${config.baseUrl}/chat/completions`;
+  return `${config.baseUrl.replace(/\/+$/, "")}/chat/completions`;
 }
 
 function headers(config: ModelConfig): Record<string, string> {
