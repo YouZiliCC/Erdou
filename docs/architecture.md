@@ -102,7 +102,10 @@ Four properties of the shell's redirection and command substitution worth knowin
   as POSIX says they must. Every target is opened before the command runs, as in bash: an
   overridden one is still created and truncated (`> a > b` leaves `a` empty), an unopenable one
   fails the command instead of letting it run, and a command that never starts still truncates its
-  log rather than leaving the previous run's output to be read as this one's. Only fds 0/1/2 exist;
+  log rather than leaving the previous run's output to be read as this one's. `/dev/null` is
+  recognized by the SHELL, not the vfs (which has no device nodes): as a redirect target it is a
+  discard sink and as `<` an empty stdin, but a program that opens the path itself
+  (`cat /dev/null`) still sees ENOENT. Only fds 0/1/2 exist;
   anything else (`3> f`, `2>&3`, `2>&-`, csh `>&file`) is a loud `EINVAL` rather than a silently
   dropped redirect. Everything the shell does NOT implement — backticks, `${X:-d}`, positional
   parameters, `$((…))` — likewise raises a syntax error instead of degrading to empty text. The
