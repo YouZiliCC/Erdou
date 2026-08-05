@@ -26,9 +26,10 @@ export function globToRegExp(segment: string): RegExp {
  *  characters rather than the escape being introduced here. */
 export const escapeGlobLiteral = (s: string): string => s.replace(/[*?\\]/g, "\\$&");
 
-/** Escape text whose `*`/`?` still glob — an unquoted run, or a variable's
- *  value, which POSIX subjects to pathname expansion. Only the backslashes are
- *  protected: `a\b*` has to look for a name starting `a\b`, not `ab`. */
+/** Escape text whose `*`/`?` still glob — an unquoted run written in the
+ *  source (expansion values never glob here; see expandWord). Only the
+ *  backslashes are protected: `a\b*` has to look for a name starting `a\b`,
+ *  not `ab`. */
 export const escapeGlobBackslashes = (s: string): string => s.replace(/\\/g, "\\\\");
 
 /** Strip one level of escaping, for the two places that need the pattern's own

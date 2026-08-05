@@ -123,27 +123,50 @@ function takeLines(text: string, n: number, fromEnd: boolean): string {
   return picked.map((l) => l + "\n").join("");
 }
 
-function makeHeadTail(fromEnd: boolean): Program {
+function makeHeadTail(name: string, fromEnd: boolean): Program {
   return async (ctx) => {
     const args = ctx.argv.slice(1);
     let n = 10;
     const files: string[] = [];
     for (let i = 0; i < args.length; i++) {
       const a = args[i]!;
-      if (a === "-n") n = parseInt(args[++i] ?? "10", 10);
-      else if (/^-\d+$/.test(a)) n = parseInt(a.slice(1), 10);
+      if (a === "-n") {
+        const v = args[++i];
+        // parseInt would turn a missing or garbled count into NaN, which
+        // takeLines reads as "nothing" (head) or "everything" (tail) — a
+        // silent degradation, so reject anything but a plain integer.
+        if (v === undefined || !/^\d+$/.test(v)) {
+          ctx.stderr.write(`${name}: invalid line count '${v ?? ""}' (usage: ${name} [-n N] [FILE...])\n`);
+          return 2;
+        }
+        n = parseInt(v, 10);
+      } else if (/^-\d+$/.test(a)) n = parseInt(a.slice(1), 10);
       else files.push(a);
     }
-    try {
-      const text = files.length > 0 ? decode(ctx.fs.readFile(abs(ctx.cwd, files[0]!))) : await readAllText(ctx.stdin);
-      ctx.stdout.write(takeLines(text, n, fromEnd));
+    if (files.length === 0) {
+      ctx.stdout.write(takeLines(await readAllText(ctx.stdin), n, fromEnd));
       return 0;
-    } catch (err) {
-      ctx.stderr.write(describeError(err) + "\n");
-      return 1;
     }
+    let code = 0;
+    let headed = false;
+    for (const f of files) {
+      let text: string;
+      try {
+        text = decode(ctx.fs.readFile(abs(ctx.cwd, f)));
+      } catch (err) {
+        ctx.stderr.write(describeError(err) + "\n");
+        code = 1;
+        continue;
+      }
+      // coreutils separator: header per operand only when there are several,
+      // with a blank line before every header except the first emitted one.
+      if (files.length > 1) ctx.stdout.write((headed ? "\n" : "") + `==> ${f} <==\n`);
+      headed = true;
+      ctx.stdout.write(takeLines(text, n, fromEnd));
+    }
+    return code;
   };
 }
 
-export const head = makeHeadTail(false);
-export const tail = makeHeadTail(true);
+export const head = makeHeadTail("head", false);
+export const tail = makeHeadTail("tail", true);

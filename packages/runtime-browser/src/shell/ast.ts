@@ -2,13 +2,14 @@
  *  are `var`; an unquoted run containing `*`/`?` is `glob` (so quoting disables
  *  globbing, as in POSIX); `$(...)` is `cmdsub`, holding the raw source of the
  *  command to run — the interpreter resolves it to a `sub` before expansion, so
- *  everything downstream of that stays synchronous. (`sub`, not `lit`: the two
- *  glob differently — a `lit`'s `*`/`?` are escaped to literals, a `sub`'s are
- *  left alone like a variable's value.)
+ *  everything downstream of that stays synchronous. (`sub`, not `lit`, only to
+ *  keep the provenance visible: the two expand identically — an expansion's
+ *  `*`/`?` never glob, exactly like a `lit`'s.)
  *
  *  `cmdsub` carries no "was it quoted" flag because it needs none: this shell
- *  never field-splits an expansion (an unquoted `$VAR` is one argument too), so
- *  quoted and unquoted substitutions expand identically. */
+ *  never field-splits or globs an expansion (an unquoted `$VAR` is one argument
+ *  and never a pattern too), so quoted and unquoted substitutions expand
+ *  identically. */
 export type WordPart =
   | { t: "lit"; v: string }
   | { t: "var"; name: string }

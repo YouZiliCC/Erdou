@@ -140,8 +140,16 @@ export const find: Program = async (ctx) => {
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === "-name") namePattern = args[++i] ?? "";
-    else if (a === "-type") typeFilter = args[++i] === "d" ? "d" : "f";
-    else if (!a.startsWith("-")) dir = a;
+    else if (a === "-type") {
+      const v = args[++i];
+      // Collapsing e.g. 'l' to 'f' would list regular files as an answer to a
+      // symlink query — reject every value the walk below cannot honour.
+      if (v !== "f" && v !== "d") {
+        ctx.stderr.write(`find: unsupported -type '${v ?? ""}' (supported: f, d)\n`);
+        return 1;
+      }
+      typeFilter = v;
+    } else if (!a.startsWith("-")) dir = a;
   }
   const base = abs(ctx.cwd, dir);
   try {

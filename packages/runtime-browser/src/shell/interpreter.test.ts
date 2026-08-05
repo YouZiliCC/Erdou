@@ -117,6 +117,17 @@ describe("Shell interpreter", () => {
     expect(await r.stdout.text()).toBe("0\n");
   });
 
+  it("resets $? to 0 on a `&` launch — a prior failure must not linger", async () => {
+    // bash: the exit status of an asynchronous list is zero. The fresh-shell
+    // test above cannot see this — its status cell already reads 0.
+    const { shell } = makeShell();
+    expect(await shell.run("false")).toBe(1);
+    expect(await shell.run("echo hi &")).toBe(0);
+    const r = shell.execute("echo $?");
+    await r.wait();
+    expect(await r.stdout.text()).toBe("0\n");
+  });
+
   // ---- fd duplication (2>&1 and friends) -----------------------------------
 
   /** A program that writes to BOTH streams, so a test can tell them apart. */
@@ -388,6 +399,16 @@ describe("Shell interpreter", () => {
     expect(shell.cwd).toBe("/");
   });
 
+  it("treats an unquoted # starting a word as a comment", async () => {
+    const { shell } = makeShell();
+    let r = shell.execute("echo hi # not arguments");
+    expect(await r.wait()).toBe(0);
+    expect(await r.stdout.text()).toBe("hi\n");
+    r = shell.execute("# a whole-line comment");
+    expect(await r.wait()).toBe(0);
+    expect(await r.stdout.text()).toBe("");
+  });
+
   // ---- command substitution -------------------------------------------------
 
   it("substitutes $(...) with the command's stdout, trailing newlines stripped", async () => {
@@ -440,6 +461,15 @@ describe("Shell interpreter", () => {
     expect(await r.stdout.text()).toBe("avalue /sub\n");
   });
 
+  it("lets $? inside a $(...) see the caller's current status", async () => {
+    // bash: a command-substitution subshell inherits $?, exactly as it inherits
+    // the cwd and env.
+    const { shell } = makeShell();
+    const r = shell.execute("false; echo $(echo $?)");
+    expect(await r.wait()).toBe(0);
+    expect(await r.stdout.text()).toBe("1\n");
+  });
+
   it("passes the substitution's stderr through and does not adopt its exit code", async () => {
     const { shell } = makeShell();
     const r = shell.execute("echo [$(nosuchcmd)]");
@@ -486,6 +516,25 @@ describe("Shell interpreter", () => {
     r = shell.execute("echo $((1+2))");
     expect(await r.wait()).toBe(2);
     expect(await r.stderr.text()).toMatch(/arithmetic expansion is not supported/);
+  });
+
+  it("does not spawn the pipeline when kill() lands during a $(...) expansion", async () => {
+    // kill() kills the records running at that instant and sets `canceled`; the
+    // outer stages do not exist yet, so spawning them after the substitution
+    // unwinds would leave processes the kill loop can never reach — and wait()
+    // pending forever on them.
+    const { shell, table } = makeShell();
+    table.register("hang", () => new Promise<number>(() => {}));
+    table.register("server", () => new Promise<number>(() => {}));
+    const r = shell.execute("server $(hang)");
+    await new Promise((res) => setTimeout(res, 10)); // let the substitution's hang spawn
+    r.kill();
+    const outcome = await Promise.race([
+      r.wait().then((code) => `settled ${code}`),
+      new Promise((res) => setTimeout(() => res("still waiting"), 60)),
+    ]);
+    expect(outcome).toBe("settled 143"); // 128 + SIGTERM, like the killed stages report
+    expect(table.list().find((p) => p.cmd === "server")).toBeUndefined();
   });
 
   it("rejects a < on a later pipeline stage instead of silently ignoring it", async () => {

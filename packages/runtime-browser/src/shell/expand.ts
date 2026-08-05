@@ -67,10 +67,11 @@ function expandGlob(vfs: Vfs, cwd: string, pattern: string): string[] {
  */
 export function expandWord(word: Word, env: Record<string, string>, vfs: Vfs, cwd: string): string[] {
   // Two strings at once, because concatenating the parts is what destroys the
-  // quoting information: this loop is the last place that knows a `*` came from
-  // a `lit` part. `text` is the word with no globbing; `pattern` is the same
-  // text with the quoted metacharacters escaped, so `\*d*` and `"*"d*` glob on
-  // their second star only, as bash does.
+  // provenance: this loop is the last place that knows whether a `*` was
+  // written unquoted in the source (a `glob` part) or arrived quoted, escaped,
+  // or from an expansion. `text` is the word with no globbing; `pattern` is the
+  // same text with every other part's metacharacters escaped, so `\*d*` and
+  // `"*"d*` glob on their second star only, as bash does.
   let text = "";
   let pattern = "";
   let isGlob = false;
@@ -80,11 +81,15 @@ export function expandWord(word: Word, env: Record<string, string>, vfs: Vfs, cw
       pattern += escapeGlobLiteral(part.v);
     } else if (part.t === "var" || part.t === "sub") {
       // A resolved `$(...)` behaves exactly like a `$VAR`: substituted in, never
-      // field-split, and contributing its text to the glob pattern rather than
-      // being re-parsed as syntax.
+      // field-split, never re-parsed as syntax — and never globbed. POSIX globs
+      // an unquoted expansion's value, but these parts carry no quoted flag, so
+      // that cannot be expressed; escaping the value keeps its `*`/`?` literal
+      // even when a `glob` part elsewhere in the word turns matching on
+      // (deliberate divergence, documented in docs/architecture.md — one
+      // sentence, like no-field-splitting).
       const value = part.t === "var" ? (env[part.name] ?? "") : part.v;
       text += value;
-      pattern += escapeGlobBackslashes(value);
+      pattern += escapeGlobLiteral(value);
     } else if (part.t === "cmdsub") {
       // The interpreter resolves every cmdsub to a `sub` part before expanding,
       // which is what keeps this function synchronous.

@@ -25,12 +25,15 @@ const IN_PROCESS_BUILTINS = new Set(["cd", "export", "jobs"]);
 const MAX_SUBSTITUTION_DEPTH = 16;
 
 /** What a `$(...)` needs from the command that contains it: where to report the
- *  substitution's stderr, and the caller's process list + cancel flag, so a kill
- *  of the outer command reaches the subshell's processes too. */
+ *  substitution's stderr; the caller's process list + cancel flag, so a kill
+ *  of the outer command reaches the subshell's processes too; and the caller's
+ *  `$?`, which the subshell inherits like the cwd and env (bash:
+ *  `false; echo $(echo $?)` prints 1). */
 interface SubshellContext {
   stderr: PipeStream;
   records: ProcessRecord[];
   canceled: () => boolean;
+  lastStatus: number;
 }
 
 type ExpandedRedirect =
@@ -225,7 +228,12 @@ export class Shell {
     // shell's stdout and return immediately; the job runs detached under an
     // adopted pid (it is NOT in `records`, so killing this foreground result
     // does not touch it — `&` means detach).
-    if (list.background) return this.launchBackground(src, list, stdout);
+    if (list.background) {
+      // Launching the job IS the foreground command, and it succeeded; the
+      // job's own exit never lands in `$?` (see StatusCell).
+      this.status.last = 0;
+      return this.launchBackground(src, list, stdout);
+    }
     return this.runList(list.items, stdout, stderr, records, canceled, this.status);
   }
 
@@ -456,9 +464,15 @@ export class Shell {
     lastStatus: number,
     canceled: () => boolean,
   ): Promise<number> {
-    const ctx: SubshellContext = { stderr: shellStderr, records, canceled };
+    const ctx: SubshellContext = { stderr: shellStderr, records, canceled, lastStatus };
     const specs: ExpandedCommand[] = [];
     for (const c of pipeline.commands) specs.push(await this.expandCommand(c, lastStatus, ctx));
+
+    // Expansion is async (`$(...)`), so a kill can land while it runs — and the
+    // kill loop only reaches records that exist at that instant. Spawning the
+    // stages afterwards would leave them unkillable and wait() pending on them
+    // forever. Report as the killed stages would: 128 + SIGTERM.
+    if (canceled()) return 143;
 
     if (specs.length > 1) {
       // Only a single-command line reaches the in-process handlers below, and
@@ -585,10 +599,10 @@ export class Shell {
    * Run `src` in a SUBSHELL and return its stdout with trailing newlines
    * stripped — `$(...)`.
    *
-   * A fresh Shell over the same table and vfs, holding a COPY of the cwd and
-   * environment, is the subshell: `cd` and `export` inside `$( )` mutate that
-   * instance's fields and are dropped with it, which is exactly the isolation
-   * POSIX asks for, for free.
+   * A fresh Shell over the same table and vfs, holding a COPY of the cwd, the
+   * environment and the current `$?`, is the subshell: `cd` and `export` inside
+   * `$( )` mutate that instance's fields and are dropped with it, which is
+   * exactly the isolation POSIX asks for, for free.
    *
    * Two things are deliberately shared rather than copied. The substitution's
    * processes are recorded in the CALLER's `records`, so killing the outer
@@ -614,6 +628,7 @@ export class Shell {
       env: { ...this.env },
       substitutionDepth: this.subDepth + 1,
     });
+    sub.status.last = ctx.lastStatus;
     try {
       await sub.process(src, out, ctx.stderr, ctx.records, ctx.canceled);
     } catch (err) {

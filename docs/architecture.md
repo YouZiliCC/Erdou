@@ -118,13 +118,18 @@ Four properties of the shell's redirection and command substitution worth knowin
   list so killing the outer command kills it too; its stderr passes through; its exit status is not
   adopted (`echo $(false)` succeeds). Trailing newlines are stripped.
 
-  The one deliberate divergence from sh: **no field splitting.** A resolved substitution expands
-  exactly like a `$VAR` holding its output — one argument, whitespace intact — because an unquoted
-  `$VAR` never split here either, and a rule that holds for both is easier to rely on than two.
-  `argc $(echo a b)` therefore passes 1 argument where bash passes 2, and `echo "[$(echo 'x  y')]"`
-  keeps the double space bash's splitting collapses. This shell has no `for`, no `set --` and no
-  `$@`, so the constructs that make splitting worth its surprises do not exist here. It is stated
-  in the agent's environment brief for the same reason it is stated here.
+  The deliberate divergence from sh, one rule with two halves: **an expansion's result is never
+  field-split and never globbed.** A resolved substitution expands exactly like a `$VAR` holding
+  its output — one argument, whitespace intact, its `*`/`?` literal — because an unquoted `$VAR`
+  never split or globbed here either, and one rule that always holds is easier to rely on than
+  POSIX's quoted/unquoted split (which the AST cannot even express: var/sub parts carry no quoted
+  flag). `argc $(echo a b)` therefore passes 1 argument where bash passes 2,
+  `echo "[$(echo 'x  y')]"` keeps the double space bash's splitting collapses, and
+  `export P='*.txt'; ls $P` passes the literal `*.txt` where bash lists the matches. A glob
+  written literally in the same word still globs — `ls $DIR/*.txt` matches as usual. This shell
+  has no `for`, no `set --` and no `$@`, so the constructs that make splitting worth its surprises
+  do not exist here. It is stated in the agent's environment brief for the same reason it is
+  stated here.
 - **When two fds share a destination they share a stream.** `2>&1`, `&>f` and `1>&2` are a real
   `dup2`: the process is spawned with one `PipeStream` serving both fds (`mergeOutput`), so the
   writes land in the order the program made them. Merging two separate streams afterwards cannot

@@ -71,6 +71,33 @@ describe("expandWord", () => {
     expect(expandWord(wordAt('echo "*"d*', 1), {}, g, "/")).toEqual(["*d*"]);
   });
 
+  it("never globs a metacharacter that arrived from a $VAR or $(...) value", () => {
+    // Deliberate divergence (docs/architecture.md): POSIX globs an unquoted
+    // expansion's value, but var/sub parts carry no quoted flag, so quoted and
+    // unquoted expand identically here — and quoted must not glob.
+    const g = new Vfs({ clock: () => 0 });
+    g.writeFile("/a.txt", "1");
+    g.writeFile("/b.txt", "1");
+    // Alone: the value comes back literal (bash would list a.txt b.txt).
+    expect(expandWord(w({ t: "var", name: "P" }), { P: "*.txt" }, g, "/")).toEqual(["*.txt"]);
+    expect(expandWord(w({ t: "sub", v: "*.txt" }), {}, g, "/")).toEqual(["*.txt"]);
+    // Next to a literal glob part — which used to flip the whole word into
+    // globbing, stars and all — only the glob part's metacharacters match.
+    g.writeFile("/*.txt", "1"); // a file literally named "*.txt"
+    expect(
+      expandWord(w({ t: "var", name: "P" }, { t: "glob", v: "*" }), { P: "*." }, g, "/"),
+    ).toEqual(["*.txt"]);
+    expect(expandWord(w({ t: "sub", v: "*." }, { t: "glob", v: "*" }), {}, g, "/")).toEqual([
+      "*.txt",
+    ]);
+    // The literal glob still globs: `ls $DIR/*.txt`.
+    g.mkdir("/d");
+    g.writeFile("/d/x.txt", "1");
+    expect(
+      expandWord(w({ t: "var", name: "DIR" }, { t: "glob", v: "/*.txt" }), { DIR: "/d" }, g, "/"),
+    ).toEqual(["/d/x.txt"]);
+  });
+
   it("treats a backslash in the pattern as a filename character, not an escape", () => {
     // The escaping above is internal to this module: a backslash that came from
     // the word itself (`a\\b*`, or a variable's value) must still match a file

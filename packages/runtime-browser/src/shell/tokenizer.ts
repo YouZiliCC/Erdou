@@ -333,6 +333,15 @@ export function tokenize(src: string): Token[] {
       i += 2;
       continue;
     }
+    // An unquoted `#` where a word would start is a comment to end of line
+    // (POSIX). Only here: mid-word (`foo#bar`) it reaches readWord and stays an
+    // ordinary character, as do quoted and escaped `#`. Left unrecognized it
+    // silently became argv — `rm build.log # old artifact` passed three extra
+    // operands to rm.
+    if (c === "#") {
+      while (i < len && at(i) !== "\n") i++;
+      continue;
+    }
     // An fd prefix is a DIGIT RUN that a redirect operator follows — read whole
     // so `33>` is rejected as fd 33 rather than tokenized as the word `33` plus
     // a plain `>`. A run with no operator after it is just a word (`echo 12`).

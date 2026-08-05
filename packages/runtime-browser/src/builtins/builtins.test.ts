@@ -111,6 +111,81 @@ describe("builtins", () => {
     expect(await r.stdout.text()).toBe("c\nd\n");
   });
 
+  it("head prints ==> name <== headers when given multiple file operands", async () => {
+    const { shell, vfs } = makeShell();
+    vfs.writeFile("/a.log", "a1\na2\na3\n");
+    vfs.writeFile("/b.log", "b1\nb2\nb3\n");
+    const r = shell.execute("head -n 2 /a.log /b.log");
+    expect(await r.wait()).toBe(0);
+    expect(await r.stdout.text()).toBe("==> /a.log <==\na1\na2\n\n==> /b.log <==\nb1\nb2\n");
+  });
+
+  it("tail prints ==> name <== headers when given multiple file operands", async () => {
+    const { shell, vfs } = makeShell();
+    vfs.writeFile("/a.log", "a1\na2\na3\n");
+    vfs.writeFile("/b.log", "b1\nb2\nb3\n");
+    const r = shell.execute("tail -n 2 /a.log /b.log");
+    expect(await r.wait()).toBe(0);
+    expect(await r.stdout.text()).toBe("==> /a.log <==\na2\na3\n\n==> /b.log <==\nb2\nb3\n");
+  });
+
+  it("head continues past an unreadable operand and exits 1", async () => {
+    const { shell, vfs } = makeShell();
+    vfs.writeFile("/a.log", "a1\n");
+    const r = shell.execute("head -n 1 /missing /a.log");
+    expect(await r.wait()).toBe(1);
+    expect(await r.stderr.text()).toContain("ENOENT");
+    expect(await r.stdout.text()).toBe("==> /a.log <==\na1\n");
+  });
+
+  it("head/tail reject a non-numeric -n loudly instead of degrading", async () => {
+    const { shell, vfs } = makeShell();
+    vfs.writeFile("/lines", "a\nb\nc\n");
+
+    const h = shell.execute("head -n garbage /lines");
+    expect(await h.wait()).toBe(2);
+    expect(await h.stderr.text()).toBe("head: invalid line count 'garbage' (usage: head [-n N] [FILE...])\n");
+    expect(await h.stdout.text()).toBe("");
+
+    const t = shell.execute("tail -n garbage /lines");
+    expect(await t.wait()).toBe(2);
+    expect(await t.stderr.text()).toBe("tail: invalid line count 'garbage' (usage: tail [-n N] [FILE...])\n");
+    expect(await t.stdout.text()).toBe("");
+  });
+
+  it("kill rejects an unsupported signal flag loudly without signaling", async () => {
+    const { shell } = makeShell();
+    // Pid 999 does not exist: had SIGTERM been silently substituted and sent,
+    // stderr would carry ESRCH and the exit code would be 1.
+    const r = shell.execute("kill -USR1 999");
+    expect(await r.wait()).toBe(2);
+    expect(await r.stderr.text()).toBe("kill: unsupported signal '-USR1' (supported: HUP, INT, KILL, TERM)\n");
+
+    const ok = shell.execute("kill -9 999");
+    expect(await ok.wait()).toBe(1);
+    expect(await ok.stderr.text()).toContain("ESRCH");
+  });
+
+  it("find -type accepts only f and d, rejecting anything else loudly", async () => {
+    const { shell, vfs } = makeShell();
+    vfs.mkdir("/x");
+    vfs.writeFile("/x/f.txt", "1");
+    vfs.mkdir("/x/sub");
+
+    let r = shell.execute("find /x -type f");
+    expect(await r.wait()).toBe(0);
+    expect(await r.stdout.text()).toBe("/x/f.txt\n");
+
+    r = shell.execute("find /x -type d");
+    expect(await r.wait()).toBe(0);
+    expect(await r.stdout.text()).toBe("/x\n/x/sub\n");
+
+    r = shell.execute("find /x -type l");
+    expect(await r.wait()).toBe(1);
+    expect(await r.stderr.text()).toBe("find: unsupported -type 'l' (supported: f, d)\n");
+    expect(await r.stdout.text()).toBe("");
+  });
+
   it("find -name walks recursively", async () => {
     const { shell, vfs } = makeShell();
     vfs.mkdir("/x");

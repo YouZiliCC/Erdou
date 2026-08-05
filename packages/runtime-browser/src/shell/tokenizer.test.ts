@@ -311,6 +311,28 @@ describe("tokenize", () => {
     expect(() => tokenize("echo ${1}")).toThrow("unsupported parameter expansion: ${1}");
   });
 
+  it("strips an unquoted # that starts a word as a comment to end of line", () => {
+    // POSIX sh; left to readWord the `#` and everything after it silently
+    // became extra argv entries (`rm build.log # old` deleted a file `old`).
+    expect(tokenize("echo hi # a comment")).toEqual([
+      { type: "word", parts: [{ t: "lit", v: "echo" }] },
+      { type: "word", parts: [{ t: "lit", v: "hi" }] },
+    ]);
+    expect(tokenize("# a whole-line comment")).toEqual([]);
+    // The comment ends at the newline, not at the end of the input.
+    expect(tokenize("echo a #c\nb").filter((t) => t.type === "word")).toHaveLength(3);
+  });
+
+  it("keeps a mid-word, quoted or escaped # literal", () => {
+    expect(tokenize("echo foo#bar")[1]).toEqual({
+      type: "word",
+      parts: [{ t: "lit", v: "foo#bar" }],
+    });
+    expect(tokenize("echo '#x'")[1]).toEqual({ type: "word", parts: [{ t: "lit", v: "#x" }] });
+    expect(tokenize('echo "#x"')[1]).toEqual({ type: "word", parts: [{ t: "lit", v: "#x" }] });
+    expect(tokenize("echo \\#x")[1]).toEqual({ type: "word", parts: [{ t: "lit", v: "#x" }] });
+  });
+
   it("still emits a lone $ as a literal", () => {
     expect(tokenize("echo $")[1]).toEqual({ type: "word", parts: [{ t: "lit", v: "$" }] });
   });

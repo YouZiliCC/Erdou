@@ -66,7 +66,13 @@ export function createBuiltins(deps: BuiltinDeps): ProgramRegistry {
     for (const a of args) {
       if (a.startsWith("-")) {
         const mapped = SIGNAL_ALIASES[a.slice(1).toUpperCase()];
-        if (mapped) signal = mapped;
+        // Silently substituting SIGTERM would deliver a different signal than
+        // the one asked for; the contract supports only these four.
+        if (mapped === undefined) {
+          ctx.stderr.write(`kill: unsupported signal '${a}' (supported: HUP, INT, KILL, TERM)\n`);
+          return 2;
+        }
+        signal = mapped;
       } else {
         pids.push(Number.parseInt(a, 10));
       }

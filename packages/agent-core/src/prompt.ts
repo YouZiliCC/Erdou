@@ -246,10 +246,11 @@ function simulatedPrompt(env: EnvironmentInfo, caps: RuntimeCapabilities): strin
     // which expansions raise a syntax error is what stops the agent from
     // reaching for one and getting a hard failure it cannot diagnose.
     "- Shell quoting/expansion is a subset: `$VAR` / `${VAR}`, single and double quotes, and backslash escapes (`\\\"`, `\\$`, `\\ `, trailing-backslash line continuation) work. Backticks, `$'...'` ANSI-C quoting, positional parameters (`$1`, `$@`), `$((...))` arithmetic, and non-trivial parameter expansion (`${X:-d}`, `${X#p}`, `${X%%s}`, `${#X}`, `${X/a/b}`) are UNSUPPORTED and raise a syntax error — do that work in python or across separate commands instead.",
-    // Field splitting is the one place this shell knowingly differs from sh, so
-    // it is stated rather than left to be discovered: an agent that writes
-    // `pip install $(cat reqs.txt)` needs to know it will get ONE argument.
-    "- `$(...)` command substitution WORKS: it runs in a subshell (a `cd` or `export` inside it does not affect you), its trailing newlines are stripped, and its stderr is passed through. NOTE: the result is never field-split — like `$VAR`, a substitution always expands to exactly one argument, whitespace and all. For a list of arguments, drive it from python or a loop of separate commands instead.",
+    // Expansion results are where this shell knowingly differs from sh (never
+    // field-split, never globbed), so it is stated rather than left to be
+    // discovered: an agent that writes `pip install $(cat reqs.txt)` needs to
+    // know it will get ONE argument.
+    "- `$(...)` command substitution WORKS: it runs in a subshell (a `cd` or `export` inside it does not affect you), its trailing newlines are stripped, and its stderr is passed through. NOTE: the result is never field-split or globbed — like `$VAR`, a substitution always expands to exactly one argument, whitespace and `*`/`?` intact. For a list of arguments, drive it from python or a loop of separate commands instead.",
     extraCommands.length > 0 ? `- Extra commands: ${extraCommands.join(", ")}.` : "",
     `- Languages you can run: ${canRun}.${wasiNote}`,
     caps.virtualPorts
