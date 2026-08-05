@@ -50,11 +50,23 @@ interface ExpandedCommand {
  * what lets `2>&1` copy fd 1's target *as it stands at that point in the line*,
  * so `> log 2>&1` (both to the file) and `2>&1 > log` (stderr to the terminal,
  * stdout to the file) come out different, as POSIX says they must.
+ *
+ * `null` is `/dev/null`: the VFS boots with an empty root and has no device
+ * nodes, so the shell recognizes the PATH and discards the stream itself —
+ * otherwise `2>/dev/null`, one of the most common idioms an agent writes,
+ * failed the whole line with ENOENT before the command ever ran. Redirects
+ * only: a program that opens the path itself (`cat /dev/null`) still sees
+ * ENOENT, exactly like any other missing file.
  */
 type Sink =
   | { to: "stdout" }
   | { to: "stderr" }
+  | { to: "null" }
   | { to: "file"; file: string; append: boolean };
+
+/** Redirect targets are absolute and normalized by `expandCommand`, so the
+ *  literal path is the whole test — `cd / && echo x > dev/null` matches too. */
+const isDevNull = (file: string): boolean => file === "/dev/null";
 
 interface StageSinks {
   out: Sink;
@@ -93,7 +105,9 @@ function resolveSinks(redirects: ExpandedRedirect[]): StageSinks {
       else err = r.from === 1 ? out : err;
       continue;
     }
-    const sink: Sink = { to: "file", file: r.file, append: r.op === ">>" };
+    const sink: Sink = isDevNull(r.file)
+      ? { to: "null" }
+      : { to: "file", file: r.file, append: r.op === ">>" };
     if (r.fd === 1) out = sink;
     else err = sink;
   }
@@ -348,7 +362,7 @@ export class Shell {
   private openInputs(spec: ExpandedCommand): Uint8Array | undefined {
     let stdin: Uint8Array | undefined;
     for (const r of spec.redirects) {
-      if (r.op === "<") stdin = this.vfs.readFile(r.file);
+      if (r.op === "<") stdin = isDevNull(r.file) ? new Uint8Array() : this.vfs.readFile(r.file);
     }
     return stdin;
   }
@@ -365,6 +379,7 @@ export class Shell {
   private openTargets(specs: ExpandedCommand[]): void {
     for (const spec of specs) {
       for (const r of spec.redirects) {
+        if ((r.op === ">" || r.op === ">>") && isDevNull(r.file)) continue; // a discard, not a file
         if (r.op === ">") this.vfs.writeFile(r.file, new Uint8Array());
         else if (r.op === ">>" && !this.vfs.exists(r.file)) {
           this.vfs.writeFile(r.file, new Uint8Array());
@@ -380,8 +395,16 @@ export class Shell {
     shellStdout: PipeStream,
     shellStderr: PipeStream,
   ): Promise<void> {
+    if (sink.to === "null") return this.drainToNull(stream);
     if (sink.to === "file") return this.drainToFile(stream, sink.file, sink.append);
     return this.drainToStream(stream, sink.to === "stderr" ? shellStderr : shellStdout);
+  }
+
+  /** Read the stream to completion and drop every chunk — the write side of
+   *  `/dev/null`. The read must still happen: an undrained PipeStream would
+   *  hold the whole output in memory for the life of the process record. */
+  private async drainToNull(stream: PipeStream): Promise<void> {
+    for await (const chunk of stream.read()) void chunk;
   }
 
   /**

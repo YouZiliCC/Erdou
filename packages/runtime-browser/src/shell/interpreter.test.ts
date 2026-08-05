@@ -506,3 +506,74 @@ describe("Shell interpreter", () => {
     expect(hang?.state).toBe("killed");
   });
 });
+
+describe("/dev/null", () => {
+  // The VFS root boots empty — there is no /dev — so these used to fail the
+  // WHOLE line with ENOENT at openTargets, before the command ever ran.
+  it("2>/dev/null discards stderr and the command still runs", async () => {
+    const { shell } = makeShell();
+    const r = shell.execute("echo hi 2>/dev/null");
+    expect(await r.wait()).toBe(0);
+    expect(await r.stdout.text()).toBe("hi\n");
+    expect(await r.stderr.text()).toBe("");
+  });
+
+  it(">/dev/null discards stdout without creating a file", async () => {
+    const { shell, vfs } = makeShell();
+    const r = shell.execute("echo hi > /dev/null");
+    expect(await r.wait()).toBe(0);
+    expect(await r.stdout.text()).toBe("");
+    expect(vfs.exists("/dev/null")).toBe(false);
+    expect(vfs.exists("/dev")).toBe(false);
+  });
+
+  it("a failing first command with 2>/dev/null does not stop the rest of the line", async () => {
+    const { shell } = makeShell();
+    const r = shell.execute("cat /nope 2>/dev/null; echo done");
+    expect(await r.wait()).toBe(0);
+    expect(await r.stdout.text()).toBe("done\n");
+    expect(await r.stderr.text()).toBe("");
+  });
+
+  it("</dev/null feeds an empty stdin", async () => {
+    const { shell } = makeShell();
+    const r = shell.execute("cat < /dev/null");
+    expect(await r.wait()).toBe(0);
+    expect(await r.stdout.text()).toBe("");
+  });
+
+  it(">/dev/null 2>&1 silences both fds", async () => {
+    const { shell, table } = makeShell();
+    table.register("both", async (ctx) => {
+      ctx.stdout.write("out\n");
+      ctx.stderr.write("err\n");
+      return 0;
+    });
+    const r = shell.execute("both > /dev/null 2>&1");
+    expect(await r.wait()).toBe(0);
+    expect(await r.stdout.text()).toBe("");
+    expect(await r.stderr.text()).toBe("");
+  });
+
+  it(">>/dev/null discards too (append mode is meaningless on a discard)", async () => {
+    const { shell, vfs } = makeShell();
+    const r = shell.execute("echo hi >> /dev/null");
+    expect(await r.wait()).toBe(0);
+    expect(await r.stdout.text()).toBe("");
+    expect(vfs.exists("/dev/null")).toBe(false);
+  });
+
+  it("redirects on the in-process builtins accept /dev/null as well", async () => {
+    const { shell } = makeShell();
+    const r = shell.execute("cd /nope 2>/dev/null");
+    expect(await r.wait()).toBe(1);
+    expect(await r.stderr.text()).toBe("");
+  });
+
+  it(">/dev/null on a non-final stage still takes the output off the pipe", async () => {
+    const { shell } = makeShell();
+    const r = shell.execute("echo hi > /dev/null | cat");
+    expect(await r.wait()).toBe(0);
+    expect(await r.stdout.text()).toBe("");
+  });
+});
