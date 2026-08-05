@@ -8,16 +8,19 @@ import type { RpcShellSession } from "./kernel.js";
 const MARK = "__EX_" + Math.random().toString(36).slice(2) + "__";
 
 /** A persistent request/response shell over a runtime whose native shell is a
- *  real guest (the VM). Each command runs as `cd <cwd>; <line>; __rc=$?;
- *  printf MARK"$(pwd)"; exit $__rc` — NO subshell, so a `cd` inside <line>
- *  updates the cwd that the trailing `pwd` reports and that we thread into the
- *  next call (a fresh `exec` otherwise starts at /). */
+ *  real guest (the VM). Each command runs as `cd <cwd>` / `<line>` / `__rc=$?`
+ *  / `printf MARK"$(pwd)"` / `exit $__rc`, joined by NEWLINES — a `;` join
+ *  fused a <line> ending in `;` or `&` into a syntax error (`;;` / `&;`), an
+ *  empty <line> into a bare `; ;`, and let a trailing `#comment` swallow the
+ *  sentinel and exit — and NO subshell, so a `cd` inside <line> updates the
+ *  cwd that the trailing `pwd` reports and that we thread into the next call
+ *  (a fresh `exec` otherwise starts at /). */
 export function createExecShell(runtime: Pick<Runtime, "exec">): RpcShellSession {
   let cwd = "/";
   return {
     get cwd() { return cwd; },
     async exec(line: string) {
-      const wrapped = `cd ${shq(cwd)} 2>/dev/null; ${line}; __rc=$?; printf '${MARK}%s\\n' "$(pwd)"; exit $__rc`;
+      const wrapped = `cd ${shq(cwd)} 2>/dev/null\n${line}\n__rc=$?\nprintf '${MARK}%s\\n' "$(pwd)"\nexit $__rc`;
       const proc = await runtime.exec(wrapped);
       const [status, rawOut, stderr] = await Promise.all([proc.wait(), proc.stdout.text(), proc.stderr.text()]);
       // strip the trailing MARK sentinel line, update cwd

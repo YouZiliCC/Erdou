@@ -177,6 +177,30 @@ describe("local folder mount", () => {
     expect((root.children.get("a.txt") as MockFile).lastModified).toBe(2000); // untouched
   });
 
+  it("saveVfsToFolder skips files whose content is unchanged since the last sync — steady state writes nothing", async () => {
+    const fs = new Vfs({ clock: () => 0 });
+    const mtimes: MountMtimes = new Map();
+    const root = new MockDir("project");
+    root.children.set("a.txt", new MockFile(enc.encode("v1"), 1000));
+    root.children.set("stable.txt", new MockFile(enc.encode("untouched"), 1000));
+    await loadFolderIntoVfs(root, fs, "/", mtimes);
+
+    // ANY single workspace change triggers the debounced whole-tree save — the
+    // untouched file must not be rewritten (O(project) disk churn + an external
+    // watcher event per file, per keystroke burst).
+    fs.writeFile("/a.txt", "v2");
+    const result = await saveVfsToFolder(fs, root, "/", mtimes);
+    expect(result.written).toEqual(["/a.txt"]);
+    expect(result.conflicts).toEqual([]);
+    expect(dec.decode((root.children.get("a.txt") as MockFile).data)).toBe("v2");
+    expect((root.children.get("stable.txt") as MockFile).lastModified).toBe(1000); // untouched on disk
+
+    // Fully steady state: nothing changed anywhere -> nothing written at all.
+    const second = await saveVfsToFolder(fs, root, "/", mtimes);
+    expect(second.written).toEqual([]);
+    expect(second.conflicts).toEqual([]);
+  });
+
   it("saveVfsToFolder records the fresh disk mtime for every file it writes", async () => {
     const fs = new Vfs({ clock: () => 0 });
     const mtimes: MountMtimes = new Map();

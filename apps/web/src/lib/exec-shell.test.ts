@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { execFile } from "node:child_process";
 import { createExecShell } from "./exec-shell.js";
 import type { ProcessHandle } from "@erdou/runtime-contract";
 
@@ -43,6 +44,60 @@ function fakeRuntime(stdoutFor: (wrapped: string) => { code?: number; stdout?: s
     },
   };
 }
+
+/** Runs the WRAPPED line through a REAL POSIX shell. The fake above models the
+ *  cd/sentinel plumbing but no shell GRAMMAR — and the wrapper's join is a
+ *  grammar problem: a user line ending in `;`/`&`/`#comment`, or an empty
+ *  line, must not fuse with the bookkeeping joined after it. */
+function realShRuntime() {
+  return {
+    exec: async (wrapped: string): Promise<ProcessHandle> => {
+      const r = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
+        execFile("sh", ["-c", wrapped], (err, stdout, stderr) => {
+          const code = err === null ? 0 : typeof (err as { code?: unknown }).code === "number" ? (err as { code: number }).code : 1;
+          resolve({ code, stdout, stderr });
+        });
+      });
+      return {
+        pid: 1,
+        stdout: { read: async function* () {}, text: async () => r.stdout },
+        stderr: { read: async function* () {}, text: async () => r.stderr },
+        stdin: { write() {}, end() {} },
+        wait: async () => ({ code: r.code, signal: null }),
+        kill: async () => {},
+      } as unknown as ProcessHandle;
+    },
+  };
+}
+
+describe("createExecShell — wrapper grammar against a real sh", () => {
+  it("a trailing semicolon still runs the command (no `;;` fusion)", async () => {
+    const shell = createExecShell(realShRuntime());
+    const r = await shell.exec("echo hi;");
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("hi\n");
+  });
+
+  it("a trailing & (background job) is accepted (no `&;` fusion)", async () => {
+    const shell = createExecShell(realShRuntime());
+    const r = await shell.exec("true &");
+    expect(r.code).toBe(0);
+  });
+
+  it("an empty line is a no-op, not a syntax error", async () => {
+    const shell = createExecShell(realShRuntime());
+    const r = await shell.exec("");
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("");
+  });
+
+  it("a trailing #comment cannot swallow the pwd sentinel — cwd still advances", async () => {
+    const shell = createExecShell(realShRuntime());
+    const r = await shell.exec("cd /tmp # move over");
+    expect(r.code).toBe(0);
+    expect(shell.cwd).toBe("/tmp");
+  });
+});
 
 describe("createExecShell", () => {
   it("runs a command, returns code/stdout/stderr, and strips the pwd sentinel", async () => {

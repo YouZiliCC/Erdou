@@ -141,15 +141,40 @@ export function parseInline(text: string): Inline[] {
       i++;
       continue;
     }
-    // Inline code: `…` — literal, no nested parsing.
+    // Inline code: `…` — literal, no nested parsing. A run of N backticks is
+    // closed only by a run of exactly N (CommonMark), so ``a`b`` is ONE span
+    // containing a backtick — a naive single-char scan closed at the run's
+    // first char and emitted empty spans. One space is stripped from each end
+    // when both ends are spaces and the span isn't all spaces (CommonMark's
+    // escape for a span with edge backticks). An unclosed run stays literal,
+    // consumed whole so its chars can't half-match a shorter closer.
     if (c === "`") {
-      const end = text.indexOf("`", i + 1);
-      if (end > i) {
+      let run = 1;
+      while (text[i + run] === "`") run++;
+      const delim = "`".repeat(run);
+      let end = -1;
+      for (let j = i + run; j < text.length; ) {
+        const at = text.indexOf(delim, j);
+        if (at === -1) break;
+        let len = run;
+        while (text[at + len] === "`") len++;
+        if (len === run) {
+          end = at;
+          break;
+        }
+        j = at + len;
+      }
+      if (end !== -1) {
         flush();
-        out.push({ t: "code", v: text.slice(i + 1, end) });
-        i = end + 1;
+        let v = text.slice(i + run, end);
+        if (v.length >= 2 && v.startsWith(" ") && v.endsWith(" ") && v.trim() !== "") v = v.slice(1, -1);
+        out.push({ t: "code", v });
+        i = end + run;
         continue;
       }
+      buf += delim;
+      i += run;
+      continue;
     }
     // Link: [text](href)
     if (c === "[") {
@@ -160,6 +185,31 @@ export function parseInline(text: string): Inline[] {
         i += m[0].length;
         continue;
       }
+    }
+    // Bold-italic: ***…*** or ___…___ — em wrapping strong, CommonMark's
+    // nesting. Without this branch the `**` matcher below closed at the FIRST
+    // two chars of the closing run, swallowing the third opener into the
+    // strong content ("<strong>*bold</strong>*"). A run with no matching
+    // closer is consumed as literal here for the same reason — falling
+    // through would let `**` half-match it.
+    if (
+      (c === "*" || c === "_") &&
+      text[i + 1] === c &&
+      text[i + 2] === c &&
+      text[i + 3] !== undefined &&
+      !/\s/.test(text[i + 3]!) &&
+      (c === "*" || !isWordChar(text[i - 1]))
+    ) {
+      const end = text.indexOf(c + c + c, i + 3);
+      if (end > i + 3 && !/\s/.test(text[end - 1]!) && (c === "*" || !isWordChar(text[end + 3]))) {
+        flush();
+        out.push({ t: "em", c: [{ t: "strong", c: parseInline(text.slice(i + 3, end)) }] });
+        i = end + 3;
+        continue;
+      }
+      buf += c + c + c;
+      i += 3;
+      continue;
     }
     // Bold: **…** or __…__ (opening delimiter must not be followed by space).
     if ((c === "*" || c === "_") && text[i + 1] === c && text[i + 2] !== undefined && !/\s/.test(text[i + 2]!)) {

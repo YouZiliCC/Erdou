@@ -1,6 +1,7 @@
 import { BrowserRuntime } from "@erdou/runtime-browser";
 import { CodingAgent, type AgentEvent } from "@erdou/agent-core";
 import type { ModelGateway, ModelConfig } from "@erdou/model-gateway";
+import { ErrnoError } from "@erdou/runtime-contract";
 import type { Runtime, Snapshot, SnapshotFsNode, RuntimeEvent, FileSystemApi } from "@erdou/runtime-contract";
 import type { ToolDef } from "@erdou/agent-tools";
 import { registerLanguages, AGENT_LANGUAGES, AGENT_COMMANDS } from "./languages.js";
@@ -155,9 +156,16 @@ export function validateDelegateArgs(args: Record<string, unknown>): DelegateAge
   });
 }
 
-/** Paths of `changes` already applied by an earlier child this call. Pure. */
+/** Paths of `changes` that collide with what earlier children applied this
+ *  call: exact matches, plus any DELETE with an applied path beneath it — its
+ *  recursive rm would wipe an earlier child's applied file that never appears
+ *  in this child's own change list (the file is not in the base snapshot, so
+ *  computeChildChanges cannot expand it). Pure. */
 export function conflictPaths(changes: FileChange[], applied: ReadonlySet<string>): string[] {
-  return changes.filter((c) => applied.has(c.path)).map((c) => c.path);
+  const appliedPaths = [...applied];
+  return changes
+    .filter((c) => applied.has(c.path) || (c.kind === "delete" && appliedPaths.some((a) => a.startsWith(c.path + "/"))))
+    .map((c) => c.path);
 }
 
 const dec = new TextDecoder();
@@ -229,9 +237,14 @@ export interface ChildChanges {
  *   child removed ENTIRELY additionally yields a delete entry for the dir
  *   itself, so the merged parent does not keep an empty husk.
  *
- * Symlinks are not diffed (mirrors SnapshotReader). A directory that nets out
- * drops, and an EMPTY directory the child created is NOT merged — directories
- * materialize through their files' mkdir-parent on apply.
+ * A pre-existing symlink is not diffed (mirrors SnapshotReader); a changed
+ * path the child LEFT as a symlink — dangling or not — throws: the
+ * contract-call merge cannot recreate a symlink, and reading through it
+ * (stat follows links) would duplicate the target as a real file, so the
+ * capture fails loudly instead.
+ * A directory that nets out drops, and an EMPTY directory the child created
+ * is NOT merged — directories materialize through their files' mkdir-parent
+ * on apply.
  */
 export function computeChildChanges(base: Snapshot, fs: FileSystemApi, changedPaths: Iterable<string>): ChildChanges {
   const paths = new Set<string>();
@@ -250,7 +263,25 @@ export function computeChildChanges(base: Snapshot, fs: FileSystemApi, changedPa
   for (const p of paths) {
     const node = snapshotNodeAt(base.fs, p);
     const before = node !== null && node.type === "file" ? b64ToBytes(node.data) : null;
-    const after = fs.exists(p) && fs.stat(p).type === "file" ? fs.readFile(p) : null;
+    // lstat, not stat: stat FOLLOWS symlinks, so a child-created symlink-to-
+    // file read the TARGET's bytes and merged as a real duplicate file. The
+    // existence probe must be lstat too — exists() also follows, so a DANGLING
+    // symlink read as "absent" and silently vanished from the capture.
+    // ENOTDIR is absence too: the child may have replaced an ancestor
+    // directory with a file, taking every path beneath it with it.
+    let live: ReturnType<FileSystemApi["lstat"]> | null = null;
+    try {
+      live = fs.lstat(p);
+    } catch (err) {
+      if (!(err instanceof ErrnoError) || (err.code !== "ENOENT" && err.code !== "ENOTDIR")) throw err;
+    }
+    if (live !== null && live.type === "symlink") {
+      throw new Error(
+        `sub-agent left a symlink at ${p} — the merge cannot recreate symlinks in the real workspace, ` +
+          `so NONE of its changes were captured; have it write real file content instead of linking`,
+      );
+    }
+    const after = live !== null && live.type === "file" ? fs.readFile(p) : null;
     if (before === null && after === null) continue; // dirs/symlinks net out
     if (before !== null && after !== null && bytesEqual(before, after)) continue; // touched, net-unchanged
     if (after !== null) bytes.set(p, after);
@@ -393,9 +424,19 @@ async function runChild(deps: DelegateDeps, base: Snapshot, spec: DelegateAgentS
     // (never applied), so the parent knows what work is stranded.
     await settle();
     unsub();
-    const captured = computeChildChanges(base, scratch.fs, changedPaths);
-    changes = captured.changes;
-    bytes = captured.bytes;
+    try {
+      const captured = computeChildChanges(base, scratch.fs, changedPaths);
+      changes = captured.changes;
+      bytes = captured.bytes;
+    } catch (err) {
+      // A child whose work cannot be captured faithfully (it left a symlink —
+      // see computeChildChanges) fails LOUDLY: no partial diff, status error,
+      // the precise reason in the report. Caught here, not by the outer catch,
+      // so the scratch teardown below still runs.
+      status = "error";
+      summary = asMessage(err);
+      trace.push(line("error", "Sub-agent changes could not be captured", capDetail(summary)));
+    }
     // Tear down the throwaway runtime (kills stray child background processes).
     // Best-effort: everything observable is already captured above.
     await scratch.shutdown().catch(() => undefined);

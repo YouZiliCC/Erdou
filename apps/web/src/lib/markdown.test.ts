@@ -20,6 +20,20 @@ describe("parseInline", () => {
     ]);
   });
 
+  it("a backtick run is closed only by a run of the SAME length (CommonMark)", () => {
+    // The single-backtick scan used to close at the run's first char, turning
+    // ``x`` into two EMPTY code pills around unstyled text.
+    expect(parseInline("``x``")).toEqual([{ t: "code", v: "x" }]);
+    expect(parseInline("``a`b``")).toEqual([{ t: "code", v: "a`b" }]);
+    // One space is stripped from each end (CommonMark's escape for a span with
+    // edge backticks) — but only when both ends are spaces and the span isn't
+    // all spaces.
+    expect(parseInline("`` `code` ``")).toEqual([{ t: "code", v: "`code`" }]);
+    expect(parseInline("` `")).toEqual([{ t: "code", v: " " }]);
+    // An unclosed run stays literal.
+    expect(parseInline("``oops")).toEqual([{ t: "text", v: "``oops" }]);
+  });
+
   it("links carry a scheme-checked href; nesting works", () => {
     expect(parseInline("[**go**](https://x.com)")).toEqual([
       { t: "link", href: "https://x.com", c: [{ t: "strong", c: [{ t: "text", v: "go" }] }] },
@@ -28,6 +42,22 @@ describe("parseInline", () => {
 
   it("a soft newline becomes a break", () => {
     expect(parseInline("a\nb")).toEqual([{ t: "text", v: "a" }, { t: "br" }, { t: "text", v: "b" }]);
+  });
+
+  it("***bold-italic*** nests em around strong (CommonMark); no closing triple degrades to literal", () => {
+    // The `**` branch used to find the closing run's FIRST two stars, so the
+    // third opening star was swallowed into the strong content and the last
+    // closing star leaked out as text: "<strong>*bold</strong>*".
+    expect(parseInline("***bold***")).toEqual([{ t: "em", c: [{ t: "strong", c: [{ t: "text", v: "bold" }] }] }]);
+    expect(parseInline("___x___")).toEqual([{ t: "em", c: [{ t: "strong", c: [{ t: "text", v: "x" }] }] }]);
+    expect(parseInline("a ***b*** c")).toEqual([
+      { t: "text", v: "a " },
+      { t: "em", c: [{ t: "strong", c: [{ t: "text", v: "b" }] }] },
+      { t: "text", v: " c" },
+    ]);
+    // Unmatched runs degrade to literal text — never a half-bold mangle.
+    expect(parseInline("***oops**")).toEqual([{ t: "text", v: "***oops**" }]);
+    expect(parseInline("******")).toEqual([{ t: "text", v: "******" }]);
   });
 
   it("unmatched delimiters and 'a * b' fall through to literal text (no false emphasis)", () => {

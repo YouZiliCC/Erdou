@@ -93,6 +93,30 @@ describe("Studio.boot — a dead persistence layer is visible, not silent (D5)",
   });
 });
 
+describe("Studio — the debounced runs save reports its failure (like every other saveRuns site)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("a saveRuns rejection from the 500ms trace-append debounce lands in the systemLog, not as an unhandled rejection", async () => {
+    const studio = new Studio();
+    await studio.boot();
+    // Kill IndexedDB AFTER boot: the mid-run persistence layer dies (quota,
+    // private-browsing eviction) while trace appends keep scheduling saves.
+    vi.stubGlobal("indexedDB", undefined);
+    (studio as unknown as { scheduleRunsSave(): void }).scheduleRunsSave();
+
+    await vi.waitFor(
+      () => {
+        expect(
+          studio.systemLog.some((l) => l.kind === "error" && l.text === "Could not persist run history"),
+        ).toBe(true);
+      },
+      { timeout: 2000 },
+    );
+  });
+});
+
 describe("Studio.resetProject — every armed timer dies with the workspace (D2)", () => {
   afterEach(() => {
     vi.unstubAllGlobals();

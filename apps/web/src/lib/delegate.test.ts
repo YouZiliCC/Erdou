@@ -197,13 +197,20 @@ describe("delegate — conflict semantics (spike part b)", () => {
     expect(bFinal.summary).toContain("rejected");
   });
 
-  it("conflictPaths is a pure set intersection", () => {
+  it("conflictPaths matches exact paths, plus applied paths UNDER a delete (dir rm wipes them)", () => {
     const changes = [
       { path: "/a.ts", kind: "modify" as const, before: "x", after: "y" },
       { path: "/b.ts", kind: "create" as const, before: "", after: "b" },
     ];
     expect(conflictPaths(changes, new Set(["/a.ts"]))).toEqual(["/a.ts"]);
     expect(conflictPaths(changes, new Set(["/other.ts"]))).toEqual([]);
+    const dirDelete = [{ path: "/dir", kind: "delete" as const, before: "", after: "" }];
+    expect(conflictPaths(dirDelete, new Set(["/dir/new.txt"]))).toEqual(["/dir"]);
+    // Prefix match, not startsWith on the raw path: /dir2 is a sibling.
+    expect(conflictPaths(dirDelete, new Set(["/dir2/x.txt"]))).toEqual([]);
+    // Non-delete kinds never subtree-match — only a delete destroys what is beneath it.
+    const create = [{ path: "/dir", kind: "create" as const, before: "", after: "f" }];
+    expect(conflictPaths(create, new Set(["/dir/new.txt"]))).toEqual([]);
   });
 });
 
@@ -245,6 +252,29 @@ describe("delegate — merge fidelity: bytes, not strings", () => {
     expect(res.ok).toBe(true);
     expect(res.output).toContain("modify:/data.bin");
     expect(parent.fs.readFile("/data.bin")).toEqual(new Uint8Array([0xfe]));
+  });
+
+  it("a child that produces a symlink fails its whole capture — status error, nothing applied", async () => {
+    const parent = await parentWith({ "/data.txt": "real\n" });
+    parent.fs.symlink("/data.txt", "/link");
+    const gateway = routedGateway({
+      "clone the link": [
+        turnTool("s1", "run_shell", { command: "cp /link /link2" }),
+        turnTool("s2", "write_file", { path: "/other.txt", content: "x\n" }),
+        turnFinal("cloned"),
+      ],
+    });
+    const { tool, updates } = harness(parent, gateway);
+
+    const res = await tool.execute({ runtime: parent }, { agents: [{ role: "ln", task: "clone the link" }] });
+
+    expect(res.ok).toBe(false);
+    expect(parent.fs.exists("/link2")).toBe(false); // no duplicate real file
+    expect(parent.fs.exists("/other.txt")).toBe(false); // no partial capture either
+    const final = lastFor(updates, "ln");
+    expect(final.status).toBe("error");
+    expect(final.summary).toContain("/link2");
+    expect(res.output).toContain("failed; its changes were NOT applied");
   });
 });
 
@@ -304,6 +334,33 @@ describe("delegate — merge fidelity: whole-directory operations", () => {
     expect(lastFor(updates, "B").summary).toContain("/old/a.txt");
   });
 
+  it("a LATER child's directory delete conflicts with an earlier child's applied file UNDER that dir", async () => {
+    // The reverse order of the test above: A creates /dir/new.txt (applied),
+    // then B's `rm -rf /dir` arrives. B's diff holds delete:/dir +
+    // delete:/dir/base.txt — /dir/new.txt is not in the base snapshot, so an
+    // exact-path check finds no collision and the dir rm silently wipes A's
+    // just-applied file while the report still claims it landed.
+    const parent = await parentWith({ "/dir/base.txt": "base\n" });
+    const gateway = routedGateway({
+      "add a file": [turnTool("a1", "write_file", { path: "/dir/new.txt", content: "fresh\n" }), turnFinal("added")],
+      "clear dir": [turnTool("b1", "remove_path", { path: "/dir" }), turnFinal("cleared")],
+    });
+    const { tool, updates } = harness(parent, gateway);
+
+    const res = await tool.execute(
+      { runtime: parent },
+      { agents: [{ role: "A", task: "add a file" }, { role: "B", task: "clear dir" }] },
+    );
+
+    // A's applied file SURVIVES; B is rejected wholesale (its base.txt delete too).
+    expect(res.ok).toBe(true);
+    expect(dec.decode(parent.fs.readFile("/dir/new.txt"))).toBe("fresh\n");
+    expect(dec.decode(parent.fs.readFile("/dir/base.txt"))).toBe("base\n");
+    expect(res.output).toContain("sub-agent 2/2 (B) — CONFLICT");
+    expect(lastFor(updates, "B").status).toBe("conflict");
+    expect(lastFor(updates, "B").summary).toContain("/dir");
+  });
+
   it("a child replacing a directory with a file merges cleanly (delete-first apply order)", async () => {
     const parent = await parentWith({ "/cfg/x.txt": "x\n" });
     const gateway = routedGateway({
@@ -349,6 +406,28 @@ describe("computeChildChanges (pure diff capture)", () => {
 
     expect(changes.map((c) => `${c.kind}:${c.path}`)).toEqual(["create:/dst/a.txt", "create:/dst/deep/b.txt"]);
     expect(dec.decode(bytes.get("/dst/a.txt")!)).toBe("A\n");
+  });
+
+  it("REFUSES a child-created symlink-to-file loudly instead of duplicating the target as a real file", async () => {
+    // stat FOLLOWS symlinks, so a stat-gated `after` read the TARGET's bytes
+    // and the merge applied create:/link as a real duplicate file.
+    const baseRt = await parentWith({ "/data.txt": "real\n" });
+    const base = await baseRt.createSnapshot();
+    const scratch = await parentWith({ "/data.txt": "real\n" });
+    scratch.fs.symlink("/data.txt", "/link");
+
+    expect(() => computeChildChanges(base, scratch.fs, new Set(["/link"]))).toThrow(/symlink at \/link/);
+  });
+
+  it("REFUSES a DANGLING child-created symlink too — exists() follows links and hid it", async () => {
+    // fs.exists follows symlinks, so a link to a missing target read as
+    // "absent" and the capture silently dropped the child's symlink.
+    const baseRt = await parentWith({});
+    const base = await baseRt.createSnapshot();
+    const scratch = await parentWith({});
+    scratch.fs.symlink("/no-such-target", "/link");
+
+    expect(() => computeChildChanges(base, scratch.fs, new Set(["/link"]))).toThrow(/symlink at \/link/);
   });
 
   it("compares content by BYTES: touched-but-identical drops; a same-decoding binary change survives", async () => {

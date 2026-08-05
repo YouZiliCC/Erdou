@@ -304,6 +304,65 @@ describe("run diff — directory changes (b)", () => {
     expect(studio.runs.find((r) => r.task === "symlink to dir")!.status).toBe("review");
   });
 
+  it("a run-created symlink-to-FILE is invisible too — no phantom create carrying the target's bytes", async () => {
+    const studio = new Studio();
+    await studio.boot();
+    studio.fs.writeFile("/target.txt", "data");
+
+    let releaseModel!: () => void;
+    const modelGate = new Promise<void>((r) => (releaseModel = r));
+    let modelStarted!: () => void;
+    const started = new Promise<void>((r) => (modelStarted = r));
+    const chat = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        modelStarted();
+        await modelGate;
+        // /own2.txt, not /own.txt: the symlink-to-dir test above wrote that
+        // path, and the shared fake-indexeddb snapshot restores it at boot —
+        // an identical rewrite would net out of the diff.
+        return toolCallTurn("c1", "write_file", { path: "/own2.txt", content: "agent work" });
+      })
+      .mockResolvedValueOnce(finalTurn);
+    setGateway(studio, chat);
+
+    const turn = studio.startRun("symlink to file", DEFAULT_MODEL, "auto");
+    await started;
+    studio.fs.symlink("/target.txt", "/flink");
+    releaseModel();
+    await turn;
+
+    // The `after` reader must gate on lstat like the expansion: stat follows
+    // the link, reads the TARGET's bytes, and fabricates create:/flink.
+    expect(changeKeys(studio, "symlink to file")).toEqual(["create:/own2.txt"]);
+    expect(await studio.readFileText("/target.txt")).toBe("data");
+  });
+
+  it("reverting an overwritten BINARY file restores the original bytes, not a lossy re-encoding", async () => {
+    // NUL + invalid UTF-8 sequences: TextDecoder maps them to U+FFFD, so the
+    // display-grade `before` string cannot restore the file — writing it bakes
+    // EF BF BD replacement sequences over the real bytes.
+    const BIN = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0xfe, 0x01]);
+    expect(new TextEncoder().encode(new TextDecoder().decode(BIN))).not.toEqual(BIN);
+    const studio = new Studio();
+    await studio.boot();
+    studio.fs.writeFile("/logo.png", BIN);
+    const chat = vi
+      .fn()
+      .mockResolvedValueOnce(toolCallTurn("c1", "write_file", { path: "/logo.png", content: "not an image" }))
+      .mockResolvedValueOnce(finalTurn);
+    setGateway(studio, chat);
+
+    await studio.startRun("binary overwrite", DEFAULT_MODEL, "auto");
+    const run = studio.runs.find((r) => r.task === "binary overwrite")!;
+    expect(changeKeys(studio, "binary overwrite")).toEqual(["modify:/logo.png"]);
+    // The record must survive JSON persistence (runs-store / .erdou) intact.
+    run.changes = JSON.parse(JSON.stringify(run.changes)) as typeof run.changes;
+
+    await studio.revertChange(run.id, "/logo.png");
+    expect(studio.fs.readFile("/logo.png")).toEqual(BIN);
+  });
+
   it("revert of a file deleted via its directory recreates the missing parent directories too", async () => {
     const studio = new Studio();
     await studio.boot();

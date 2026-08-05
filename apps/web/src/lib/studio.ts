@@ -6,7 +6,15 @@ import { ENVIRONMENTS, environmentById } from "./environments.js";
 import { BUILTIN_SKILLS, scanSkills } from "./skills.js";
 import { loadApprovalMode, saveApprovalMode, loadModel, saveModel, type ApprovalMode } from "./model-config.js";
 import { getTheme, applyTheme } from "./theme.js";
-import type { RuntimeEvent, ProcessInfo, Snapshot, Runtime, FileSystemApi, Unsubscribe } from "@erdou/runtime-contract";
+import type {
+  RuntimeEvent,
+  ProcessInfo,
+  Snapshot,
+  SnapshotFsNode,
+  Runtime,
+  FileSystemApi,
+  Unsubscribe,
+} from "@erdou/runtime-contract";
 import { AGENT_LANGUAGES, AGENT_COMMANDS } from "./languages.js";
 import {
   createBrowserKernel,
@@ -122,6 +130,12 @@ export interface FileChange {
   kind: "create" | "modify" | "delete";
   before: string;
   after: string;
+  /** Present ONLY when `before` is a lossy decode of the original file
+   *  (non-UTF-8 → U+FFFD replacements): the exact pre-run bytes as base64 —
+   *  what revertChange must write instead of re-encoding the display string.
+   *  A plain string field so the record stays JSON-safe through runs-store
+   *  and the `.erdou` folder mirror. */
+  beforeBytes?: string;
 }
 
 /** One agent run — a "task thread" in the sidebar. Plain JSON (persisted). */
@@ -1486,10 +1500,18 @@ export class Studio {
   }
 
   /** Debounce-persist the run history (~500ms trailing) — trace appends arrive
-   *  in bursts, so a burst costs one IndexedDB write. */
+   *  in bursts, so a burst costs one IndexedDB write. Caught like every other
+   *  saveRuns call site: a bare `void` let a mid-run quota/aborted-transaction
+   *  rejection escape unhandled, surfacing nowhere until turn end. */
   private scheduleRunsSave(): void {
     if (this.runsSaveTimer) clearTimeout(this.runsSaveTimer);
-    this.runsSaveTimer = setTimeout(() => void this.flushRunsSave(), 500);
+    this.runsSaveTimer = setTimeout(
+      () =>
+        void this.flushRunsSave().catch((err) =>
+          this.logSystem("error", "Could not persist run history", asMessage(err)),
+        ),
+      500,
+    );
   }
 
   /** True while a debounced runs save is pending (a pagehide flush checks this). */
@@ -2040,9 +2062,12 @@ export class Studio {
     // files created inside a directory carry the actual diff; the dir entry
     // nets out null→null and drops. (SnapshotReader.read already returns null
     // for non-files on the `before` side.) Surfaced by the delegate merge,
-    // whose apply-back mkdirs hit this on every nested create.
+    // whose apply-back mkdirs hit this on every nested create. lstat, not
+    // stat, for the same reason as the expansion gate below: stat follows a
+    // run-created symlink-to-FILE and fabricates a phantom create carrying
+    // the target's bytes.
     const after = (path: string): string | null =>
-      this.fs.exists(path) && this.fs.stat(path).type === "file"
+      this.fs.exists(path) && this.fs.lstat(path).type === "file"
         ? new TextDecoder().decode(this.fs.readFile(path))
         : null;
     // Directory expansion: `rm -r`/`mv` on a directory emits ONE file.changed
@@ -2071,7 +2096,18 @@ export class Studio {
     // contains node_modules / a VM system dir) — drop them here too, so the
     // collect-time filter is airtight.
     const projectPaths = new Set([...paths].filter((p) => !this.isNonProjectPath(p)));
-    return buildFileChanges(projectPaths, (p) => before.read(p), after);
+    const changes = buildFileChanges(projectPaths, (p) => before.read(p), after);
+    // `before`/`after` are display-grade decoded strings. For a non-UTF-8
+    // `before` (TextDecoder replaced invalid sequences with U+FFFD) that
+    // string cannot restore the file, so keep the snapshot's exact bytes
+    // alongside — revertChange writes those, never a lossy re-encoding.
+    const enc = new TextEncoder();
+    for (const c of changes) {
+      if (c.kind === "create") continue;
+      const b64 = snapshotFileB64(startSnap.fs, c.path);
+      if (b64 !== null && !bytesEqual(b64ToBytes(b64), enc.encode(c.before))) c.beforeBytes = b64;
+    }
+    return changes;
   }
 
   /** Every FILE path under the live directory at `dirPath` (symlinks skipped —
@@ -2108,6 +2144,7 @@ export class Studio {
     for (const c of turnChanges) {
       const prior = byPath.get(c.path);
       const before = prior ? prior.before : c.before;
+      const beforeBytes = prior ? prior.beforeBytes : c.beforeBytes;
       const existedAtStart = prior ? prior.kind !== "create" : c.kind !== "create";
       const existsNow = c.kind !== "delete";
       if (existedAtStart === existsNow && before === c.after) {
@@ -2115,7 +2152,7 @@ export class Studio {
         continue;
       }
       const kind: FileChange["kind"] = !existedAtStart ? "create" : !existsNow ? "delete" : "modify";
-      byPath.set(c.path, { path: c.path, kind, before, after: c.after });
+      byPath.set(c.path, { path: c.path, kind, before, after: c.after, beforeBytes });
     }
     return [...byPath.values()].sort((x, y) => (x.path < y.path ? -1 : 1));
   }
@@ -2131,7 +2168,10 @@ export class Studio {
     else {
       const parent = path.slice(0, path.lastIndexOf("/"));
       if (parent !== "") await this.runtime.mkdir(parent, { recursive: true });
-      await this.runtime.writeFile(path, change.before);
+      // A binary original carries its exact bytes (see FileChange.beforeBytes);
+      // writing the display string would bake U+FFFD replacements into the
+      // file — and, via the folder auto-save, onto the user's disk.
+      await this.runtime.writeFile(path, change.beforeBytes !== undefined ? b64ToBytes(change.beforeBytes) : change.before);
     }
     this.notify();
   }
@@ -2444,6 +2484,26 @@ function dirHasContent(fs: FileSystemApi, dirPath: string): boolean {
 
 const asMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 const firstLine = (s: string): string => s.split("\n")[0] ?? "";
+
+const b64ToBytes = (b64: string): Uint8Array => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+
+const bytesEqual = (a: Uint8Array, b: Uint8Array): boolean => {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+};
+
+/** Base64 `data` of the FILE node at `path` in a snapshot tree; null when
+ *  absent or not a file. (SnapshotReader only exposes decoded-string reads —
+ *  the binary-revert guard needs the stored bytes.) */
+function snapshotFileB64(root: SnapshotFsNode, path: string): string | null {
+  let node: SnapshotFsNode | undefined = root;
+  for (const part of path.split("/").filter(Boolean)) {
+    if (node === undefined || node.type !== "directory") return null;
+    node = node.children[part];
+  }
+  return node !== undefined && node.type === "file" ? node.data : null;
+}
 
 /** Collapse whitespace/newlines to a single line and cut to `max` chars, for a
  *  one-line summary of a (possibly multi-line) args/result string. */

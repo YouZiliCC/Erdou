@@ -197,6 +197,12 @@ export async function saveVfsToFolder(
               mtimes.set(child, disk.lastModified);
               continue;
             }
+            // mtime matches the record: the disk copy IS the last-synced state,
+            // so equal bytes mean this file has nothing to say — skip it. Any
+            // single file.changed debounces a WHOLE-tree save, and rewriting
+            // every untouched file churned the disk and fired an external
+            // watcher event per file (a read is the cheaper side of the trade).
+            if (bytesEqual(new Uint8Array(await disk.arrayBuffer()), bytes)) continue;
           }
         }
       }

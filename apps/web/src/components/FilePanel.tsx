@@ -27,9 +27,14 @@ export function FilePanel({ studio }: { studio: Studio }) {
       }
       if (sel) {
         try {
-          setContent(await studio.readFileText(sel));
+          // On the VM kernel this is a real RPC, so a superseded run's read
+          // can land AFTER the newer selection's — re-check `alive` past the
+          // await or the stale content overwrites the newer file's.
+          const text = await studio.readFileText(sel);
+          if (!alive) return;
+          setContent(text);
         } catch {
-          setSel(null);
+          if (alive) setSel(null);
         }
       }
     })();

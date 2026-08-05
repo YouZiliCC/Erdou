@@ -153,6 +153,32 @@ describe("Studio.previewTransport — the value those three states are derived f
   });
 });
 
+describe("kernel-switch hygiene resets on EVERY real swap", () => {
+  // Static markup never runs effects, so the dependency is pinned at source
+  // level (the previewUrl describe's pattern). A vm profile swap (vm:base →
+  // vm:node, the agent's switch_environment tool) keeps kernelKind === "vm"
+  // while performSwitch swaps the whole runtime and bumps kernelGeneration —
+  // keyed on the kind, the reset never ran, and the next doRun closed the OLD
+  // guest's port numbers on the NEW runtime, unregistering an agent's live
+  // serve (the exact survival stop()'s contract promises).
+  const src = readFileSync(new URL("./PreviewPanel.tsx", import.meta.url), "utf8");
+
+  /** The hygiene effect: from its comment banner through its dep array. */
+  function hygieneEffect(): string {
+    const start = src.indexOf("// Kernel-switch hygiene");
+    if (start < 0) throw new Error("PreviewPanel.tsx has no kernel-switch hygiene effect — this slice is stale");
+    const end = src.indexOf("]);", start);
+    if (end < 0) throw new Error("kernel-switch hygiene effect has no dependency array — this slice is stale");
+    return src.slice(start, end + "]);".length);
+  }
+
+  it("keys on kernelGeneration (bumps on same-kind profile swaps), never kernelKind", () => {
+    const effect = hygieneEffect();
+    expect(effect).toContain("}, [studio.kernelGeneration]);");
+    expect(effect).not.toContain("[studio.kernelKind]");
+  });
+});
+
 describe("both preview URLs are built by previewUrl()", () => {
   // Static-markup rendering drops onClick, so the ↗ popup's URL is unobservable
   // in markup — and a call site that rebuilt the path inline would still render

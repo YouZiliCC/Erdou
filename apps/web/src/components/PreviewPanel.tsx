@@ -247,13 +247,15 @@ export function PreviewPanel({ studio }: { studio: Studio }) {
   // tracks so the next doRun doesn't close the other kernel's port numbers on
   // the new runtime, and drop a pending preview request aimed at the old
   // kernel's port numbers. `handledNonce` survives on purpose: an already-seen
-  // request must not re-fire on the new kernel.
+  // request must not re-fire on the new kernel. Keyed on kernelGeneration, not
+  // kernelKind: a same-kind profile swap (vm:base → vm:node) is a full runtime
+  // swap too (C2), and kernelKind wouldn't move for it.
   useEffect(() => {
     openedPorts.current = [];
     setSelectedPort(null);
     selState.current.pendingPort = null;
     prevPorts.current = [];
-  }, [studio.kernelKind]);
+  }, [studio.kernelGeneration]);
 
   async function stop(port: number): Promise<void> {
     // On the VM path the tracked pid IS the real guest server — closePort alone
