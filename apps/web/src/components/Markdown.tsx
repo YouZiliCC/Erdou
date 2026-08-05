@@ -1,5 +1,5 @@
-import { createElement, Fragment, type ReactNode } from "react";
-import { parseMarkdown, type Block, type Inline } from "../lib/markdown.js";
+import { createElement, Fragment, type CSSProperties, type ReactNode } from "react";
+import { parseMarkdown, type Block, type Inline, type TableAlign } from "../lib/markdown.js";
 
 /**
  * Render agent chat text as Markdown — to REACT NODES only (no
@@ -79,6 +79,34 @@ function renderBlock(b: Block, key: number): ReactNode {
           {renderInline(b.c)}
         </blockquote>
       );
+    case "table": {
+      const style = (a: TableAlign | undefined): CSSProperties | undefined =>
+        a ? { textAlign: a } : undefined;
+      return (
+        <table key={key} className="md-table">
+          <thead>
+            <tr>
+              {b.head.map((cell, j) => (
+                <th key={j} style={style(b.align[j])}>
+                  {renderInline(cell)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {b.rows.map((row, r) => (
+              <tr key={r}>
+                {row.map((cell, j) => (
+                  <td key={j} style={style(b.align[j])}>
+                    {renderInline(cell)}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      );
+    }
     case "hr":
       return <hr key={key} className="md-hr" />;
   }

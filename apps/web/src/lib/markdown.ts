@@ -7,8 +7,8 @@
  *
  * Covered (what Claude actually emits): paragraphs with soft line breaks, ATX
  * headings, fenced code blocks, inline code, bold, italic, links, unordered and
- * ordered lists, blockquotes, and horizontal rules. Anything ambiguous degrades
- * to plain text rather than mis-rendering.
+ * ordered lists, blockquotes, horizontal rules, and GFM pipe tables. Anything
+ * ambiguous degrades to plain text rather than mis-rendering.
  */
 
 export type Inline =
@@ -19,6 +19,8 @@ export type Inline =
   | { t: "em"; c: Inline[] }
   | { t: "link"; href: string | null; c: Inline[] };
 
+export type TableAlign = "left" | "center" | "right" | null;
+
 export type Block =
   | { t: "p"; c: Inline[] }
   | { t: "h"; level: number; c: Inline[] }
@@ -26,6 +28,7 @@ export type Block =
   | { t: "ul"; items: Inline[][] }
   | { t: "ol"; items: Inline[][] }
   | { t: "quote"; c: Inline[] }
+  | { t: "table"; align: TableAlign[]; head: Inline[][]; rows: Inline[][][] }
   | { t: "hr" };
 
 const HEADING = /^(#{1,6})\s+(.*)$/;
@@ -36,11 +39,57 @@ const QUOTE = /^>\s?/;
 const UL = /^\s*[-*+]\s+/;
 const OL = /^\s*\d+[.)]\s+/;
 
-/** True if a line opens a NON-paragraph block, so a paragraph run stops at it. */
+/** True if a line opens a NON-paragraph block, so a paragraph run stops at it.
+ *  A table header is deliberately NOT one: GFM tables cannot interrupt a
+ *  paragraph, so a pipe row is only checked at a fresh block start. */
 function isBlockStart(line: string): boolean {
   return (
     FENCE.test(line) || HEADING.test(line) || HR.test(line) || QUOTE.test(line) || UL.test(line) || OL.test(line)
   );
+}
+
+/** One GFM delimiter cell: at least one dash, optional alignment colons. */
+const DELIM_CELL = /^:?-+:?$/;
+
+/** Split one table row into trimmed cell texts. One leading and one trailing
+ *  `|` are decoration, not delimiters; `\|` is a literal pipe inside a cell
+ *  (GFM's ONLY way to put one there — a `|` splits even inside backticks). */
+function splitRow(line: string): string[] {
+  let s = line.trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|") && !s.endsWith("\\|")) s = s.slice(0, -1);
+  const cells: string[] = [];
+  let buf = "";
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!;
+    if (c === "\\" && s[i + 1] === "|") {
+      buf += "|";
+      i++;
+    } else if (c === "|") {
+      cells.push(buf.trim());
+      buf = "";
+    } else {
+      buf += c;
+    }
+  }
+  cells.push(buf.trim());
+  return cells;
+}
+
+/** Parse a delimiter row (`| :-- | :-: | --: |`) into per-column alignment, or
+ *  null if the line is not one. Requiring a literal `|` keeps `---` an HR and
+ *  a setext-style underline out of table detection. */
+function parseDelimiterRow(line: string): TableAlign[] | null {
+  if (!line.includes("|")) return null;
+  const cells = splitRow(line);
+  const align: TableAlign[] = [];
+  for (const cell of cells) {
+    if (!DELIM_CELL.test(cell)) return null;
+    const left = cell.startsWith(":");
+    const right = cell.endsWith(":");
+    align.push(left && right ? "center" : left ? "left" : right ? "right" : null);
+  }
+  return align;
 }
 
 /** A link href we're willing to emit as an `<a>`: http(s)/mailto or a
@@ -210,6 +259,28 @@ export function parseMarkdown(md: string): Block[] {
       }
       blocks.push({ t: "ol", items });
       continue;
+    }
+
+    // Table: a pipe row whose NEXT line is a delimiter row with the same cell
+    // count (GFM's recognition rule — anything less stays a paragraph).
+    if (line.includes("|")) {
+      const align = i + 1 < lines.length ? parseDelimiterRow(lines[i + 1]!) : null;
+      if (align !== null && align.length === splitRow(line).length) {
+        const head = splitRow(line).map(parseInline);
+        i += 2;
+        const rows: Inline[][][] = [];
+        // Body rows: pipe lines until a blank line, a pipeless line, or
+        // another block opener. Width is the header's: short rows pad,
+        // long rows truncate, as GFM says.
+        while (i < lines.length && lines[i]!.includes("|") && lines[i]!.trim() !== "" && !isBlockStart(lines[i]!)) {
+          const cells = splitRow(lines[i]!).slice(0, head.length);
+          while (cells.length < head.length) cells.push("");
+          rows.push(cells.map(parseInline));
+          i++;
+        }
+        blocks.push({ t: "table", align, head, rows });
+        continue;
+      }
     }
 
     // Paragraph: consecutive lines until a blank line or a new block opener.

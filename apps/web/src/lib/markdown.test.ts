@@ -114,6 +114,82 @@ describe("parseMarkdown blocks", () => {
   });
 });
 
+describe("GFM tables", () => {
+  const t = (v: string) => [{ t: "text", v }];
+
+  it("parses header, alignment and body rows", () => {
+    expect(parseMarkdown("| a | b | c |\n| :- | :-: | -: |\n| 1 | 2 | 3 |")).toEqual([
+      {
+        t: "table",
+        align: ["left", "center", "right"],
+        head: [t("a"), t("b"), t("c")],
+        rows: [[t("1"), t("2"), t("3")]],
+      },
+    ]);
+  });
+
+  it("outer pipes are optional; a bare delimiter gives no alignment", () => {
+    expect(parseMarkdown("a | b\n--- | ---\n1 | 2")).toEqual([
+      { t: "table", align: [null, null], head: [t("a"), t("b")], rows: [[t("1"), t("2")]] },
+    ]);
+  });
+
+  it("short rows pad and long rows truncate to the header width", () => {
+    const b = parseMarkdown("| a | b |\n| - | - |\n| 1 |\n| 1 | 2 | 3 |");
+    expect(b).toEqual([
+      {
+        t: "table",
+        align: [null, null],
+        head: [t("a"), t("b")],
+        rows: [
+          [t("1"), []],
+          [t("1"), t("2")],
+        ],
+      },
+    ]);
+  });
+
+  it("cells parse inline markdown and \\| is a literal pipe", () => {
+    const b = parseMarkdown("| **x** | `a\\|b` |\n| - | - |");
+    expect(b).toEqual([
+      {
+        t: "table",
+        align: [null, null],
+        head: [[{ t: "strong", c: t("x") }], [{ t: "code", v: "a|b" }]],
+        rows: [],
+      },
+    ]);
+  });
+
+  it("pipe lines WITHOUT a delimiter row stay a paragraph (no false tables)", () => {
+    const b = parseMarkdown("a | b\nc | d");
+    expect(b).toHaveLength(1);
+    expect(b[0]!.t).toBe("p");
+  });
+
+  it("a delimiter row whose cell count mismatches the header is not a table", () => {
+    const b = parseMarkdown("| a | b |\n| --- |\n| 1 | 2 |");
+    expect(b).toHaveLength(1);
+    expect(b[0]!.t).toBe("p");
+  });
+
+  it("the table ends at a blank line or a pipeless line", () => {
+    const b = parseMarkdown("| a |\n| - |\n| 1 |\n\nafter");
+    expect(b[0]!.t).toBe("table");
+    expect(b[1]).toEqual({ t: "p", c: t("after") });
+    const c = parseMarkdown("| a |\n| - |\nplain text");
+    expect(c[0]!.t).toBe("table");
+    expect(c[1]).toEqual({ t: "p", c: t("plain text") });
+  });
+
+  it("renders thead/tbody with md-table and per-column alignment", () => {
+    const out = html("| a | b |\n| :-: | - |\n| 1 | 2 |");
+    expect(out).toContain('<table class="md-table">');
+    expect(out).toMatch(/<thead><tr><th style="text-align:center">a<\/th><th>b<\/th><\/tr><\/thead>/);
+    expect(out).toMatch(/<tbody><tr><td style="text-align:center">1<\/td><td>2<\/td><\/tr><\/tbody>/);
+  });
+});
+
 describe("Markdown render (React nodes, XSS-safe)", () => {
   it("renders bold/code/list/heading to real elements", () => {
     expect(html("**b**")).toContain("<strong>b</strong>");
