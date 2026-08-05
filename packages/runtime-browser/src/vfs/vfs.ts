@@ -33,6 +33,14 @@ function deepClone(node: Inode): Inode {
   return { ...node, children };
 }
 
+function subtreeContains(dir: DirInode, target: DirInode): boolean {
+  if (dir === target) return true;
+  for (const child of dir.children.values()) {
+    if (child.type === "directory" && subtreeContains(child, target)) return true;
+  }
+  return false;
+}
+
 function statOf(node: Inode): Stat {
   const size = node.type === "file" ? node.data.length : node.type === "symlink" ? node.target.length : 0;
   return {
@@ -172,6 +180,16 @@ export class Vfs implements FileSystemApi {
           cur = dir;
         } else if (existing.type === "directory") {
           cur = existing;
+        } else if (existing.type === "symlink") {
+          // A symlink landing on a directory is walked through, matching the
+          // non-recursive path (resolvePath follows intermediate symlinks).
+          const linked = resolvePath(this.root, "/" + walked.join("/"), {
+            followSymlinks: true,
+          }).node;
+          if (linked === undefined || linked.type !== "directory") {
+            throw new ErrnoError("ENOTDIR", { path: "/" + walked.join("/"), syscall: "mkdir" });
+          }
+          cur = linked;
         } else {
           throw new ErrnoError("ENOTDIR", { path: "/" + walked.join("/"), syscall: "mkdir" });
         }
@@ -212,6 +230,11 @@ export class Vfs implements FileSystemApi {
       if (force) return;
       throw new ErrnoError("ENOENT", { path, syscall: "unlink" });
     }
+    // The root resolves to {parent: root, name: "/"}, so the delete below would
+    // remove nothing — yet emit a delete event. Refuse like rmdir("/") does.
+    if (node === this.root) {
+      throw new ErrnoError("EBUSY", { path: "/", syscall: "rmdir" });
+    }
     if (node.type === "directory" && !recursive && node.children.size > 0) {
       throw new ErrnoError("ENOTEMPTY", { path, syscall: "rmdir" });
     }
@@ -233,11 +256,23 @@ export class Vfs implements FileSystemApi {
     const targetName = intoDir ? src.name : dst.name;
     const effectivePath = intoDir ? join(normalize(to), src.name) : normalize(to);
 
-    if (src.node.type === "directory") {
-      // A directory cannot be moved into itself or one of its descendants.
-      const nf = normalize(from);
-      if (effectivePath === nf || effectivePath.startsWith(nf === "/" ? "/" : nf + "/")) {
-        throw new ErrnoError("EINVAL", { path: effectivePath, syscall: "rename" });
+    // A directory cannot be moved into itself or one of its descendants.
+    // Checked by node identity, not path strings — the destination parent is
+    // resolved through symlinks, so a lexical check can be bypassed by a link.
+    if (src.node.type === "directory" && subtreeContains(src.node, targetParent)) {
+      throw new ErrnoError("EINVAL", { path: effectivePath, syscall: "rename" });
+    }
+
+    // mv clobbers a file, never a directory: a non-directory source onto a
+    // directory is EISDIR (POSIX rename(2)); a directory source may replace an
+    // EMPTY directory only, else ENOTEMPTY.
+    const displaced = targetParent.children.get(targetName);
+    if (displaced?.type === "directory") {
+      if (src.node.type !== "directory") {
+        throw new ErrnoError("EISDIR", { path: effectivePath, syscall: "rename" });
+      }
+      if (displaced.children.size > 0) {
+        throw new ErrnoError("ENOTEMPTY", { path: effectivePath, syscall: "rename" });
       }
     }
 

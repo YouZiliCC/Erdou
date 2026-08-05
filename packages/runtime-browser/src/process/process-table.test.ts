@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { ProcessTable } from "./process-table.js";
+import { ProcessTable, MAX_SETTLED_RECORDS } from "./process-table.js";
 import type { Program, ProgramRegistry } from "./program.js";
 import { Vfs } from "../vfs/vfs.js";
 import { EventBus } from "../core/event-bus.js";
@@ -51,6 +51,20 @@ describe("ProcessTable", () => {
     const rec = table.spawn({ cmd: "boom" });
     expect(await rec.wait()).toEqual({ code: 1, signal: null });
     expect(await rec.stderr.text()).toContain("kaboom");
+  });
+
+  it("routes a synchronous throw from the executor to stderr and exit 1", async () => {
+    // A plain (non-async) Executor can throw before ever returning its
+    // promise — must behave exactly like an async rejection.
+    const { table } = make({
+      syncboom: () => {
+        throw new Error("sync-kaboom");
+      },
+    });
+    const rec = table.spawn({ cmd: "syncboom" });
+    expect(await rec.wait()).toEqual({ code: 1, signal: null });
+    expect(rec.state).toBe("exited");
+    expect(await rec.stderr.text()).toContain("sync-kaboom");
   });
 
   it("throws ENOENT for an unknown command", () => {
@@ -115,6 +129,32 @@ describe("ProcessTable", () => {
     expect((await table.wait(adopted.record.pid)).signal).toBe("SIGTERM");
     adopted.exited(0); // late exit after kill is a no-op
     expect(table.list().find((p) => p.pid === adopted.record.pid)?.state).toBe("killed");
+  });
+
+  it("evicts the oldest-settled record once more than the retention bound have settled", async () => {
+    const { table } = make({ ok: async () => 0 });
+    const first = table.spawn({ cmd: "ok" });
+    await first.wait();
+    for (let i = 0; i < MAX_SETTLED_RECORDS; i++) {
+      table.adopt({ cmd: "sh" }).exited(0);
+    }
+    expect(table.get(first.pid)).toBeUndefined();
+    expect(table.list().some((p) => p.pid === first.pid)).toBe(false);
+    // External holders keep their reference to the evicted record.
+    expect(first.state).toBe("exited");
+    expect(first.exitCode).toBe(0);
+  });
+
+  it("never evicts running records, no matter how many settle after them", async () => {
+    const { table } = make({ hang: () => new Promise<number>(() => {}) });
+    const hanging = table.spawn({ cmd: "hang" });
+    const oldest = table.adopt({ cmd: "sh" });
+    oldest.exited(0);
+    for (let i = 0; i < MAX_SETTLED_RECORDS; i++) {
+      table.adopt({ cmd: "sh" }).exited(0);
+    }
+    expect(table.get(oldest.record.pid)).toBeUndefined();
+    expect(table.get(hanging.pid)?.state).toBe("running");
   });
 
   it("adopt: kill after the process already exited is a no-op (onKill not fired)", async () => {

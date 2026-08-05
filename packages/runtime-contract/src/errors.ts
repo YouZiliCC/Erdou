@@ -10,6 +10,7 @@ export type Errno =
   | "EISDIR"
   | "EACCES"
   | "ENOTEMPTY"
+  | "EBUSY"
   | "EINVAL"
   | "ELOOP"
   | "EBADF"
@@ -24,6 +25,7 @@ const DESCRIPTIONS: Record<Errno, string> = {
   EISDIR: "illegal operation on a directory",
   EACCES: "permission denied",
   ENOTEMPTY: "directory not empty",
+  EBUSY: "device or resource busy",
   EINVAL: "invalid argument",
   ELOOP: "too many symbolic links encountered",
   EBADF: "bad file descriptor",

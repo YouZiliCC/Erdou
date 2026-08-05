@@ -65,6 +65,21 @@ describe("Vfs directories", () => {
     expect(() => vfs.mkdir("/a/b/c", { recursive: true })).not.toThrow();
   });
 
+  it("mkdir recursive follows an intermediate symlink to a directory", () => {
+    const { vfs } = make();
+    vfs.mkdir("/real");
+    vfs.symlink("/real", "/link");
+    vfs.mkdir("/link/sub", { recursive: true });
+    expect(vfs.stat("/real/sub").type).toBe("directory");
+  });
+
+  it("mkdir recursive through a symlink to a file still throws ENOTDIR", () => {
+    const { vfs } = make();
+    vfs.writeFile("/f", "x");
+    vfs.symlink("/f", "/lf");
+    expect(() => vfs.mkdir("/lf/x", { recursive: true })).toThrow(/ENOTDIR/);
+  });
+
   it("mkdir non-recursive with missing parent throws ENOENT; existing throws EEXIST", () => {
     const { vfs } = make();
     expect(() => vfs.mkdir("/a/b")).toThrow(/ENOENT/);
@@ -95,6 +110,15 @@ describe("Vfs directories", () => {
     expect(() => vfs.rm("/missing", { force: true })).not.toThrow();
     vfs.rm("/d", { recursive: true });
     expect(vfs.exists("/d")).toBe(false);
+  });
+
+  it("rm of the root throws EBUSY instead of silently no-opping", () => {
+    const { vfs } = make();
+    vfs.writeFile("/f", "keep");
+    // rm("/", recursive) used to delete nothing yet emit a phantom delete event.
+    expect(() => vfs.rm("/", { recursive: true })).toThrow(/EBUSY/);
+    expect(() => vfs.rm("/")).toThrow(/EBUSY/);
+    expect(vfs.readFileText("/f")).toBe("keep");
   });
 });
 
@@ -159,6 +183,59 @@ describe("rename", () => {
     expect(() => fs.rename("/a", "/a")).toThrow(/EINVAL/);
     fs.mkdir("/a/b", { recursive: true });
     expect(() => fs.rename("/a", "/a/b")).toThrow(/EINVAL/);
+  });
+
+  it("mv rejects a descendant destination reached through a symlink", () => {
+    const fs = new Vfs();
+    fs.mkdir("/a/b", { recursive: true });
+    fs.writeFile("/a/b/f.txt", "keep");
+    fs.symlink("/a/b", "/s");
+    expect(() => fs.rename("/a", "/s/c")).toThrow(/EINVAL/);
+    expect(fs.readFileText("/a/b/f.txt")).toBe("keep");
+    expect(fs.readdir("/").map((e) => e.name)).toEqual(["a", "s"]);
+  });
+
+  it("mv of a file onto a same-name directory child throws EISDIR, even an empty one", () => {
+    const fs = new Vfs();
+    fs.writeFile("/a", "x");
+    fs.mkdir("/b/a", { recursive: true });
+    // POSIX rename(2): newpath is a directory but oldpath is not — EISDIR
+    // (coreutils: "cannot overwrite directory with non-directory").
+    expect(() => fs.rename("/a", "/b")).toThrow(/EISDIR/);
+    expect(fs.readFileText("/a")).toBe("x");
+    expect(fs.stat("/b/a").type).toBe("directory");
+  });
+
+  it("mv of a dir onto a same-name EMPTY directory replaces it (POSIX allows)", () => {
+    const fs = new Vfs();
+    fs.mkdir("/a", { recursive: true });
+    fs.writeFile("/a/f", "1");
+    fs.mkdir("/b/a", { recursive: true });
+    fs.rename("/a", "/b");
+    expect(fs.readFileText("/b/a/f")).toBe("1");
+  });
+
+  it("mv onto a directory holding a same-name non-empty directory throws ENOTEMPTY", () => {
+    const fs = new Vfs();
+    fs.mkdir("/a", { recursive: true });
+    fs.mkdir("/b/a", { recursive: true });
+    fs.writeFile("/b/a/precious.txt", "keep");
+    expect(() => fs.rename("/a", "/b")).toThrow(/ENOTEMPTY/);
+    expect(fs.readFileText("/b/a/precious.txt")).toBe("keep");
+    expect(fs.exists("/a")).toBe(true);
+  });
+
+  it("mv still clobbers a file, plain destination and same-name child alike", () => {
+    const fs = new Vfs();
+    fs.writeFile("/f1", "new");
+    fs.writeFile("/f2", "old");
+    fs.rename("/f1", "/f2");
+    expect(fs.readFileText("/f2")).toBe("new");
+    fs.mkdir("/d");
+    fs.writeFile("/d/g", "old");
+    fs.writeFile("/g", "new");
+    fs.rename("/g", "/d");
+    expect(fs.readFileText("/d/g")).toBe("new");
   });
 
   it("plain rename (destination absent) still works", () => {

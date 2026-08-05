@@ -12,6 +12,17 @@ import type { EventBus } from "../core/event-bus.js";
 import type { Vfs } from "../vfs/vfs.js";
 import type { Program, ProgramRegistry, ProcessContext } from "./program.js";
 
+/**
+ * Bounded retention for settled records. A long-lived session spawns table
+ * entries for every shell command (plus one per pipeline stage), and each
+ * record keeps its stdio buffers alive until drained — kept forever, the
+ * table grows monotonically for the page's lifetime. Once more than this
+ * many settled records exist, the oldest-settled is dropped from the table;
+ * running records are never evicted, and holders of the record object
+ * (e.g. the shell's job list) keep their reference.
+ */
+export const MAX_SETTLED_RECORDS = 256;
+
 const SIGNAL_NUMBERS: Record<Signal, number> = {
   SIGHUP: 1,
   SIGINT: 2,
@@ -88,8 +99,17 @@ function toInfo(r: ProcessRecord): ProcessInfo {
 export class ProcessTable {
   private nextPid = 1;
   private readonly procs = new Map<number, ProcessRecord>();
+  /** Settle order — the eviction queue behind {@link MAX_SETTLED_RECORDS}. */
+  private readonly settledPids: number[] = [];
 
   constructor(private readonly deps: ProcessTableDeps) {}
+
+  private reapSettled(pid: number): void {
+    this.settledPids.push(pid);
+    while (this.settledPids.length > MAX_SETTLED_RECORDS) {
+      this.procs.delete(this.settledPids.shift()!);
+    }
+  }
 
   spawn(opts: InternalSpawnOptions): ProcessRecord {
     const program: Program | undefined = this.deps.registry.get(opts.cmd);
@@ -131,6 +151,7 @@ export class ProcessTable {
       // leave wait() unresolved.
       resolveWait({ code, signal });
       this.deps.bus.emit({ type: "process.exited", pid, code, signal });
+      this.reapSettled(pid);
     };
 
     const record: ProcessRecord = {
@@ -173,14 +194,19 @@ export class ProcessTable {
     queueMicrotask(() => {
       // If the process was killed before its body started, don't run it.
       if (settled) return;
-      program(ctx).then(
-        (code) => finish("exited", code, null),
-        (err: unknown) => {
-          const message = err instanceof Error ? err.message : String(err);
-          if (!stderr.isClosed) stderr.write(message + "\n");
-          finish("exited", 1, null);
-        },
-      );
+      // Invoked via Promise.resolve so a plain (non-async) Executor that
+      // throws before returning its promise lands in the rejection path
+      // instead of escaping the microtask as an uncaught exception.
+      Promise.resolve()
+        .then(() => program(ctx))
+        .then(
+          (code) => finish("exited", code, null),
+          (err: unknown) => {
+            const message = err instanceof Error ? err.message : String(err);
+            if (!stderr.isClosed) stderr.write(message + "\n");
+            finish("exited", 1, null);
+          },
+        );
     });
 
     return record;
@@ -228,6 +254,7 @@ export class ProcessTable {
       record.signal = signal;
       resolveWait({ code, signal });
       this.deps.bus.emit({ type: "process.exited", pid, code, signal });
+      this.reapSettled(pid);
     };
 
     const record: ProcessRecord = {
